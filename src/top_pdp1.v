@@ -287,6 +287,11 @@ module top_pdp1
     wire [11:0] cpu_pc;           // Program counter
     wire [31:0] cpu_bus_out;      // Console blinkenlights
 
+    // CPU debug outputs (TASK-DEBUG)
+    wire [15:0] cpu_debug_instr_count;  // Total instructions executed
+    wire [15:0] cpu_debug_iot_count;    // IOT instructions executed
+    wire        cpu_debug_running;       // CPU is running
+
     // CRT output signals from CPU
     wire [9:0]  cpu_pixel_x;
     wire [9:0]  cpu_pixel_y;
@@ -307,34 +312,40 @@ module top_pdp1
     // Player 2: bits 3-0 (left, right, thrust, fire)
     wire [17:0] gamepad_in;
 
+    // FIX #2 (Emard): Ispravan bit mapping prema fpg1 originalu
     // Map ULX3S buttons/switches to PDP-1 gamepad input
     // joystick_emu[7:0] from ulx3s_input module
     // [0]=left, [1]=right, [2]=thrust/up, [3]=fire/down
-    // [4]=hyperspace (directly active low, directly active high - directly active low)
+    // [4]=hyperspace, [5:7]=P2 controls (ako postoje)
+    // PDP-1 gamepad format: bit 17=CW(right), 16=CCW(left), 15=thrust, 14=fire
     assign gamepad_in = {
-        joystick_emu[0],   // bit 17 - P1 left (CW rotation)
-        joystick_emu[1],   // bit 16 - P1 right (CCW rotation)
+        joystick_emu[1],   // bit 17 - P1 CW (rotate right)
+        joystick_emu[0],   // bit 16 - P1 CCW (rotate left)
         joystick_emu[2],   // bit 15 - P1 thrust
         joystick_emu[3],   // bit 14 - P1 fire
         10'b0,             // bits 13-4 unused
-        4'b0               // bits 3-0 - P2 controls (directly active low)
+        joystick_emu[5],   // bit 3 - P2 CW (rotate right)
+        joystick_emu[4],   // bit 2 - P2 CCW (rotate left)
+        joystick_emu[6],   // bit 1 - P2 thrust
+        joystick_emu[7]    // bit 0 - P2 fire
     };
 
     // Console switches for CPU control
-    // Start button generates a pulse on reset release to auto-start execution
-    reg [2:0] start_pulse_counter;
+    // FIX #3 (Emard): Start pulse produžen na 200+ ciklusa da CPU ne propusti signal
+    // Start button generates extended pulse on reset release to auto-start execution
+    reg [7:0] start_pulse_counter;
     wire start_button_pulse;
 
     always @(posedge clk_cpu) begin
         if (~rst_cpu_n) begin
-            start_pulse_counter <= 3'd7;  // Preload counter
+            start_pulse_counter <= 8'd200;  // 200 cycles at startup
         end else if (start_pulse_counter > 0) begin
             start_pulse_counter <= start_pulse_counter - 1'b1;
         end
     end
 
-    // Generate start pulse for first few cycles after reset
-    assign start_button_pulse = (start_pulse_counter == 3'd4);
+    // Generate start pulse while counter > 0 (full 200 cycle duration)
+    assign start_button_pulse = (start_pulse_counter > 0);
 
     wire [10:0] console_switches;
     assign console_switches = {
@@ -354,7 +365,9 @@ module top_pdp1
     // Test word and address switches (directly active low)
     wire [17:0] test_word = 18'b0;
     wire [17:0] test_address = 18'o4;   // Start address: octal 4 (Spacewar! entry point)
-    wire [5:0]  sense_switches = 6'b0;
+    // FIX #1 (Emard): sense_switches spojeni na DIP switcheve za Spacewar opcije
+    // sw[3:0] = DIP switches, btn[5:4] dopunjuju do 6 bita (active low -> invert)
+    wire [5:0]  sense_switches = {~btn[5], ~btn[4], sw[3:0]};
 
     // =========================================================================
     // PDP-1 MAIN RAM (4096 x 18-bit)
@@ -426,7 +439,12 @@ module top_pdp1
         .console_switches       (console_switches),
         .test_word              (test_word),
         .test_address           (test_address),
-        .sense_switches         (sense_switches)
+        .sense_switches         (sense_switches),
+
+        // Debug outputs (TASK-DEBUG)
+        .debug_instr_count      (cpu_debug_instr_count),
+        .debug_iot_count        (cpu_debug_iot_count),
+        .debug_cpu_running      (cpu_debug_running)
     );
 
     // Map CPU outputs to test pattern signals (for CRT display)
@@ -795,6 +813,11 @@ module top_pdp1
         .search_counter_msb (crt_debug_search_counter),
         .luma1              (crt_debug_luma1),
         .rowbuff_write_count (crt_debug_rowbuff_write_count),
+        // CPU debug signals (not used in TEST_ANIMATION mode)
+        .cpu_pc             (12'd0),
+        .cpu_instr_count    (16'd0),
+        .cpu_iot_count      (16'd0),
+        .cpu_running        (1'b0),
         .uart_tx_pin  (ftdi_rxd)
     );
 `else
@@ -834,6 +857,11 @@ module top_pdp1
         .search_counter_msb (crt_debug_search_counter),
         .luma1              (crt_debug_luma1),
         .rowbuff_write_count (crt_debug_rowbuff_write_count),
+        // CPU debug signals (TASK-DEBUG)
+        .cpu_pc             (cpu_pc),
+        .cpu_instr_count    (cpu_debug_instr_count),
+        .cpu_iot_count      (cpu_debug_iot_count),
+        .cpu_running        (cpu_debug_running),
         .uart_tx_pin  (ftdi_rxd)
     );
 `endif

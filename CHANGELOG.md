@@ -1,5 +1,43 @@
 # Changelog - PDP-1 FPGA Port (ULX3S ECP5)
 
+## [2.2.0] - 2026-01-31
+
+### FEATURE: Enhanced CPU Debug Output (TASK-DEBUG)
+
+**Enhancements to CPU Module:**
+- Added `debug_instr_count` - Total instructions executed counter
+- Added `debug_iot_count` - IOT (display) instructions counter
+- Added `debug_cpu_running` - CPU running status output
+- **File:** `src/pdp1_cpu.v` lines 60-69
+
+**Enhanced Serial Debug Format:**
+- New format: `F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R`
+  - F: Frame counter (hex)
+  - PC: Program Counter (3 hex digits, 12-bit)
+  - I: Instruction count (4 hex digits)
+  - D: Display/IOT count (4 hex digits)
+  - V: pixel_valid events per frame (decimal)
+  - X/Y: Last pixel coordinates
+  - R: Running indicator (R=running, .=halted)
+- **File:** `src/serial_debug.v`
+
+**New Test ROM:**
+- Created `display_test.hex` - Simple diagonal line drawing test
+- Tests basic display IOT functionality
+- **File:** `src/rom/display_test.hex`
+
+**Purpose:**
+- Serial output will now show if CPU is:
+  - Executing instructions (I counter incrementing)
+  - Executing display commands (D counter incrementing)
+  - Running or halted (R indicator)
+- This helps diagnose static image problem:
+  - If I=0000: CPU not executing (check start_button, reset)
+  - If I increasing but D=0000: CPU executing but no display IOTs
+  - If D increasing but V=0000: IOTs executing but CDC not passing pixels
+
+---
+
 ## [2.1.0] - 2026-01-31
 
 ### MAJOR: CPU Integration (TASK-213)

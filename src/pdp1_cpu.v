@@ -61,7 +61,12 @@ module pdp1_cpu (
    input       [10:0] console_switches,            /* Commands (start/stop/continue/examine etc) */
    input       [17:0] test_word,                   /* Test word switches (1-18) */
    input       [17:0] test_address,                /* Test address switches (1-12) + extension if implemented */
-   input       [5:0]  sense_switches               /* Sense switches (1-6) */
+   input       [5:0]  sense_switches,              /* Sense switches (1-6) */
+
+   /* Debug outputs (TASK-DEBUG: CPU state monitoring) */
+   output reg  [15:0] debug_instr_count,           /* Total instructions executed (wraps at 65535) */
+   output reg  [15:0] debug_iot_count,             /* IOT instructions executed (display commands) */
+   output wire        debug_cpu_running            /* CPU is running (not halted) */
    );
 
 
@@ -185,8 +190,14 @@ begin
    halt         <= 1'b0;
    WRITE_ENABLE <= 1'b0;
    cpu_state    <= poweron_state;
+   // Debug counters reset
+   debug_instr_count <= 16'd0;
+   debug_iot_count   <= 16'd0;
 end
 endtask
+
+// Debug output: CPU running status
+assign debug_cpu_running = cpu_running;
 
 task execute_instruction;
     input [4:0] opcode;
@@ -796,6 +807,10 @@ always @(posedge clk) begin
                   i_jmp, i_jsp:  SKIP_REST_OF_INSTR <= 1'b1;
                   i_xct:         cpu_state <= read_data_bus - 3'd8;
                endcase
+
+               // Debug: Count IOT instructions (display operations)
+               if (IR[17:13] == i_iot)
+                  debug_iot_count <= debug_iot_count + 1'b1;
             end
 
          check_instruction_duration:
@@ -828,6 +843,8 @@ always @(posedge clk) begin
                WRITE_ENABLE <= 1'b0;
                PC <= PC + 1'b1;
                cpu_state <= initial_state;
+               // Debug: Count instructions executed
+               debug_instr_count <= debug_instr_count + 1'b1;
             end
       endcase
    end

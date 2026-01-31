@@ -132,6 +132,11 @@ module serial_debug (
     input  wire [10:0] search_counter_msb,  // Search counter MSBs
     input  wire [11:0] luma1,               // Luma from ring buffer output
     input  wire [15:0] rowbuff_write_count, // Non-zero pixels written to rowbuffer per frame
+    // CPU debug signals (TASK-DEBUG)
+    input  wire [11:0] cpu_pc,              // CPU Program Counter
+    input  wire [15:0] cpu_instr_count,     // CPU instructions executed
+    input  wire [15:0] cpu_iot_count,       // CPU IOT (display) instructions
+    input  wire        cpu_running,         // CPU is running
     output wire        uart_tx_pin
 );
 
@@ -186,6 +191,12 @@ module serial_debug (
     reg [15:0] latched_wren_count;
     reg [15:0] latched_rowbuff_count;
 
+    // CPU debug latches (TASK-DEBUG)
+    reg [11:0] latched_pc;
+    reg [15:0] latched_instr_count;
+    reg [15:0] latched_iot_count;
+    reg        latched_running;
+
     always @(posedge clk) begin
         if (!rst_n) begin
             latched_angle <= 8'd0;
@@ -202,6 +213,11 @@ module serial_debug (
             latched_pv_count <= 16'd0;
             latched_wren_count <= 16'd0;
             latched_rowbuff_count <= 16'd0;
+            // CPU debug init
+            latched_pc <= 12'd0;
+            latched_instr_count <= 16'd0;
+            latched_iot_count <= 16'd0;
+            latched_running <= 1'b0;
         end else begin
             // Count events
             if (pixel_avail_synced)
@@ -225,6 +241,11 @@ module serial_debug (
                 latched_rowbuff_count <= rowbuff_write_count;
                 pv_count <= 16'd0;
                 wren_count <= 16'd0;
+                // Latch CPU debug values
+                latched_pc <= cpu_pc;
+                latched_instr_count <= cpu_instr_count;
+                latched_iot_count <= cpu_iot_count;
+                latched_running <= cpu_running;
             end
         end
     end
@@ -251,13 +272,20 @@ module serial_debug (
     endfunction
 
     // =========================================================================
-    // Message buffer - "F:xxxx X:zzz Y:www V:vvvv W:wwww L:lll PP LED:bbbbbbbb\n"
+    // Message buffer - CPU Debug Format (TASK-DEBUG)
     // =========================================================================
-    // Format: Frame, X, Y, Valid count, Rowbuff Write count, Luma1 MSB, LED status
-    // W:xxxx je 6 znakova umjesto S:xxx (5 znakova) = 1 znak vise
-    // Total 56 characters
+    // Format: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R\n"
+    // F = Frame counter (hex)
+    // PC = Program Counter (hex, 3 digits for 12 bits)
+    // I = Instruction count (hex)
+    // D = Display/IOT count (hex)
+    // V = pixel_valid count per frame (decimal)
+    // X = pixel X coordinate
+    // Y = pixel Y coordinate
+    // R = Running indicator (R=running, .=halted)
+    // Total 52 characters
 
-    localparam MSG_LEN = 56;
+    localparam MSG_LEN = 52;
 
     reg [7:0] msg_buffer [0:MSG_LEN-1];
     reg [5:0] msg_index;
@@ -318,7 +346,7 @@ module serial_debug (
                     // Start sending on frame_tick rising edge
                     if (frame_tick && !frame_tick_latched) begin
                         // Prepare message buffer
-                        // Format: "F:xxxx X:zzz Y:www V:vvvv S:sss L:lll\n"
+                        // Format: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R\n"
                         msg_buffer[0]  <= "F";
                         msg_buffer[1]  <= ":";
                         msg_buffer[2]  <= hex_to_ascii(latched_frame[15:12]);
@@ -326,60 +354,58 @@ module serial_debug (
                         msg_buffer[4]  <= hex_to_ascii(latched_frame[7:4]);
                         msg_buffer[5]  <= hex_to_ascii(latched_frame[3:0]);
                         msg_buffer[6]  <= " ";
-                        msg_buffer[7]  <= "X";
-                        msg_buffer[8]  <= ":";
-                        msg_buffer[9]  <= digit_to_ascii(x_hundreds);
-                        msg_buffer[10] <= digit_to_ascii(x_tens);
-                        msg_buffer[11] <= digit_to_ascii(x_units);
-                        msg_buffer[12] <= " ";
-                        msg_buffer[13] <= "Y";
-                        msg_buffer[14] <= ":";
-                        msg_buffer[15] <= digit_to_ascii(y_hundreds);
-                        msg_buffer[16] <= digit_to_ascii(y_tens);
-                        msg_buffer[17] <= digit_to_ascii(y_units);
-                        msg_buffer[18] <= " ";
-                        // V: pixel_valid count per frame
-                        msg_buffer[19] <= "V";
-                        msg_buffer[20] <= ":";
-                        msg_buffer[21] <= digit_to_ascii(pv_thousands);
-                        msg_buffer[22] <= digit_to_ascii(pv_hundreds);
-                        msg_buffer[23] <= digit_to_ascii(pv_tens);
-                        msg_buffer[24] <= digit_to_ascii(pv_units);
-                        msg_buffer[25] <= " ";
-                        // W: rowbuffer non-zero write count per frame (decimal, 4 digits)
-                        msg_buffer[26] <= "W";
-                        msg_buffer[27] <= ":";
-                        msg_buffer[28] <= digit_to_ascii(rb_thousands);
-                        msg_buffer[29] <= digit_to_ascii(rb_hundreds);
-                        msg_buffer[30] <= digit_to_ascii(rb_tens);
-                        msg_buffer[31] <= digit_to_ascii(rb_units);
-                        msg_buffer[32] <= " ";
-                        // L: luma1 (hex, 3 digits for 12 bits)
-                        msg_buffer[33] <= "L";
-                        msg_buffer[34] <= ":";
-                        msg_buffer[35] <= hex_to_ascii(latched_luma1[11:8]);
-                        msg_buffer[36] <= hex_to_ascii(latched_luma1[7:4]);
-                        msg_buffer[37] <= hex_to_ascii(latched_luma1[3:0]);
-                        msg_buffer[38] <= " ";
-                        // P: write_ptr (hex)
-                        msg_buffer[39] <= hex_to_ascii(latched_write_ptr[5:4]);
-                        msg_buffer[40] <= hex_to_ascii(latched_write_ptr[3:0]);
-                        msg_buffer[41] <= " ";
-                        // LED: binary status (8 bits as ASCII 0/1)
-                        msg_buffer[42] <= "L";
-                        msg_buffer[43] <= "E";
-                        msg_buffer[44] <= "D";
-                        msg_buffer[45] <= ":";
-                        msg_buffer[46] <= latched_led[7] ? "1" : "0";
-                        msg_buffer[47] <= latched_led[6] ? "1" : "0";
-                        msg_buffer[48] <= latched_led[5] ? "1" : "0";
-                        msg_buffer[49] <= latched_led[4] ? "1" : "0";
-                        msg_buffer[50] <= latched_led[3] ? "1" : "0";
-                        msg_buffer[51] <= latched_led[2] ? "1" : "0";
-                        msg_buffer[52] <= latched_led[1] ? "1" : "0";
-                        msg_buffer[53] <= latched_led[0] ? "1" : "0";
-                        msg_buffer[54] <= 8'd13;  // '\r' (CR)
-                        msg_buffer[55] <= 8'd10;  // '\n' (LF)
+                        // PC: Program Counter (3 hex digits for 12 bits)
+                        msg_buffer[7]  <= "P";
+                        msg_buffer[8]  <= "C";
+                        msg_buffer[9]  <= ":";
+                        msg_buffer[10] <= hex_to_ascii(latched_pc[11:8]);
+                        msg_buffer[11] <= hex_to_ascii(latched_pc[7:4]);
+                        msg_buffer[12] <= hex_to_ascii(latched_pc[3:0]);
+                        msg_buffer[13] <= " ";
+                        // I: Instruction count (4 hex digits)
+                        msg_buffer[14] <= "I";
+                        msg_buffer[15] <= ":";
+                        msg_buffer[16] <= hex_to_ascii(latched_instr_count[15:12]);
+                        msg_buffer[17] <= hex_to_ascii(latched_instr_count[11:8]);
+                        msg_buffer[18] <= hex_to_ascii(latched_instr_count[7:4]);
+                        msg_buffer[19] <= hex_to_ascii(latched_instr_count[3:0]);
+                        msg_buffer[20] <= " ";
+                        // D: Display/IOT count (4 hex digits)
+                        msg_buffer[21] <= "D";
+                        msg_buffer[22] <= ":";
+                        msg_buffer[23] <= hex_to_ascii(latched_iot_count[15:12]);
+                        msg_buffer[24] <= hex_to_ascii(latched_iot_count[11:8]);
+                        msg_buffer[25] <= hex_to_ascii(latched_iot_count[7:4]);
+                        msg_buffer[26] <= hex_to_ascii(latched_iot_count[3:0]);
+                        msg_buffer[27] <= " ";
+                        // V: pixel_valid count per frame (decimal)
+                        msg_buffer[28] <= "V";
+                        msg_buffer[29] <= ":";
+                        msg_buffer[30] <= digit_to_ascii(pv_thousands);
+                        msg_buffer[31] <= digit_to_ascii(pv_hundreds);
+                        msg_buffer[32] <= digit_to_ascii(pv_tens);
+                        msg_buffer[33] <= digit_to_ascii(pv_units);
+                        msg_buffer[34] <= " ";
+                        // X: pixel X coordinate
+                        msg_buffer[35] <= "X";
+                        msg_buffer[36] <= ":";
+                        msg_buffer[37] <= digit_to_ascii(x_hundreds);
+                        msg_buffer[38] <= digit_to_ascii(x_tens);
+                        msg_buffer[39] <= digit_to_ascii(x_units);
+                        msg_buffer[40] <= " ";
+                        // Y: pixel Y coordinate
+                        msg_buffer[41] <= "Y";
+                        msg_buffer[42] <= ":";
+                        msg_buffer[43] <= digit_to_ascii(y_hundreds);
+                        msg_buffer[44] <= digit_to_ascii(y_tens);
+                        msg_buffer[45] <= digit_to_ascii(y_units);
+                        msg_buffer[46] <= " ";
+                        // R: Running indicator
+                        msg_buffer[47] <= latched_running ? "R" : ".";
+                        msg_buffer[48] <= " ";
+                        msg_buffer[49] <= 8'd13;  // '\r' (CR)
+                        msg_buffer[50] <= 8'd10;  // '\n' (LF)
+                        msg_buffer[51] <= 8'd0;   // Padding
 
                         msg_index <= 6'd0;
                         state     <= ST_SEND;
