@@ -31,7 +31,7 @@ module pixel_ring_buffer
     localparam DEPTH = 1024;        // Depth per BRAM instance
     localparam WIDTH = 32;          // Data width: 10-bit Y, 10-bit X, 12-bit luma
     localparam ADDR_WIDTH = 10;     // log2(1024) = 10 bits
-    localparam TAP_DISTANCE = 128;  // Distance between taps
+    localparam TAP_DISTANCE = 1024; // Distance between taps (FIX: povećano s 128)
 
     // Write pointer - shared across all memories
     reg [ADDR_WIDTH-1:0] wrptr = 0;

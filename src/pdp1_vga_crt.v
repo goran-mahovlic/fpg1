@@ -282,19 +282,19 @@ always @(posedge clk) begin
 
      begin
      /* Dimming old pixels at the points where ring buffers connect. They are stored into registers and connected: 1->2, 2->3, 3->4, 4->1 */
-     /* DEBUG: DIMMING ISKLJUČEN - pikseli ostaju na maksimalnoj luminoznosti */
-     shiftout_1 <= luma_4[11:4] ? { pixel_4_y, pixel_4_x, luma_4 } : 0;
-     shiftout_2 <= luma_1[11:4] ? { pixel_1_y, pixel_1_x, luma_1 } : 0;
-     shiftout_3 <= luma_2[11:4] ? { pixel_2_y, pixel_2_x, luma_2 } : 0;
-     shiftout_4 <= luma_3[11:4] ? { pixel_3_y, pixel_3_x, luma_3 } : 0;
+     /* FIX: Dimming VRAĆEN - phosphor decay svakih 8 prolaza */
+     shiftout_1 <= luma_4[11:4] ? { pixel_4_y, pixel_4_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_4) : luma_4 } : 0;
+     shiftout_2 <= luma_1[11:4] ? { pixel_1_y, pixel_1_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_1) : luma_1 } : 0;
+     shiftout_3 <= luma_2[11:4] ? { pixel_2_y, pixel_2_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_2) : luma_2 } : 0;
+     shiftout_4 <= luma_3[11:4] ? { pixel_3_y, pixel_3_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_3) : luma_3 } : 0;
 
      /* Add new pixel */
 
      /* If we didn't find a pixel on one of the taps withing 1024 clock cycles (inter-tap distance), assume there is
         nothing to update and once we find a dark pixel we can re-use, add the current one to that position */
-     /* DEBUG: Smanjen search_counter threshold na 64 za brze dodavanje piksela */
+     /* FIX: search_counter threshold vraćen na 1024 (TAP_DISTANCE) */
 
-     if (buffer_write_ptr != buffer_read_ptr && search_counter > 64 && (!luma_1[11:4] || !luma_2[11:4] || !luma_3[11:4] || !luma_4[11:4]))
+     if (buffer_write_ptr != buffer_read_ptr && search_counter > 1024 && (!luma_1[11:4] || !luma_2[11:4] || !luma_3[11:4] || !luma_4[11:4]))
      begin
          if (luma_4[11:4] == 0)
                shiftout_1 <= { { next_pixel_y, next_pixel_x, 12'd4095 } };
