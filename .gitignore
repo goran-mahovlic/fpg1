@@ -1,0 +1,19 @@
+# Build artifacts
+build/*.json
+build/*.log
+*.vcd
+*.fst
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.tmp
+*.bak
