@@ -96,7 +96,7 @@ PDP1_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
 PDP1_SV_FILES    := $(SRC_DIR)/ecp5pll.sv \
                     $(SRC_DIR)/clk_25_shift_pixel_cpu.sv
 
-# PDP-1 Verilog source files
+# PDP-1 Verilog source files (BASIC - bez ESP32 OSD)
 PDP1_V_FILES     := $(SRC_DIR)/top_pdp1.v \
                     $(SRC_DIR)/clock_domain.v \
                     $(SRC_DIR)/ulx3s_input.v \
@@ -109,11 +109,26 @@ PDP1_V_FILES     := $(SRC_DIR)/top_pdp1.v \
                     $(SRC_DIR)/pdp1_terminal_charset.v \
                     $(SRC_DIR)/vga2dvid.v \
                     $(SRC_DIR)/tmds_encoder.v \
-                    $(SRC_DIR)/esp32_spi_slave.v \
+                    $(EMARD_VIDEO)/fake_differential.v
+
+# =============================================================================
+# PDP-1 + ESP32 OSD KONFIGURACIJA
+# =============================================================================
+PDP1_ESP32_PROJECT     := pdp1_esp32
+PDP1_ESP32_TOP_MODULE  := top_pdp1
+PDP1_ESP32_JSON_FILE   := $(BUILD_DIR)/$(PDP1_ESP32_PROJECT).json
+PDP1_ESP32_CONFIG_FILE := $(BUILD_DIR)/$(PDP1_ESP32_PROJECT).config
+PDP1_ESP32_BIT_FILE    := $(BUILD_DIR)/$(PDP1_ESP32_PROJECT).bit
+PDP1_ESP32_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
+
+# ESP32 OSD moduli
+ESP32_OSD_FILES  := $(SRC_DIR)/esp32_spi_slave.v \
                     $(SRC_DIR)/esp32_osd_buffer.v \
                     $(SRC_DIR)/esp32_osd_renderer.v \
-                    $(SRC_DIR)/esp32_osd.v \
-                    $(EMARD_VIDEO)/fake_differential.v
+                    $(SRC_DIR)/esp32_osd.v
+
+# PDP-1 + ESP32 - svi Verilog source files
+PDP1_ESP32_V_FILES := $(PDP1_V_FILES) $(ESP32_OSD_FILES)
 
 # =============================================================================
 # TEST PATTERN KONFIGURACIJA (TASK-125)
@@ -314,6 +329,86 @@ pdp1_prog: $(PDP1_BIT_FILE)
 pdp1_prog_flash: $(PDP1_BIT_FILE)
 	@echo "========================================"
 	@echo "UPLOAD PDP-1 (FLASH)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) -f $<
+
+# =============================================================================
+# PDP-1 + ESP32 OSD TARGETS
+# =============================================================================
+# Build flow za PDP-1 emulator s ESP32 OSD sustavom
+
+.PHONY: pdp1_esp32 pdp1_esp32_synth pdp1_esp32_pnr pdp1_esp32_bit pdp1_esp32_prog
+
+# Kompletni PDP-1 + ESP32 build
+pdp1_esp32: pdp1_esp32_bit
+	@echo "========================================"
+	@echo "PDP-1 + ESP32 OSD build zavrsen!"
+	@echo "Bitstream: $(PDP1_ESP32_BIT_FILE)"
+	@echo "Za upload: make pdp1_esp32_prog"
+	@echo "========================================"
+
+# PDP-1 + ESP32 sinteza
+pdp1_esp32_synth: $(PDP1_ESP32_JSON_FILE)
+
+$(PDP1_ESP32_JSON_FILE): $(PDP1_SV_FILES) $(PDP1_ESP32_V_FILES) | $(BUILD_DIR)
+	@echo "========================================"
+	@echo "SINTEZA: $(PDP1_ESP32_PROJECT) (s ESP32 OSD)"
+	@echo "========================================"
+	@echo "SystemVerilog: $(PDP1_SV_FILES)"
+	@echo "Verilog: $(PDP1_ESP32_V_FILES)"
+	@echo "========================================"
+	$(YOSYS) -p "\
+		read_verilog -sv $(PDP1_SV_FILES); \
+		read_verilog -DESP32_OSD -I$(SRC_DIR) $(PDP1_ESP32_V_FILES); \
+		hierarchy -top $(PDP1_ESP32_TOP_MODULE); \
+		synth_ecp5 $(YOSYS_FLAGS) -json $@" \
+		2>&1 | tee $(BUILD_DIR)/pdp1_esp32_synth.log
+	@echo "Sinteza zavrsena: $@"
+
+# PDP-1 + ESP32 place & route
+pdp1_esp32_pnr: $(PDP1_ESP32_CONFIG_FILE)
+
+$(PDP1_ESP32_CONFIG_FILE): $(PDP1_ESP32_JSON_FILE) $(PDP1_ESP32_LPF_FILE)
+	@echo "========================================"
+	@echo "PLACE & ROUTE: $(PDP1_ESP32_PROJECT)"
+	@echo "========================================"
+	$(NEXTPNR) \
+		--$(FPGA_SIZE) \
+		--package $(FPGA_PACKAGE) \
+		--speed $(FPGA_SPEED) \
+		--json $(PDP1_ESP32_JSON_FILE) \
+		--lpf $(PDP1_ESP32_LPF_FILE) \
+		--textcfg $@ \
+		$(NEXTPNR_FLAGS) \
+		2>&1 | tee $(BUILD_DIR)/pdp1_esp32_pnr.log
+	@echo "Place & Route zavrseno: $@"
+
+# PDP-1 + ESP32 bitstream
+pdp1_esp32_bit: $(PDP1_ESP32_BIT_FILE)
+
+$(PDP1_ESP32_BIT_FILE): $(PDP1_ESP32_CONFIG_FILE)
+	@echo "========================================"
+	@echo "BITSTREAM: $(PDP1_ESP32_PROJECT)"
+	@echo "========================================"
+	$(ECPPACK) \
+		--idcode $(FPGA_IDCODE) \
+		--input $< \
+		--bit $@ \
+		$(ECPPACK_FLAGS)
+	@echo "Bitstream generiran: $@"
+	@ls -lh $@
+
+# PDP-1 + ESP32 upload (SRAM)
+pdp1_esp32_prog: $(PDP1_ESP32_BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD PDP-1 + ESP32 (SRAM)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) $<
+
+# PDP-1 + ESP32 upload (FLASH)
+pdp1_esp32_prog_flash: $(PDP1_ESP32_BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD PDP-1 + ESP32 (FLASH)"
 	@echo "========================================"
 	$(PROGRAMMER) -b $(BOARD) -f $<
 

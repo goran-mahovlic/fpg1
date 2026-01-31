@@ -48,15 +48,18 @@ module top_pdp1
     output wire [3:0]  gpdi_dn,        // Differential negative
 
     // ==== WiFi GPIO0 (ESP32 keep-alive) ====
-    output wire        wifi_gpio0,
+    output wire        wifi_gpio0
 
+`ifdef ESP32_OSD
     // ==== ESP32 SPI Interface (OSD) ====
+    ,
     input  wire        esp32_spi_clk,
     input  wire        esp32_spi_mosi,
     output wire        esp32_spi_miso,
     input  wire        esp32_spi_cs_n,
     output wire        esp32_osd_irq,
     input  wire        esp32_ready
+`endif
 );
 
     // =========================================================================
@@ -249,6 +252,10 @@ module top_pdp1
     // ESP32 OSD INTEGRATION
     // =========================================================================
     // OSD signals
+`ifdef ESP32_OSD
+    // =========================================================================
+    // ESP32 OSD SIGNALS
+    // =========================================================================
     wire [23:0] osd_video_out;
     wire        osd_de_out, osd_hs_out, osd_vs_out;
     wire [31:0] osd_status;
@@ -295,11 +302,12 @@ module top_pdp1
         .joystick_0   (osd_joystick_0),
         .joystick_1   (osd_joystick_1)
     );
+`endif
 
     // =========================================================================
     // VGA RGB OUTPUT SELECTION
     // =========================================================================
-    // SW[3] = 0: CRT output with OSD overlay
+    // SW[3] = 0: CRT output (with OSD if enabled)
     // SW[3] = 1: Test pattern (debugging)
     wire [7:0] vga_r, vga_g, vga_b;
 
@@ -308,14 +316,21 @@ module top_pdp1
     wire [7:0] test_g = v_counter[7:0];
     wire [7:0] test_b = {h_counter[3:0], v_counter[3:0]};
 
-    // OSD overlay output
-    wire [7:0] osd_r = osd_video_out[23:16];
-    wire [7:0] osd_g = osd_video_out[15:8];
-    wire [7:0] osd_b = osd_video_out[7:0];
+`ifdef ESP32_OSD
+    // OSD overlay output (when ESP32 OSD is enabled)
+    wire [7:0] final_r = osd_video_out[23:16];
+    wire [7:0] final_g = osd_video_out[15:8];
+    wire [7:0] final_b = osd_video_out[7:0];
+`else
+    // Direct CRT output (no OSD)
+    wire [7:0] final_r = crt_r;
+    wire [7:0] final_g = crt_g;
+    wire [7:0] final_b = crt_b;
+`endif
 
-    assign vga_r = sw[3] ? test_r : osd_r;
-    assign vga_g = sw[3] ? test_g : osd_g;
-    assign vga_b = sw[3] ? test_b : osd_b;
+    assign vga_r = sw[3] ? test_r : final_r;
+    assign vga_g = sw[3] ? test_g : final_g;
+    assign vga_b = sw[3] ? test_b : final_b;
 
     // =========================================================================
     // HDMI OUTPUT (VGA -> DVID/TMDS CONVERSION)
