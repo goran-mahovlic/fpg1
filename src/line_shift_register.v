@@ -1,13 +1,13 @@
 // line_shift_register.v
 // BRAM-based circular buffer shift register for CRT phosphor blur
-// TASK-191: Implements delayed tap at distance 1685
+// TASK-191: Implements delayed tap at distance 800
 // Author: Jelena Horvat (REGOC tim)
 //
 // This module replaces Altera's altshift_taps megafunction with
 // a portable BRAM-inferred circular buffer for ECP5/Yosys synthesis.
 //
-// Tap distance 1685 + 3 external registers = 1688 total delay
-// (matches 1280x1024@60Hz row timing)
+// Tap distance 800 + 3 external registers = 803 total delay
+// (matches 640x480@60Hz row timing)
 
 module line_shift_register
 (
@@ -18,8 +18,8 @@ module line_shift_register
 );
 
     // Parameters
-    localparam TAP_DISTANCE = 1685;
-    localparam ADDR_WIDTH = 11;          // 2^11 = 2048 > 1685
+    localparam TAP_DISTANCE = 800;
+    localparam ADDR_WIDTH = 10;          // 2^10 = 1024 > 800
     localparam MEM_DEPTH = 1 << ADDR_WIDTH;
 
     // BRAM inference - registered outputs for proper BRAM mapping
