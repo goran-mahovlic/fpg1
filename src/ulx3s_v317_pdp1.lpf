@@ -141,3 +141,75 @@ FREQUENCY PORT "clk_25mhz" 25 MHZ;
 # =============================================================================
 # END OF CONSTRAINT FILE
 # =============================================================================
+# =============================================================================
+# ULX3S v3.1 ESP32 SPI Pin Constraints for OSD
+# =============================================================================
+# TASK-208: ESP32 SPI Pin Assignment za OSD integraciju
+# Autorica: Kosjenka Vukovic, REGOC tim
+# Datum: 2026-01-31
+#
+# HARDWARE: ULX3S v3.1.x (LFE5U-85F-6BG381C)
+# Reference: https://github.com/emard/ulx3s
+#
+# ESP32 SPI komunikacija za OSD (On-Screen Display)
+# Koristi GPIO pinove na GP/GN11-13 konektoru
+# =============================================================================
+
+# =============================================================================
+# ESP32 SPI Interface for OSD
+# =============================================================================
+# SPI Mode 0 (CPOL=0, CPHA=0)
+# Max SPI clock: 10 MHz
+# =============================================================================
+
+# ESP32 SPI Clock (directly driven by ESP32)
+# Using GPIO connector pins - avoiding wifi_gpio0 (L2) conflict
+LOCATE COMP "esp32_spi_clk"  SITE "E4";   # GP11 on J1 connector
+IOBUF  PORT "esp32_spi_clk"  PULLMODE=DOWN IO_TYPE=LVCMOS33;
+
+# ESP32 SPI MOSI (Master Out, Slave In - FPGA receives)
+LOCATE COMP "esp32_spi_mosi" SITE "D3";   # GN11 on J1 connector
+IOBUF  PORT "esp32_spi_mosi" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+
+# ESP32 SPI MISO (Master In, Slave Out - FPGA transmits)
+LOCATE COMP "esp32_spi_miso" SITE "C3";   # GP12 on J1 connector
+IOBUF  PORT "esp32_spi_miso" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=8;
+
+# ESP32 SPI Chip Select (Active Low)
+LOCATE COMP "esp32_spi_cs_n" SITE "B3";   # GN12 on J1 connector
+IOBUF  PORT "esp32_spi_cs_n" PULLMODE=UP IO_TYPE=LVCMOS33;
+
+# ESP32 OSD IRQ (FPGA -> ESP32 interrupt request)
+LOCATE COMP "esp32_osd_irq"  SITE "E3";   # GP13 on J1 connector
+IOBUF  PORT "esp32_osd_irq"  PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=8;
+
+# ESP32 Ready Signal (ESP32 -> FPGA handshake)
+LOCATE COMP "esp32_ready"    SITE "F4";   # GN13 on J1 connector
+IOBUF  PORT "esp32_ready"    PULLMODE=DOWN IO_TYPE=LVCMOS33;
+
+# =============================================================================
+# Timing Constraints for ESP32 SPI
+# =============================================================================
+# SPI clock is asynchronous to system clock
+# Max frequency: 10 MHz from ESP32
+# =============================================================================
+
+# Note: SPI clock is treated as asynchronous
+# CDC (Clock Domain Crossing) handled in esp32_spi_slave.v with synchronizers
+
+# =============================================================================
+# Pin Assignment Summary (J1 GPIO Connector):
+# =============================================================================
+#   Signal          | Site | J1 Pin | Direction | Description
+#   ----------------|------|--------|-----------|----------------------------
+#   esp32_spi_clk   | E4   | GP11   | Input     | SPI clock from ESP32
+#   esp32_spi_mosi  | D3   | GN11   | Input     | Data from ESP32
+#   esp32_spi_miso  | C3   | GP12   | Output    | Data to ESP32
+#   esp32_spi_cs_n  | B3   | GN12   | Input     | Chip select (active low)
+#   esp32_osd_irq   | E3   | GP13   | Output    | Interrupt to ESP32
+#   esp32_ready     | F4   | GN13   | Input     | Handshake from ESP32
+# =============================================================================
+
+# =============================================================================
+# END OF ESP32 CONSTRAINT FILE
+# =============================================================================

@@ -107,9 +107,9 @@ module esp32_osd_renderer (
     // Classic 8x8 bitmap font, MSB is leftmost pixel
     reg [7:0] font_rom [0:767];  // 96 characters * 8 rows
 
+    integer i;
     initial begin
         // Initialize all to zero
-        integer i;
         for (i = 0; i < 768; i = i + 1) font_rom[i] = 8'h00;
 
         // Character 0x20: SPACE

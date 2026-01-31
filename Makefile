@@ -109,6 +109,10 @@ PDP1_V_FILES     := $(SRC_DIR)/top_pdp1.v \
                     $(SRC_DIR)/pdp1_terminal_charset.v \
                     $(SRC_DIR)/vga2dvid.v \
                     $(SRC_DIR)/tmds_encoder.v \
+                    $(SRC_DIR)/esp32_spi_slave.v \
+                    $(SRC_DIR)/esp32_osd_buffer.v \
+                    $(SRC_DIR)/esp32_osd_renderer.v \
+                    $(SRC_DIR)/esp32_osd.v \
                     $(EMARD_VIDEO)/fake_differential.v
 
 # =============================================================================

@@ -41,19 +41,21 @@ module esp32_osd #(
 
     // Handshake signals
     output        osd_irq,            // Interrupt to ESP32
-    input         esp_ready,          // ESP32 ready signal
+    input         esp32_ready,        // ESP32 ready signal
 
     // Video Input (from core)
     input  [23:0] video_in,
-    input         video_de,
-    input         video_hs,
-    input         video_vs,
+    input         de_in,
+    input         hs_in,
+    input         vs_in,
+    input  [11:0] pixel_x,            // Current pixel X coordinate
+    input  [11:0] pixel_y,            // Current pixel Y coordinate
 
     // Video Output (with OSD overlay)
     output [23:0] video_out,
-    output        video_de_out,
-    output        video_hs_out,
-    output        video_vs_out,
+    output        de_out,
+    output        hs_out,
+    output        vs_out,
 
     // Control outputs
     output [31:0] status,
@@ -143,10 +145,6 @@ module esp32_osd #(
 
     // IRQ generation
     reg         irq_pending;
-
-    // Pixel counters
-    reg  [11:0] pixel_x;
-    reg  [11:0] pixel_y;
 
     // =========================================================================
     // SPI Slave Instance
@@ -385,40 +383,6 @@ module esp32_osd #(
     end
 
     // =========================================================================
-    // Pixel Counter (Video Domain)
-    // =========================================================================
-    reg        video_hs_d1;
-    reg        video_vs_d1;
-
-    wire hs_falling = video_hs_d1 & ~video_hs;
-    wire vs_falling = video_vs_d1 & ~video_vs;
-
-    always @(posedge clk_video or negedge rst_n) begin
-        if (!rst_n) begin
-            pixel_x     <= 12'd0;
-            pixel_y     <= 12'd0;
-            video_hs_d1 <= 1'b1;
-            video_vs_d1 <= 1'b1;
-        end else begin
-            video_hs_d1 <= video_hs;
-            video_vs_d1 <= video_vs;
-
-            // Horizontal counter
-            if (hs_falling) begin
-                pixel_x <= 12'd0;
-                pixel_y <= pixel_y + 12'd1;
-            end else if (video_de) begin
-                pixel_x <= pixel_x + 12'd1;
-            end
-
-            // Vertical reset
-            if (vs_falling) begin
-                pixel_y <= 12'd0;
-            end
-        end
-    end
-
-    // =========================================================================
     // Video Pipeline (match renderer 2-cycle latency)
     // =========================================================================
     reg [23:0] video_d1, video_d2;
@@ -439,11 +403,11 @@ module esp32_osd #(
         end else begin
             video_d1 <= video_in;
             video_d2 <= video_d1;
-            de_d1    <= video_de;
+            de_d1    <= de_in;
             de_d2    <= de_d1;
-            hs_d1    <= video_hs;
+            hs_d1    <= hs_in;
             hs_d2    <= hs_d1;
-            vs_d1    <= video_vs;
+            vs_d1    <= vs_in;
             vs_d2    <= vs_d1;
         end
     end
@@ -498,9 +462,9 @@ module esp32_osd #(
     end
 
     assign video_out    = video_mixed;
-    assign video_de_out = de_d3;
-    assign video_hs_out = hs_d3;
-    assign video_vs_out = vs_d3;
+    assign de_in_out = de_d3;
+    assign hs_in_out = hs_d3;
+    assign vs_in_out = vs_d3;
 
     // Control outputs
     assign status     = status_reg;
