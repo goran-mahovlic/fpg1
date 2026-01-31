@@ -126,6 +126,7 @@ reg prev_wren_i, prev_prev_wren_i, wren;                       /* Store write en
 reg inside_visible_area;                                       /* Indicate if we are currently within area which is visible */
 
 
+
 /////////////////  ASSIGNMENTS  ///////////////////
 
 assign p21_w = p21;
@@ -148,9 +149,10 @@ pdp1_vga_rowbuffer rowbuffer(
 
 
 /* To enable blurring, create 3 1-line shift registers */
+/* FIX: Uklonjen current_x > 0 uvjet koji je gubio prvi piksel svake linije */
 line_shift_register line1(.clock(clk), .shiftout(p13_w), .shiftin(p21_w));
 line_shift_register line2(.clock(clk), .shiftout(p23_w), .shiftin(p31_w));
-line_shift_register line3(.clock(clk), .shiftout(p33_w), .shiftin(current_x > 0 ? rowbuff_rdata : 0));
+line_shift_register line3(.clock(clk), .shiftout(p33_w), .shiftin(rowbuff_rdata));
 
 
 /* Create 4 pixel ring buffers with 8 taps each and connect them in a loop (a.k.a. hadron collider style) */
@@ -176,25 +178,52 @@ always @(posedge clk) begin
      { pixel_4_y, pixel_4_x, luma_4 } <= shiftout_4_w;
 
      if(wren) begin
+          // =======================================================================
+          // KOORDINATNA TRANSFORMACIJA - ovisi o modu rada
+          // =======================================================================
+          // TEST_ANIMATION: direktne koordinate (X, Y) - bez transformacije
+          // PDP-1 MODE: origin u GORNJEM DESNOM kutu
+          //   ~pixel_x_i invertira X os (0→1023, 1023→0)
+          //   Swap X↔Y rotira koordinate za ispravnu orijentaciju
+          //   Rezultat: { buffer_pixel_y, buffer_pixel_x } = { ~X, Y }
 
+`ifdef TEST_ANIMATION
+          // TEST_ANIMATION: direktno koristi koordinate bez transformacije
           if (variable_brightness && pixel_brightness > 3'b0 && pixel_brightness < 3'b100)
           begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };                         /* Inverted, MSB <--> LSB */
+            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { pixel_y_i, pixel_x_i };
 
-            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { ~pixel_x_i + 1'b1, pixel_y_i };    /* For more brightness, a current naive approach is to add 4 more */
-            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { ~pixel_x_i, pixel_y_i + 1'b1};     /* pixels next so the current one appears brighter. */
-            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { ~pixel_x_i - 1'b1, pixel_y_i };    /* Pixels won't actually be added, but updated instead if they */
-            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { ~pixel_x_i, pixel_y_i - 1'b1};     /* already exist. However, checking takes time. */
+            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { pixel_y_i + 1'b1, pixel_x_i };
+            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { pixel_y_i, pixel_x_i + 1'b1};
+            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { pixel_y_i - 1'b1, pixel_x_i };
+            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { pixel_y_i, pixel_x_i - 1'b1};
 
             buffer_write_ptr <= buffer_write_ptr + 3'd5;
           end
-
           else
-
           begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };                         /* Regular brightness, invert MSB <--> LSB */
+            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { pixel_y_i, pixel_x_i };
             buffer_write_ptr <= buffer_write_ptr + 1'b1;
           end
+`else
+          // PDP-1 MODE: originalna transformacija
+          if (variable_brightness && pixel_brightness > 3'b0 && pixel_brightness < 3'b100)
+          begin
+            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
+
+            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { ~pixel_x_i + 1'b1, pixel_y_i };
+            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { ~pixel_x_i, pixel_y_i + 1'b1};
+            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { ~pixel_x_i - 1'b1, pixel_y_i };
+            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { ~pixel_x_i, pixel_y_i - 1'b1};
+
+            buffer_write_ptr <= buffer_write_ptr + 3'd5;
+          end
+          else
+          begin
+            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
+            buffer_write_ptr <= buffer_write_ptr + 1'b1;
+          end
+`endif
 
           if (buffer_write_ptr == buffer_read_ptr)
                search_counter <= 0;

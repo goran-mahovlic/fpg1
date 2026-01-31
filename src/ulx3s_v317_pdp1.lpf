@@ -123,6 +123,14 @@ LOCATE COMP "wifi_gpio0" SITE "L2";
 IOBUF PORT "wifi_gpio0" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;
 
 # =============================================================================
+# FTDI UART (Debug Serial Output)
+# =============================================================================
+# FPGA TX -> FTDI RX -> PC (serial input)
+# Pin L4 is FTDI_RXD on ULX3S v3.1.7
+LOCATE COMP "ftdi_rxd" SITE "L4";
+IOBUF PORT "ftdi_rxd" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+
+# =============================================================================
 # TIMING CONSTRAINTS
 # =============================================================================
 # Primary clock: 25 MHz input

@@ -18,13 +18,13 @@ PROJECT      := fpg1
 TOP_MODULE   := top
 BOARD        := ulx3s
 
-# ==== FPGA specifikacije (ULX3S 85F) ====
-# LFE5U-85F-6BG381C
-FPGA_DEVICE  := LFE5U-85F
-FPGA_SIZE    := 85k
+# ==== FPGA specifikacije (ULX3S 45F) ====
+# LFE5U-45F-6BG381C
+FPGA_DEVICE  := LFE5U-45F
+FPGA_SIZE    := 45k
 FPGA_PACKAGE := CABGA381
 FPGA_SPEED   := 6
-FPGA_IDCODE  := 0x41113043
+FPGA_IDCODE  := 0x41112043
 
 # ==== Toolchain putanje ====
 # OSS CAD Suite lokacija - prilagoditi ako je drugacije instalirano
@@ -107,9 +107,21 @@ PDP1_V_FILES     := $(SRC_DIR)/top_pdp1.v \
                     $(SRC_DIR)/pdp1_cpu_alu_div.v \
                     $(SRC_DIR)/pdp1_terminal_fb.v \
                     $(SRC_DIR)/pdp1_terminal_charset.v \
+                    $(SRC_DIR)/test_animation.v \
+                    $(SRC_DIR)/serial_debug.v \
                     $(SRC_DIR)/vga2dvid.v \
                     $(SRC_DIR)/tmds_encoder.v \
                     $(EMARD_VIDEO)/fake_differential.v
+
+# =============================================================================
+# PDP-1 TEST ANIMATION KONFIGURACIJA ("Orbital Spark")
+# =============================================================================
+PDP1_ANIM_PROJECT     := pdp1_anim
+PDP1_ANIM_TOP_MODULE  := top_pdp1
+PDP1_ANIM_JSON_FILE   := $(BUILD_DIR)/$(PDP1_ANIM_PROJECT).json
+PDP1_ANIM_CONFIG_FILE := $(BUILD_DIR)/$(PDP1_ANIM_PROJECT).config
+PDP1_ANIM_BIT_FILE    := $(BUILD_DIR)/$(PDP1_ANIM_PROJECT).bit
+PDP1_ANIM_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
 
 # =============================================================================
 # PDP-1 + ESP32 OSD KONFIGURACIJA
@@ -333,11 +345,105 @@ pdp1_prog_flash: $(PDP1_BIT_FILE)
 	$(PROGRAMMER) -b $(BOARD) -f $<
 
 # =============================================================================
+# PDP-1 ZA 45F KONFIGURACIJA (bez ESP32)
+# =============================================================================
+PDP1_45F_PROJECT     := pdp1_45f
+PDP1_45F_TOP_MODULE  := top_pdp1
+PDP1_45F_JSON_FILE   := $(BUILD_DIR)/$(PDP1_45F_PROJECT).json
+PDP1_45F_CONFIG_FILE := $(BUILD_DIR)/$(PDP1_45F_PROJECT).config
+PDP1_45F_BIT_FILE    := $(BUILD_DIR)/$(PDP1_45F_PROJECT).bit
+PDP1_45F_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
+
+# 45F FPGA specifikacije
+FPGA_SIZE_45F        := 45k
+FPGA_IDCODE_45F      := 0x41112043
+
+# =============================================================================
 # PDP-1 + ESP32 OSD TARGETS
 # =============================================================================
 # Build flow za PDP-1 emulator s ESP32 OSD sustavom
 
+.PHONY: pdp1_anim pdp1_anim_synth pdp1_anim_pnr pdp1_anim_bit pdp1_anim_prog
 .PHONY: pdp1_esp32 pdp1_esp32_synth pdp1_esp32_pnr pdp1_esp32_bit pdp1_esp32_prog
+
+# =============================================================================
+# PDP-1 TEST ANIMATION TARGETS ("Orbital Spark")
+# =============================================================================
+# Build flow za phosphor decay test animaciju
+# Dizajn: Git, Implementacija: Jelena Horvat
+
+# Kompletni PDP-1 test animation build
+pdp1_anim: pdp1_anim_bit
+	@echo "========================================"
+	@echo "PDP-1 Test Animation build zavrsen!"
+	@echo "Bitstream: $(PDP1_ANIM_BIT_FILE)"
+	@echo "Za upload: make pdp1_anim_prog"
+	@echo "========================================"
+
+# PDP-1 test animation sinteza
+pdp1_anim_synth: $(PDP1_ANIM_JSON_FILE)
+
+$(PDP1_ANIM_JSON_FILE): $(PDP1_SV_FILES) $(PDP1_V_FILES) | $(BUILD_DIR)
+	@echo "========================================"
+	@echo "SINTEZA: $(PDP1_ANIM_PROJECT) (Orbital Spark)"
+	@echo "========================================"
+	@echo "SystemVerilog: $(PDP1_SV_FILES)"
+	@echo "Verilog: $(PDP1_V_FILES)"
+	@echo "========================================"
+	$(YOSYS) -p "\
+		read_verilog -sv $(PDP1_SV_FILES); \
+		read_verilog -DTEST_ANIMATION -I$(SRC_DIR) $(PDP1_V_FILES); \
+		hierarchy -top $(PDP1_ANIM_TOP_MODULE); \
+		synth_ecp5 $(YOSYS_FLAGS) -json $@" \
+		2>&1 | tee $(BUILD_DIR)/pdp1_anim_synth.log
+	@echo "Sinteza zavrsena: $@"
+
+# PDP-1 test animation place & route
+pdp1_anim_pnr: $(PDP1_ANIM_CONFIG_FILE)
+
+$(PDP1_ANIM_CONFIG_FILE): $(PDP1_ANIM_JSON_FILE) $(PDP1_ANIM_LPF_FILE)
+	@echo "========================================"
+	@echo "PLACE & ROUTE: $(PDP1_ANIM_PROJECT)"
+	@echo "========================================"
+	$(NEXTPNR) \
+		--$(FPGA_SIZE) \
+		--package $(FPGA_PACKAGE) \
+		--speed $(FPGA_SPEED) \
+		--json $(PDP1_ANIM_JSON_FILE) \
+		--lpf $(PDP1_ANIM_LPF_FILE) \
+		--textcfg $@ \
+		$(NEXTPNR_FLAGS) \
+		2>&1 | tee $(BUILD_DIR)/pdp1_anim_pnr.log
+	@echo "Place & Route zavrseno: $@"
+
+# PDP-1 test animation bitstream
+pdp1_anim_bit: $(PDP1_ANIM_BIT_FILE)
+
+$(PDP1_ANIM_BIT_FILE): $(PDP1_ANIM_CONFIG_FILE)
+	@echo "========================================"
+	@echo "BITSTREAM: $(PDP1_ANIM_PROJECT)"
+	@echo "========================================"
+	$(ECPPACK) \
+		--idcode $(FPGA_IDCODE) \
+		--input $< \
+		--bit $@ \
+		$(ECPPACK_FLAGS)
+	@echo "Bitstream generiran: $@"
+	@ls -lh $@
+
+# PDP-1 test animation upload (SRAM)
+pdp1_anim_prog: $(PDP1_ANIM_BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD PDP-1 Test Animation (SRAM)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) $<
+
+# PDP-1 test animation upload (FLASH)
+pdp1_anim_prog_flash: $(PDP1_ANIM_BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD PDP-1 Test Animation (FLASH)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) -f $<
 
 # Kompletni PDP-1 + ESP32 build
 pdp1_esp32: pdp1_esp32_bit
@@ -409,6 +515,86 @@ pdp1_esp32_prog: $(PDP1_ESP32_BIT_FILE)
 pdp1_esp32_prog_flash: $(PDP1_ESP32_BIT_FILE)
 	@echo "========================================"
 	@echo "UPLOAD PDP-1 + ESP32 (FLASH)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) -f $<
+
+# =============================================================================
+# PDP-1 ZA 45F TARGETS (bez ESP32)
+# =============================================================================
+# Build flow za PDP-1 emulator na manjem ECP5-45F čipu
+
+.PHONY: pdp1_45f pdp1_45f_synth pdp1_45f_pnr pdp1_45f_bit pdp1_45f_prog
+
+# Kompletni PDP-1 45F build
+pdp1_45f: pdp1_45f_bit
+	@echo "========================================"
+	@echo "PDP-1 za 45F build zavrsen!"
+	@echo "Bitstream: $(PDP1_45F_BIT_FILE)"
+	@echo "Za upload: make pdp1_45f_prog"
+	@echo "========================================"
+
+# PDP-1 45F sinteza
+pdp1_45f_synth: $(PDP1_45F_JSON_FILE)
+
+$(PDP1_45F_JSON_FILE): $(PDP1_SV_FILES) $(PDP1_V_FILES) | $(BUILD_DIR)
+	@echo "========================================"
+	@echo "SINTEZA: $(PDP1_45F_PROJECT) (za ECP5-45F)"
+	@echo "========================================"
+	@echo "SystemVerilog: $(PDP1_SV_FILES)"
+	@echo "Verilog: $(PDP1_V_FILES)"
+	@echo "========================================"
+	$(YOSYS) -p "\
+		read_verilog -sv $(PDP1_SV_FILES); \
+		read_verilog -I$(SRC_DIR) $(PDP1_V_FILES); \
+		hierarchy -top $(PDP1_45F_TOP_MODULE); \
+		synth_ecp5 $(YOSYS_FLAGS) -json $@" \
+		2>&1 | tee $(BUILD_DIR)/pdp1_45f_synth.log
+	@echo "Sinteza zavrsena: $@"
+
+# PDP-1 45F place & route
+pdp1_45f_pnr: $(PDP1_45F_CONFIG_FILE)
+
+$(PDP1_45F_CONFIG_FILE): $(PDP1_45F_JSON_FILE) $(PDP1_45F_LPF_FILE)
+	@echo "========================================"
+	@echo "PLACE & ROUTE: $(PDP1_45F_PROJECT) (45F)"
+	@echo "========================================"
+	$(NEXTPNR) \
+		--$(FPGA_SIZE_45F) \
+		--package $(FPGA_PACKAGE) \
+		--speed $(FPGA_SPEED) \
+		--json $(PDP1_45F_JSON_FILE) \
+		--lpf $(PDP1_45F_LPF_FILE) \
+		--textcfg $@ \
+		$(NEXTPNR_FLAGS) \
+		2>&1 | tee $(BUILD_DIR)/pdp1_45f_pnr.log
+	@echo "Place & Route zavrseno: $@"
+
+# PDP-1 45F bitstream
+pdp1_45f_bit: $(PDP1_45F_BIT_FILE)
+
+$(PDP1_45F_BIT_FILE): $(PDP1_45F_CONFIG_FILE)
+	@echo "========================================"
+	@echo "BITSTREAM: $(PDP1_45F_PROJECT) (45F)"
+	@echo "========================================"
+	$(ECPPACK) \
+		--idcode $(FPGA_IDCODE_45F) \
+		--input $< \
+		--bit $@ \
+		$(ECPPACK_FLAGS)
+	@echo "Bitstream generiran: $@"
+	@ls -lh $@
+
+# PDP-1 45F upload (SRAM)
+pdp1_45f_prog: $(PDP1_45F_BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD PDP-1 45F (SRAM)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) $<
+
+# PDP-1 45F upload (FLASH)
+pdp1_45f_prog_flash: $(PDP1_45F_BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD PDP-1 45F (FLASH)"
 	@echo "========================================"
 	$(PROGRAMMER) -b $(BOARD) -f $<
 

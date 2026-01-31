@@ -25,7 +25,14 @@
 //   - clk_pixel: 25 MHz  (640x480 @ 60Hz)
 //   - clk_cpu:   50 MHz  (PDP-1 base clock, prescaled interno)
 //
+// TEST ANIMATION MODE:
+//   - Define TEST_ANIMATION za "Orbital Spark" phosphor decay test
+//   - Tocka kruzi po elipticnoj orbiti, phosphor decay stvara rep
+//
 // =============================================================================
+
+// Uncomment to enable test animation mode
+// `define TEST_ANIMATION
 
 `include "definitions.v"
 
@@ -48,7 +55,10 @@ module top_pdp1
     output wire [3:0]  gpdi_dn,        // Differential negative
 
     // ==== WiFi GPIO0 (ESP32 keep-alive) ====
-    output wire        wifi_gpio0
+    output wire        wifi_gpio0,
+
+    // ==== FTDI UART (Debug Serial Output) ====
+    output wire        ftdi_rxd       // FPGA TX -> PC RX (pin L4)
 
 `ifdef ESP32_OSD
     // ==== ESP32 SPI Interface (OSD) ====
@@ -167,11 +177,11 @@ module top_pdp1
         end else begin
             h_counter <= h_counter + 1'b1;
 
-            if (h_counter == `h_line_timing) begin
+            if (h_counter >= `h_line_timing - 1) begin
                 h_counter <= 11'b0;
                 v_counter <= v_counter + 1'b1;
 
-                if (v_counter == `v_line_timing) begin
+                if (v_counter >= `v_line_timing - 1) begin
                     v_counter <= 11'b0;
                 end
             end
@@ -186,35 +196,140 @@ module top_pdp1
     // =========================================================================
     wire [7:0] crt_r, crt_g, crt_b;
 
+`ifdef TEST_ANIMATION
+    // =========================================================================
+    // TEST ANIMATION MODE: "Orbital Spark"
+    // =========================================================================
+    // Tocka kruzi po elipticnoj orbiti, phosphor decay stvara "rep"
+    // Dizajn: Git, Implementacija: Jelena Horvat
+
+    // Frame tick generator - pulse na pocetku svakog frame-a
+    reg frame_tick;
+    reg [10:0] prev_v_counter;
+
+    always @(posedge clk_pixel) begin
+        if (!rst_pixel_n) begin
+            frame_tick <= 1'b0;
+            prev_v_counter <= 11'd0;
+        end else begin
+            prev_v_counter <= v_counter;
+            // Detect start of new frame (vblank start)
+            frame_tick <= (v_counter == 11'd0) && (prev_v_counter != 11'd0);
+        end
+    end
+
+    // Test animation outputs
+    wire [9:0] anim_pixel_x;
+    wire [9:0] anim_pixel_y;
+    wire [2:0] anim_brightness;
+    wire       anim_pixel_valid;
+    wire [7:0] anim_debug_angle;
+
+    test_animation test_anim_inst (
+        .clk              (clk_pixel),
+        .rst_n            (rst_pixel_n),
+        .frame_tick       (frame_tick),
+        .pixel_x          (anim_pixel_x),
+        .pixel_y          (anim_pixel_y),
+        .pixel_brightness (anim_brightness),
+        .pixel_valid      (anim_pixel_valid),
+        .debug_angle      (anim_debug_angle)
+    );
+
+    // Use animation outputs
+    wire [9:0] test_pixel_x = anim_pixel_x;
+    wire [9:0] test_pixel_y = anim_pixel_y;
+    wire [2:0] test_brightness = anim_brightness;
+    wire       test_pixel_avail = anim_pixel_valid;
+
+`else
+    // =========================================================================
+    // ORIGINAL DIAGONAL LINE TEST PATTERN
+    // =========================================================================
     // Test pattern za CRT - placeholder dok nema CPU-a
-    // Generira jednostavan koordinatni dot u centru
+    // Generira jednostavnu dijagonalnu liniju za debug
+    // Koordinate: 0-479 za vidljivo podrucje na 640x480 ekranu
     reg [9:0] test_pixel_x;
     reg [9:0] test_pixel_y;
     reg [2:0] test_brightness;
     reg       test_pixel_avail;
 
-    // Jednostavan test: crtaj tocku koja se pomice
-    reg [23:0] test_counter;
+    // Jednostavan test: crtaj dijagonalnu liniju od (0,0) do (479,479)
+    // Zatim vertikalne linije na X=100, 200, 300, 400
+    reg [19:0] test_counter;
+    reg [9:0]  line_pos;      // Pozicija na liniji (0-479)
+
     always @(posedge clk_cpu) begin
         if (!rst_cpu_n) begin
-            test_counter <= 24'b0;
-            test_pixel_x <= 10'd512;
-            test_pixel_y <= 10'd512;
-            test_brightness <= 3'b111;
+            test_counter <= 20'b0;
+            line_pos <= 10'd0;
+            test_pixel_x <= 10'd0;
+            test_pixel_y <= 10'd0;
+            test_brightness <= 3'b111;  // Maksimalna svjetlina
             test_pixel_avail <= 1'b0;
         end else begin
             test_counter <= test_counter + 1'b1;
             test_pixel_avail <= 1'b0;
 
-            // Svaki 256 ciklusa emitira novu tocku u spirali
-            if (test_counter[7:0] == 8'b0) begin
-                test_pixel_x <= 10'd512 + {4'b0, test_counter[15:10]};
-                test_pixel_y <= 10'd512 + {4'b0, test_counter[21:16]};
-                test_brightness <= test_counter[10:8];
+            // Svaki 32 ciklusa emitira novi pixel (brzo za vidljiv efekt)
+            if (test_counter[4:0] == 5'b0) begin
+                // Dijagonalna linija: X = Y = line_pos
+                test_pixel_x <= line_pos;
+                test_pixel_y <= line_pos;
+                test_brightness <= 3'b111;  // Puna svjetlina
                 test_pixel_avail <= 1'b1;
+
+                // Inkrementiraj poziciju, wrap na 480
+                if (line_pos >= 10'd479)
+                    line_pos <= 10'd0;
+                else
+                    line_pos <= line_pos + 1'b1;
             end
         end
     end
+`endif
+
+`ifdef TEST_ANIMATION
+    // =========================================================================
+    // TEST ANIMATION: No CDC needed (already in clk_pixel domain)
+    // =========================================================================
+    // test_animation modul vec radi u clk_pixel domeni, nema potrebe za CDC
+    wire [9:0] pixel_x_sync = test_pixel_x;
+    wire [9:0] pixel_y_sync = test_pixel_y;
+    wire [2:0] brightness_sync = test_brightness;
+    wire pixel_avail_synced = test_pixel_avail;
+
+`else
+    // =========================================================================
+    // FIX B: CDC SINKRONIZACIJA ZA pixel_available
+    // =========================================================================
+    // pixel_available dolazi iz clk_cpu domene, treba sinkronizirati u clk_pixel
+    reg [2:0] pixel_avail_sync;  // 3-stage synchronizer
+    reg [9:0] pixel_x_sync, pixel_y_sync;
+    reg [2:0] brightness_sync;
+
+    always @(posedge clk_pixel) begin
+        if (!rst_pixel_n) begin
+            pixel_avail_sync <= 3'b0;
+            pixel_x_sync <= 10'd240;
+            pixel_y_sync <= 10'd240;
+            brightness_sync <= 3'b0;
+        end else begin
+            // 3-stage sync za metastability protection
+            pixel_avail_sync <= {pixel_avail_sync[1:0], test_pixel_avail};
+
+            // Latch koordinate kada detektiramo rising edge
+            if (pixel_avail_sync[1] && !pixel_avail_sync[2]) begin
+                pixel_x_sync <= test_pixel_x;
+                pixel_y_sync <= test_pixel_y;
+                brightness_sync <= test_brightness;
+            end
+        end
+    end
+
+    // Sinhronizirani pixel_available signal (pulse u pixel clock domeni)
+    wire pixel_avail_synced = pixel_avail_sync[1] && !pixel_avail_sync[2];
+`endif
 
     pdp1_vga_crt crt_display
     (
@@ -227,12 +342,12 @@ module top_pdp1
         .green_out          (crt_g),
         .blue_out           (crt_b),
 
-        // Povezivanje s test patternom (ili CPU u buducnosti)
-        .pixel_x_i          (test_pixel_x),
-        .pixel_y_i          (test_pixel_y),
-        .pixel_brightness   (test_brightness),
+        // Povezivanje s test patternom (CDC sinhronizirano!)
+        .pixel_x_i          (pixel_x_sync),
+        .pixel_y_i          (pixel_y_sync),
+        .pixel_brightness   (brightness_sync),
         .variable_brightness(1'b1),
-        .pixel_available    (test_pixel_avail)
+        .pixel_available    (pixel_avail_synced)
     );
 
     // =========================================================================
@@ -375,18 +490,102 @@ module top_pdp1
     );
 
     // =========================================================================
-    // LED STATUS INDICATORS
+    // DEBUG: LED INDICATORS (USPORENI ZA LJUDSKO OKO)
     // =========================================================================
-    // LED[7]   = PLL locked
-    // LED[6]   = Single player mode
-    // LED[5]   = P2 mode active
-    // LED[4]   = CRT test pattern mode
-    // LED[3:0] = Player 1 controls feedback
+    // LED debug - usporeni za ljudsko oko (1-2 Hz blink)
+    // 25MHz / 2^24 = ~1.49 Hz
 
+    reg [24:0] led_divider;
+
+    always @(posedge clk_pixel) begin
+        if (!rst_pixel_n)
+            led_divider <= 25'd0;
+        else
+            led_divider <= led_divider + 1'b1;
+    end
+
+    // Latch pixel_valid, frame_tick na usporeni clock za vidljivost
+    reg pixel_valid_seen;
+    reg frame_tick_seen;
+
+    always @(posedge clk_pixel) begin
+        if (!rst_pixel_n) begin
+            pixel_valid_seen <= 1'b0;
+            frame_tick_seen  <= 1'b0;
+        end else begin
+            // Reset na svaki slow clock tick
+            if (led_divider == 25'd0) begin
+                pixel_valid_seen <= 1'b0;
+                frame_tick_seen  <= 1'b0;
+            end else begin
+                // Latch ako se dogodilo
+                if (pixel_avail_synced)
+                    pixel_valid_seen <= 1'b1;
+`ifdef TEST_ANIMATION
+                if (frame_tick)
+                    frame_tick_seen <= 1'b1;
+`endif
+            end
+        end
+    end
+
+    // LED[0] = heartbeat (clock radi) - blink na ~1.5Hz
+    // LED[1] = pixel_valid signal (usporeno) - svijetli ako je bio aktivan
+    // LED[2] = frame_tick (usporeno) - svijetli ako je bio frame tick
+    // LED[3] = animation angle MSB (da vidimo da se mijenja)
+    // LED[4] = h_counter overflow (MSB)
+    // LED[5] = v_counter overflow (MSB)
+    // LED[6] = PLL locked (konstantno ako je OK)
+    // LED[7] = rst_pixel_n (mora biti HIGH ako reset nije aktivan)
+
+`ifdef TEST_ANIMATION
+    assign led[0] = led_divider[24];                    // Heartbeat ~1.5Hz
+    assign led[1] = pixel_valid_seen;                   // Pixel valid seen
+    assign led[2] = frame_tick_seen;                    // Frame tick seen
+    assign led[3] = anim_debug_angle[7];                // Animation angle MSB
+    assign led[4] = h_counter[10];                      // H counter MSB
+    assign led[5] = v_counter[10];                      // V counter MSB
+    assign led[6] = pll_locked;                         // PLL locked
+    assign led[7] = rst_pixel_n;                        // Reset released
+`else
+    // Original LED assignments when not in TEST_ANIMATION mode
     assign led[7]   = pll_locked;
     assign led[6]   = single_player;
     assign led[5]   = p2_mode_active;
     assign led[4]   = sw[3];
     assign led[3:0] = joystick_emu[3:0];
+`endif
+
+    // =========================================================================
+    // DEBUG: SERIAL OUTPUT (UART TX)
+    // =========================================================================
+`ifdef TEST_ANIMATION
+    // Collect LED status for debug output
+    wire [7:0] debug_led_status = {
+        rst_pixel_n,           // LED[7]
+        pll_locked,            // LED[6]
+        v_counter[10],         // LED[5]
+        h_counter[10],         // LED[4]
+        anim_debug_angle[7],   // LED[3]
+        frame_tick_seen,       // LED[2]
+        pixel_valid_seen,      // LED[1]
+        led_divider[24]        // LED[0]
+    };
+
+    serial_debug serial_debug_inst (
+        .clk          (clk_pixel),
+        .rst_n        (rst_pixel_n),
+        .frame_tick   (frame_tick),
+        .angle        (anim_debug_angle),
+        .pixel_x      (anim_pixel_x),
+        .pixel_y      (anim_pixel_y),
+        .pixel_valid  (anim_pixel_valid),
+        .led_status   (debug_led_status),
+        .uart_tx_pin  (ftdi_rxd)
+    );
+`else
+    // Kada nije TEST_ANIMATION, drzi UART TX high (idle)
+    assign ftdi_rxd = 1'b1;
+`endif
 
 endmodule

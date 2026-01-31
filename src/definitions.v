@@ -15,7 +15,7 @@
 
 `define   h_visible_offset       11'd160       /* h_front_porch + h_sync_pulse + h_back_porch = 16+96+48 = 160 */
 `define   h_center_offset        11'd64        /* (640-512)/2 = 64, za centriranje PDP-1 512x512 displeja */
-`define   h_visible_offset_end   11'd704       /* h_visible_offset + 640 - h_center_offset = 160 + 640 - 64 - 32 = 704 */
+`define   h_visible_offset_end   11'd736       /* h_visible_offset + 512 + h_center_offset = 160 + 512 + 64 = 736 */
 
 `define   v_visible_offset       11'd45        /* v_front_porch + v_sync_pulse + v_back_porch = 10+2+33 = 45 */
 `define   v_visible_offset_end   11'd525       /* v_visible_offset + 480 = 45 + 480 = 525 */
