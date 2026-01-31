@@ -48,7 +48,15 @@ module top_pdp1
     output wire [3:0]  gpdi_dn,        // Differential negative
 
     // ==== WiFi GPIO0 (ESP32 keep-alive) ====
-    output wire        wifi_gpio0
+    output wire        wifi_gpio0,
+
+    // ==== ESP32 SPI Interface (OSD) ====
+    input  wire        esp32_spi_clk,
+    input  wire        esp32_spi_mosi,
+    output wire        esp32_spi_miso,
+    input  wire        esp32_spi_cs_n,
+    output wire        esp32_osd_irq,
+    input  wire        esp32_ready
 );
 
     // =========================================================================
@@ -238,9 +246,60 @@ module top_pdp1
     assign vga_blank = ~vga_de;
 
     // =========================================================================
+    // ESP32 OSD INTEGRATION
+    // =========================================================================
+    // OSD signals
+    wire [23:0] osd_video_out;
+    wire        osd_de_out, osd_hs_out, osd_vs_out;
+    wire [31:0] osd_status;
+    wire [15:0] osd_joystick_0, osd_joystick_1;
+
+    // Video input to OSD (CRT output)
+    wire [23:0] crt_video_in = {crt_r, crt_g, crt_b};
+
+    // Pixel coordinates for OSD
+    wire [11:0] pixel_x = (h_counter >= `h_visible_offset) ?
+                          (h_counter - `h_visible_offset) : 12'd0;
+    wire [11:0] pixel_y = (v_counter >= `v_visible_offset) ?
+                          (v_counter - `v_visible_offset) : 12'd0;
+
+    esp32_osd #(
+        .OSD_COLOR    (3'd4),       // Blue OSD color
+        .OSD_X_OFFSET (12'd192),    // Centered for 640x480
+        .OSD_Y_OFFSET (12'd176)
+    ) esp32_osd_inst (
+        .clk_sys      (clk_cpu),
+        .clk_video    (clk_pixel),
+        .rst_n        (rst_pixel_n),
+        // ESP32 SPI interface
+        .spi_clk      (esp32_spi_clk),
+        .spi_mosi     (esp32_spi_mosi),
+        .spi_miso     (esp32_spi_miso),
+        .spi_cs_n     (esp32_spi_cs_n),
+        .osd_irq      (esp32_osd_irq),
+        .esp32_ready  (esp32_ready),
+        // Video input
+        .video_in     (crt_video_in),
+        .de_in        (vga_de),
+        .hs_in        (vga_hsync),
+        .vs_in        (vga_vsync),
+        .pixel_x      (pixel_x),
+        .pixel_y      (pixel_y),
+        // Video output
+        .video_out    (osd_video_out),
+        .de_out       (osd_de_out),
+        .hs_out       (osd_hs_out),
+        .vs_out       (osd_vs_out),
+        // Status
+        .status       (osd_status),
+        .joystick_0   (osd_joystick_0),
+        .joystick_1   (osd_joystick_1)
+    );
+
+    // =========================================================================
     // VGA RGB OUTPUT SELECTION
     // =========================================================================
-    // SW[3] = 0: CRT output
+    // SW[3] = 0: CRT output with OSD overlay
     // SW[3] = 1: Test pattern (debugging)
     wire [7:0] vga_r, vga_g, vga_b;
 
@@ -249,9 +308,14 @@ module top_pdp1
     wire [7:0] test_g = v_counter[7:0];
     wire [7:0] test_b = {h_counter[3:0], v_counter[3:0]};
 
-    assign vga_r = sw[3] ? test_r : crt_r;
-    assign vga_g = sw[3] ? test_g : crt_g;
-    assign vga_b = sw[3] ? test_b : crt_b;
+    // OSD overlay output
+    wire [7:0] osd_r = osd_video_out[23:16];
+    wire [7:0] osd_g = osd_video_out[15:8];
+    wire [7:0] osd_b = osd_video_out[7:0];
+
+    assign vga_r = sw[3] ? test_r : osd_r;
+    assign vga_g = sw[3] ? test_g : osd_g;
+    assign vga_b = sw[3] ? test_b : osd_b;
 
     // =========================================================================
     // HDMI OUTPUT (VGA -> DVID/TMDS CONVERSION)
