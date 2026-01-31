@@ -43,13 +43,15 @@ module test_animation (
 );
 
     // =========================================================================
-    // PARAMETERS - Ellipse Configuration (za 640x480 VGA koordinatni sustav)
+    // PARAMETERS - Ellipse Configuration (za PDP-1 512x512 koordinatni sustav)
     // =========================================================================
-    // NAPOMENA: TEST_ANIMATION koristi direktne VGA koordinate (0-639 x 0-479)
-    // Nema PDP-1 transformacije (inverzija/swap) u ovom modu
-    // Centar treba biti 320,240 za pravilno centriranje na 640x480 ekranu
-    localparam [9:0] CENTER_X = 10'd320;   // Centar X (640/2)
-    localparam [9:0] CENTER_Y = 10'd240;   // Centar Y (480/2)
+    // NAPOMENA: CRT modul mapira koordinate u PDP-1 prostor (0-511 x 0-511)
+    // koji se prikazuje centriran u 640x480 VGA frameu.
+    // Centar treba biti 256,240 za pravilno centriranje:
+    // - X=256 je centar PDP-1 prostora (512/2)
+    // - Y=240 je centar VGA prostora (480/2)
+    localparam [9:0] CENTER_X = 10'd256;   // Centar X (PDP-1 512/2)
+    localparam [9:0] CENTER_Y = 10'd240;   // Centar Y (VGA 480/2)
     localparam [7:0] SEMI_A   = 8'd100;    // Polu-os X (horizontal)
     localparam [7:0] SEMI_B   = 8'd80;     // Polu-os Y (vertical)
 

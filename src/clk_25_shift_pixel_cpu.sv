@@ -13,7 +13,7 @@
 // - Ulazni clock: 25 MHz (ULX3S onboard oscillator)
 // - out0 (clko):  125 MHz HDMI shift clock (5x pixel za DDR TMDS)
 // - out1 (clks1): 25 MHz pixel clock (640x480 @ 60Hz)
-// - out2 (clks2): 50 MHz CPU clock
+// - out2 (clks2): 6.25 MHz CPU clock (TASK-216: reduced for timing)
 //
 // TIMING PARAMETRI (640x480 @ 60Hz):
 // - H total: 800 pixela (640 visible + 160 blanking)
@@ -31,7 +31,7 @@ module clk_25_shift_pixel_cpu
     input  wire clki,      // 25 MHz input clock
     output wire clko,      // 125 MHz HDMI shift clock (5x 25MHz pixel)
     output wire clks1,     // 25 MHz pixel clock (640x480@60Hz)
-    output wire clks2,     // 50 MHz CPU clock
+    output wire clks2,     // 6.25 MHz CPU clock (TASK-216)
     output wire locked     // PLL lock indicator
 );
 
@@ -42,7 +42,7 @@ module clk_25_shift_pixel_cpu
         .in_hz      (25000000),     // 25 MHz input
         .out0_hz    (125000000),    // 125 MHz shift clock (HDMI DDR, 5x pixel)
         .out1_hz    (25000000),     // 25 MHz pixel clock (640x480@60Hz)
-        .out2_hz    (50000000),     // 50 MHz CPU clock
+        .out2_hz    (6250000),      // 6.25 MHz CPU clock (TASK-216: reduced for timing)
         .out3_hz    (0)             // unused
     )
     pll_inst
@@ -60,6 +60,6 @@ module clk_25_shift_pixel_cpu
 
     assign clko  = clocks[0];   // 125 MHz shift clock
     assign clks1 = clocks[1];   // 25 MHz pixel clock
-    assign clks2 = clocks[2];   // 50 MHz CPU clock
+    assign clks2 = clocks[2];   // 6.25 MHz CPU clock (TASK-216)
 
 endmodule

@@ -97,6 +97,7 @@ PDP1_SV_FILES    := $(SRC_DIR)/ecp5pll.sv \
                     $(SRC_DIR)/clk_25_shift_pixel_cpu.sv
 
 # PDP-1 Verilog source files (BASIC - bez ESP32 OSD)
+# TASK-213: Dodani pdp1_cpu.v i pdp1_main_ram.v
 PDP1_V_FILES     := $(SRC_DIR)/top_pdp1.v \
                     $(SRC_DIR)/clock_domain.v \
                     $(SRC_DIR)/ulx3s_input.v \
@@ -104,6 +105,8 @@ PDP1_V_FILES     := $(SRC_DIR)/top_pdp1.v \
                     $(SRC_DIR)/pdp1_vga_rowbuffer.v \
                     $(SRC_DIR)/line_shift_register.v \
                     $(SRC_DIR)/pixel_ring_buffer.v \
+                    $(SRC_DIR)/pdp1_cpu.v \
+                    $(SRC_DIR)/pdp1_main_ram.v \
                     $(SRC_DIR)/pdp1_cpu_alu_div.v \
                     $(SRC_DIR)/pdp1_terminal_fb.v \
                     $(SRC_DIR)/pdp1_terminal_charset.v \

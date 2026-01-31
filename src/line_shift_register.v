@@ -27,6 +27,14 @@ module line_shift_register
     (* ram_style = "block" *)
     reg [7:0] mem [0:MEM_DEPTH-1];
 
+    // Initialize to 0 to prevent garbage on power-up
+    integer init_i;
+    initial begin
+        for (init_i = 0; init_i < MEM_DEPTH; init_i = init_i + 1) begin
+            mem[init_i] = 8'd0;
+        end
+    end
+
     // Write pointer (circular)
     reg [ADDR_WIDTH-1:0] wrptr = 0;
 

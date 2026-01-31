@@ -37,6 +37,7 @@ module pixel_ring_buffer
     reg [ADDR_WIDTH-1:0] wrptr = 0;
 
     // 8 BRAM instances - all written with same data
+    // Initialize to 0 to prevent garbage pixels after power-up
     (* ram_style = "block" *)
     reg [WIDTH-1:0] mem0 [0:DEPTH-1];
     (* ram_style = "block" *)
@@ -53,6 +54,21 @@ module pixel_ring_buffer
     reg [WIDTH-1:0] mem6 [0:DEPTH-1];
     (* ram_style = "block" *)
     reg [WIDTH-1:0] mem7 [0:DEPTH-1];
+
+    // Initialize all memories to 0 (luma=0 means inactive pixel)
+    integer init_i;
+    initial begin
+        for (init_i = 0; init_i < DEPTH; init_i = init_i + 1) begin
+            mem0[init_i] = 32'd0;
+            mem1[init_i] = 32'd0;
+            mem2[init_i] = 32'd0;
+            mem3[init_i] = 32'd0;
+            mem4[init_i] = 32'd0;
+            mem5[init_i] = 32'd0;
+            mem6[init_i] = 32'd0;
+            mem7[init_i] = 32'd0;
+        end
+    end
 
     // Read pointers - each reads from different offset
     // Using subtraction for proper circular buffer behavior

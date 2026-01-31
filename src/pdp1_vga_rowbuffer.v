@@ -21,6 +21,14 @@ module pdp1_vga_rowbuffer (
   (* ram_style = "block" *)
   reg [7:0] rowbuffer[0:8191];
 
+  // Initialize to 0 to prevent garbage on power-up
+  integer init_i;
+  initial begin
+    for (init_i = 0; init_i < 8192; init_i = init_i + 1) begin
+      rowbuffer[init_i] = 8'd0;
+    end
+  end
+
   always @(posedge clock) begin
     q <= rowbuffer[rdaddress];
     if(wren)

@@ -23,7 +23,7 @@
 // CLOCK DOMENE (TASK-200: smanjena rezolucija za timing fix):
 //   - clk_shift: 125 MHz (HDMI DDR serializer, 5x pixel)
 //   - clk_pixel: 25 MHz  (640x480 @ 60Hz)
-//   - clk_cpu:   50 MHz  (PDP-1 base clock, prescaled interno)
+//   - clk_cpu:   6.25 MHz (PDP-1 base clock, TASK-216 reduced for timing)
 //
 // TEST ANIMATION MODE:
 //   - Define TEST_ANIMATION za "Orbital Spark" phosphor decay test
@@ -58,7 +58,11 @@ module top_pdp1
     output wire        wifi_gpio0,
 
     // ==== FTDI UART (Debug Serial Output) ====
-    output wire        ftdi_rxd       // FPGA TX -> PC RX (pin L4)
+    output wire        ftdi_rxd,      // FPGA TX -> PC RX (pin L4)
+
+    // ==== GPDI Control Pins (HDMI HPD) ====
+    output wire        gpdi_scl,      // I2C SCL - drive HIGH for HPD workaround
+    input  wire        gpdi_hpd       // HDMI Hot Plug Detect from monitor (TASK-216)
 
 `ifdef ESP32_OSD
     // ==== ESP32 SPI Interface (OSD) ====
@@ -85,11 +89,22 @@ module top_pdp1
     assign wifi_gpio0 = btn[0];
 
     // =========================================================================
+    // HDMI HPD (TASK-216 FIX)
+    // =========================================================================
+    // HPD (Hot Plug Detect) je INPUT - monitor ga drzi HIGH kad je spojen.
+    // FPGA cita HPD da zna je li monitor spojen i spreman.
+    // gpdi_scl = HIGH konstantno za DDC wake-up.
+    assign gpdi_scl = 1'b1;
+
+    // TASK-216: HPD je sada INPUT - monitor pulls HIGH when connected
+    wire monitor_connected = gpdi_hpd;
+
+    // =========================================================================
     // CLOCK GENERATION (PLL) - TASK-200: 640x480@60Hz
     // =========================================================================
     wire clk_shift;     // 125 MHz HDMI shift clock (5x pixel)
     wire clk_pixel;     // 25 MHz pixel clock (640x480@60Hz)
-    wire clk_cpu;       // 50 MHz CPU base clock
+    wire clk_cpu;       // 6.25 MHz CPU base clock (TASK-216)
     wire pll_locked;    // PLL lock indicator
 
     clk_25_shift_pixel_cpu clock_instance
@@ -196,6 +211,17 @@ module top_pdp1
     // =========================================================================
     wire [7:0] crt_r, crt_g, crt_b;
 
+    // CRT debug signals
+    wire [5:0] crt_debug_write_ptr;
+    wire [5:0] crt_debug_read_ptr;
+    wire       crt_debug_wren;
+    wire [10:0] crt_debug_search_counter;
+    wire [11:0] crt_debug_luma1;
+    wire       crt_debug_rowbuff_wren;
+    wire       crt_debug_inside_visible;
+    wire       crt_debug_pixel_to_rowbuff;
+    wire [15:0] crt_debug_rowbuff_write_count;
+
 `ifdef TEST_ANIMATION
     // =========================================================================
     // TEST ANIMATION MODE: "Orbital Spark"
@@ -244,49 +270,170 @@ module top_pdp1
 
 `else
     // =========================================================================
-    // ORIGINAL DIAGONAL LINE TEST PATTERN
+    // PDP-1 CPU INTEGRATION (TASK-213)
     // =========================================================================
-    // Test pattern za CRT - placeholder dok nema CPU-a
-    // Generira jednostavnu dijagonalnu liniju za debug
-    // Koordinate: 0-479 za vidljivo podrucje na 640x480 ekranu
-    reg [9:0] test_pixel_x;
-    reg [9:0] test_pixel_y;
-    reg [2:0] test_brightness;
-    reg       test_pixel_avail;
+    // Full CPU with RAM and Spacewar! program
+    // Author: Jelena Horvat, REGOC team
 
-    // Jednostavan test: crtaj dijagonalnu liniju od (0,0) do (479,479)
-    // Zatim vertikalne linije na X=100, 200, 300, 400
-    reg [19:0] test_counter;
-    reg [9:0]  line_pos;      // Pozicija na liniji (0-479)
+    // CPU <-> Memory interface signals
+    wire [11:0] cpu_mem_addr;
+    wire [17:0] cpu_mem_data_out;
+    wire [17:0] cpu_mem_data_in;
+    wire        cpu_mem_we;
+
+    // CPU output signals
+    wire [17:0] cpu_ac;           // Accumulator
+    wire [17:0] cpu_io;           // IO register
+    wire [11:0] cpu_pc;           // Program counter
+    wire [31:0] cpu_bus_out;      // Console blinkenlights
+
+    // CRT output signals from CPU
+    wire [9:0]  cpu_pixel_x;
+    wire [9:0]  cpu_pixel_y;
+    wire [2:0]  cpu_pixel_brightness;
+    wire        cpu_pixel_shift;
+
+    // Typewriter signals (directly active low, directly active high - directly active low directly active high directly active low - directly active high - directly active low
+    wire [6:0]  typewriter_char_out;
+    wire        typewriter_strobe_out;
+    wire        typewriter_strobe_ack;
+
+    // Paper tape signals (directly active low, directly active high - directly active low directly active high - directly active low
+    wire        send_next_tape_char;
+
+    // Gamepad input mapping for Spacewar!
+    // PDP-1 gamepad format: bits 17-14 and 3-0 are used
+    // Player 1: bits 17-14 (left, right, thrust, fire)
+    // Player 2: bits 3-0 (left, right, thrust, fire)
+    wire [17:0] gamepad_in;
+
+    // Map ULX3S buttons/switches to PDP-1 gamepad input
+    // joystick_emu[7:0] from ulx3s_input module
+    // [0]=left, [1]=right, [2]=thrust/up, [3]=fire/down
+    // [4]=hyperspace (directly active low, directly active high - directly active low)
+    assign gamepad_in = {
+        joystick_emu[0],   // bit 17 - P1 left (CW rotation)
+        joystick_emu[1],   // bit 16 - P1 right (CCW rotation)
+        joystick_emu[2],   // bit 15 - P1 thrust
+        joystick_emu[3],   // bit 14 - P1 fire
+        10'b0,             // bits 13-4 unused
+        4'b0               // bits 3-0 - P2 controls (directly active low)
+    };
+
+    // Console switches for CPU control
+    // Start button generates a pulse on reset release to auto-start execution
+    reg [2:0] start_pulse_counter;
+    wire start_button_pulse;
 
     always @(posedge clk_cpu) begin
-        if (!rst_cpu_n) begin
-            test_counter <= 20'b0;
-            line_pos <= 10'd0;
-            test_pixel_x <= 10'd0;
-            test_pixel_y <= 10'd0;
-            test_brightness <= 3'b111;  // Maksimalna svjetlina
-            test_pixel_avail <= 1'b0;
-        end else begin
-            test_counter <= test_counter + 1'b1;
-            test_pixel_avail <= 1'b0;
-
-            // Svaki 32 ciklusa emitira novi pixel (brzo za vidljiv efekt)
-            if (test_counter[4:0] == 5'b0) begin
-                // Dijagonalna linija: X = Y = line_pos
-                test_pixel_x <= line_pos;
-                test_pixel_y <= line_pos;
-                test_brightness <= 3'b111;  // Puna svjetlina
-                test_pixel_avail <= 1'b1;
-
-                // Inkrementiraj poziciju, wrap na 480
-                if (line_pos >= 10'd479)
-                    line_pos <= 10'd0;
-                else
-                    line_pos <= line_pos + 1'b1;
-            end
+        if (~rst_cpu_n) begin
+            start_pulse_counter <= 3'd7;  // Preload counter
+        end else if (start_pulse_counter > 0) begin
+            start_pulse_counter <= start_pulse_counter - 1'b1;
         end
     end
+
+    // Generate start pulse for first few cycles after reset
+    assign start_button_pulse = (start_pulse_counter == 3'd4);
+
+    wire [10:0] console_switches;
+    assign console_switches = {
+        1'b0,              // bit 10 - power switch (0=on)
+        1'b0,              // bit 9 - single step
+        1'b0,              // bit 8 - single inst
+        1'b0,              // bit 7 - tape feed
+        1'b0,              // bit 6 - reader
+        1'b0,              // bit 5 - read in
+        1'b0,              // bit 4 - deposit
+        1'b0,              // bit 3 - examine
+        1'b0,              // bit 2 - continue
+        1'b0,              // bit 1 - stop
+        start_button_pulse // bit 0 - start (pulse on reset release)
+    };
+
+    // Test word and address switches (directly active low)
+    wire [17:0] test_word = 18'b0;
+    wire [17:0] test_address = 18'o4;   // Start address: octal 4 (Spacewar! entry point)
+    wire [5:0]  sense_switches = 6'b0;
+
+    // =========================================================================
+    // PDP-1 MAIN RAM (4096 x 18-bit)
+    // =========================================================================
+    pdp1_main_ram main_ram_inst (
+        // Port A - CPU interface
+        .address_a  (cpu_mem_addr),
+        .clock_a    (clk_cpu),
+        .data_a     (cpu_mem_data_out),
+        .wren_a     (cpu_mem_we),
+        .q_a        (cpu_mem_data_in),
+
+        // Port B - unused for now
+        .address_b  (12'b0),
+        .clock_b    (clk_cpu),
+        .data_b     (18'b0),
+        .wren_b     (1'b0),
+        .q_b        ()
+    );
+
+    // =========================================================================
+    // PDP-1 CPU
+    // =========================================================================
+    pdp1_cpu cpu_inst (
+        .clk                    (clk_cpu),
+        .rst                    (~rst_cpu_n),       // CPU uses active-high reset
+
+        // Memory interface
+        .MEM_ADDR               (cpu_mem_addr),
+        .DI                     (cpu_mem_data_in),
+        .MEM_BUFF               (cpu_mem_data_out),
+        .WRITE_ENABLE           (cpu_mem_we),
+
+        // Register outputs (directly active low for debug)
+        .AC                     (cpu_ac),
+        .IO                     (cpu_io),
+        .PC                     (cpu_pc),
+        .BUS_out                (cpu_bus_out),
+
+        // Gamepad input
+        .gamepad_in             (gamepad_in),
+
+        // CRT output
+        .pixel_x_out            (cpu_pixel_x),
+        .pixel_y_out            (cpu_pixel_y),
+        .pixel_brightness       (cpu_pixel_brightness),
+        .pixel_shift_out        (cpu_pixel_shift),
+
+        // Typewriter (directly active low directly active high - directly active low)
+        .typewriter_char_out    (typewriter_char_out),
+        .typewriter_strobe_out  (typewriter_strobe_out),
+        .typewriter_char_in     (6'b0),
+        .typewriter_strobe_in   (1'b0),
+        .typewriter_strobe_ack  (typewriter_strobe_ack),
+
+        // Paper tape (directly active low directly active high - directly active low)
+        .send_next_tape_char    (send_next_tape_char),
+        .is_char_available      (1'b0),
+        .tape_rcv_word          (18'b0),
+
+        // Start address
+        .start_address          (12'o4),     // Spacewar! starts at octal 4
+
+        // Configuration
+        .hw_mul_enabled         (1'b1),      // Enable hardware multiply/divide
+        .crt_wait               (1'b0),      // Disable CRT wait for faster execution
+
+        // Console switches
+        .console_switches       (console_switches),
+        .test_word              (test_word),
+        .test_address           (test_address),
+        .sense_switches         (sense_switches)
+    );
+
+    // Map CPU outputs to test pattern signals (for CRT display)
+    wire [9:0] test_pixel_x = cpu_pixel_x;
+    wire [9:0] test_pixel_y = cpu_pixel_y;
+    wire [2:0] test_brightness = cpu_pixel_brightness;
+    wire       test_pixel_avail = cpu_pixel_shift;
 `endif
 
 `ifdef TEST_ANIMATION
@@ -347,7 +494,18 @@ module top_pdp1
         .pixel_y_i          (pixel_y_sync),
         .pixel_brightness   (brightness_sync),
         .variable_brightness(1'b1),
-        .pixel_available    (pixel_avail_synced)
+        .pixel_available    (pixel_avail_synced),
+
+        // Debug outputs
+        .debug_write_ptr    (crt_debug_write_ptr),
+        .debug_read_ptr     (crt_debug_read_ptr),
+        .debug_wren         (crt_debug_wren),
+        .debug_search_counter (crt_debug_search_counter),
+        .debug_luma1        (crt_debug_luma1),
+        .debug_rowbuff_wren (crt_debug_rowbuff_wren),
+        .debug_inside_visible (crt_debug_inside_visible),
+        .debug_pixel_to_rowbuff (crt_debug_pixel_to_rowbuff),
+        .debug_rowbuff_write_count (crt_debug_rowbuff_write_count)
     );
 
     // =========================================================================
@@ -504,19 +662,28 @@ module top_pdp1
             led_divider <= led_divider + 1'b1;
     end
 
-    // Latch pixel_valid, frame_tick na usporeni clock za vidljivost
+    // Latch pixel_valid, frame_tick, rowbuff_write na usporeni clock za vidljivost
     reg pixel_valid_seen;
     reg frame_tick_seen;
+    reg rowbuff_write_seen;
+    reg inside_visible_seen;
+    reg pixel_to_rowbuff_seen;
 
     always @(posedge clk_pixel) begin
         if (!rst_pixel_n) begin
             pixel_valid_seen <= 1'b0;
             frame_tick_seen  <= 1'b0;
+            rowbuff_write_seen <= 1'b0;
+            inside_visible_seen <= 1'b0;
+            pixel_to_rowbuff_seen <= 1'b0;
         end else begin
-            // Reset na svaki slow clock tick
-            if (led_divider == 25'd0) begin
+            // Reset na svaki slow clock tick (~0.5s period)
+            if (led_divider[24]) begin
                 pixel_valid_seen <= 1'b0;
                 frame_tick_seen  <= 1'b0;
+                rowbuff_write_seen <= 1'b0;
+                inside_visible_seen <= 1'b0;
+                pixel_to_rowbuff_seen <= 1'b0;
             end else begin
                 // Latch ako se dogodilo
                 if (pixel_avail_synced)
@@ -525,52 +692,91 @@ module top_pdp1
                 if (frame_tick)
                     frame_tick_seen <= 1'b1;
 `endif
+                // DEBUG: Latch rowbuffer write activity
+                if (crt_debug_rowbuff_wren)
+                    rowbuff_write_seen <= 1'b1;
+                // DEBUG: Latch inside_visible_area activity
+                if (crt_debug_inside_visible)
+                    inside_visible_seen <= 1'b1;
+                // DEBUG: Latch pixel written to rowbuffer (non-zero data)
+                if (crt_debug_pixel_to_rowbuff)
+                    pixel_to_rowbuff_seen <= 1'b1;
             end
         end
     end
 
-    // LED[0] = heartbeat (clock radi) - blink na ~1.5Hz
-    // LED[1] = pixel_valid signal (usporeno) - svijetli ako je bio aktivan
-    // LED[2] = frame_tick (usporeno) - svijetli ako je bio frame tick
-    // LED[3] = animation angle MSB (da vidimo da se mijenja)
-    // LED[4] = h_counter overflow (MSB)
-    // LED[5] = v_counter overflow (MSB)
-    // LED[6] = PLL locked (konstantno ako je OK)
-    // LED[7] = rst_pixel_n (mora biti HIGH ako reset nije aktivan)
+    // =========================================================================
+    // COMPREHENSIVE LED DEBUG (TASK-215)
+    // =========================================================================
+    // LED[0] = heartbeat (clk_pixel radi) - blink na ~1.5Hz
+    // LED[1] = cpu_clk_seen - CPU clock activity detected
+    // LED[2] = pixel_valid_seen - Pixel valid signal seen
+    // LED[3] = frame_tick_seen - Frame tick detected
+    // LED[4] = h_counter[9] - H counter MSB (toggles during line)
+    // LED[5] = v_counter[9] - V counter MSB (toggles during frame)
+    // LED[6] = pll_locked - PLL lock indicator
+    // LED[7] = rst_pixel_n - Reset released
 
-`ifdef TEST_ANIMATION
-    assign led[0] = led_divider[24];                    // Heartbeat ~1.5Hz
-    assign led[1] = pixel_valid_seen;                   // Pixel valid seen
-    assign led[2] = frame_tick_seen;                    // Frame tick seen
-    assign led[3] = anim_debug_angle[7];                // Animation angle MSB
-    assign led[4] = h_counter[10];                      // H counter MSB
-    assign led[5] = v_counter[10];                      // V counter MSB
-    assign led[6] = pll_locked;                         // PLL locked
-    assign led[7] = rst_pixel_n;                        // Reset released
-`else
-    // Original LED assignments when not in TEST_ANIMATION mode
-    assign led[7]   = pll_locked;
-    assign led[6]   = single_player;
-    assign led[5]   = p2_mode_active;
-    assign led[4]   = sw[3];
-    assign led[3:0] = joystick_emu[3:0];
+    // CPU clock activity detector - latch if CPU clock enable was seen
+    reg cpu_clk_seen;
+    reg [1:0] cpu_clk_sync;
+
+    always @(posedge clk_pixel) begin
+        if (!rst_pixel_n) begin
+            cpu_clk_seen <= 1'b0;
+            cpu_clk_sync <= 2'b0;
+        end else begin
+            // Synchronize clk_cpu_en to pixel domain
+            cpu_clk_sync <= {cpu_clk_sync[0], clk_cpu_en};
+            // Reset on slow clock tick, latch if cpu clock seen
+            if (led_divider[24])
+                cpu_clk_seen <= 1'b0;
+            else if (cpu_clk_sync[1])
+                cpu_clk_seen <= 1'b1;
+        end
+    end
+
+    // Frame tick detector for non-TEST_ANIMATION mode
+`ifndef TEST_ANIMATION
+    reg frame_tick_seen_cpu;
+    always @(posedge clk_pixel) begin
+        if (!rst_pixel_n)
+            frame_tick_seen_cpu <= 1'b0;
+        else if (led_divider[24])
+            frame_tick_seen_cpu <= 1'b0;
+        else if (cpu_frame_tick)
+            frame_tick_seen_cpu <= 1'b1;
+    end
 `endif
+
+    // Unified LED assignments for comprehensive debug
+    assign led[0] = led_divider[24];           // Heartbeat ~1.5Hz (clk_pixel radi)
+    assign led[1] = cpu_clk_seen;              // CPU clock activity (NOVO!)
+    assign led[2] = pixel_valid_seen;          // Pixel valid detected
+`ifdef TEST_ANIMATION
+    assign led[3] = frame_tick_seen;           // Frame tick detected
+`else
+    assign led[3] = frame_tick_seen_cpu;       // Frame tick detected (CPU mode)
+`endif
+    assign led[4] = h_counter[9];              // H counter MSB (toggles during line)
+    assign led[5] = v_counter[9];              // V counter MSB (toggles during frame)
+    assign led[6] = pll_locked;                // PLL locked
+    assign led[7] = rst_pixel_n;               // Reset released
 
     // =========================================================================
     // DEBUG: SERIAL OUTPUT (UART TX)
     // =========================================================================
 `ifdef TEST_ANIMATION
-    // Collect LED status for debug output
-    wire [7:0] debug_led_status = {
-        rst_pixel_n,           // LED[7]
-        pll_locked,            // LED[6]
-        v_counter[10],         // LED[5]
-        h_counter[10],         // LED[4]
-        anim_debug_angle[7],   // LED[3]
-        frame_tick_seen,       // LED[2]
-        pixel_valid_seen,      // LED[1]
-        led_divider[24]        // LED[0]
-    };
+    // Pass actual LED values to serial debug for real-time monitoring
+    // LED assignments (from lines 579-587):
+    //   LED[0] = heartbeat ~1.5Hz
+    //   LED[1] = pixel_valid_seen
+    //   LED[2] = frame_tick_seen
+    //   LED[3] = pixel_to_rowbuff_seen (non-zero pixel written)
+    //   LED[4] = inside_visible_seen
+    //   LED[5] = luma1 != 0 (ring buffer has pixels)
+    //   LED[6] = pll_locked
+    //   LED[7] = rst_pixel_n (reset released)
 
     serial_debug serial_debug_inst (
         .clk          (clk_pixel),
@@ -580,12 +786,56 @@ module top_pdp1
         .pixel_x      (anim_pixel_x),
         .pixel_y      (anim_pixel_y),
         .pixel_valid  (anim_pixel_valid),
-        .led_status   (debug_led_status),
+        .led_status   (led),  // Use actual LED values
+        // Additional debug signals
+        .pixel_avail_synced (pixel_avail_synced),
+        .crt_wren           (crt_debug_wren),
+        .crt_write_ptr      (crt_debug_write_ptr),
+        .crt_read_ptr       (crt_debug_read_ptr),
+        .search_counter_msb (crt_debug_search_counter),
+        .luma1              (crt_debug_luma1),
+        .rowbuff_write_count (crt_debug_rowbuff_write_count),
         .uart_tx_pin  (ftdi_rxd)
     );
 `else
-    // Kada nije TEST_ANIMATION, drzi UART TX high (idle)
-    assign ftdi_rxd = 1'b1;
+    // =========================================================================
+    // CPU MODE: Serial Debug Output (TASK-214)
+    // =========================================================================
+    // Frame tick generator za CPU mode (isti kao u TEST_ANIMATION)
+    reg cpu_frame_tick;
+    reg [10:0] cpu_prev_v_counter;
+
+    always @(posedge clk_pixel) begin
+        if (!rst_pixel_n) begin
+            cpu_frame_tick <= 1'b0;
+            cpu_prev_v_counter <= 11'd0;
+        end else begin
+            cpu_prev_v_counter <= v_counter;
+            // Detect start of new frame (vblank start)
+            cpu_frame_tick <= (v_counter == 11'd0) && (cpu_prev_v_counter != 11'd0);
+        end
+    end
+
+    // Serial debug za CPU mode - koristi CPU signale
+    serial_debug serial_debug_cpu_inst (
+        .clk          (clk_pixel),
+        .rst_n        (rst_pixel_n),
+        .frame_tick   (cpu_frame_tick),
+        .angle        (cpu_pc[7:0]),           // PC low byte umjesto angle
+        .pixel_x      (cpu_pixel_x),           // CPU pixel X
+        .pixel_y      (cpu_pixel_y),           // CPU pixel Y
+        .pixel_valid  (cpu_pixel_shift),       // CPU pixel shift
+        .led_status   (led),                   // LED status
+        // Additional debug signals
+        .pixel_avail_synced (pixel_avail_synced),
+        .crt_wren           (crt_debug_wren),
+        .crt_write_ptr      (crt_debug_write_ptr),
+        .crt_read_ptr       (crt_debug_read_ptr),
+        .search_counter_msb (crt_debug_search_counter),
+        .luma1              (crt_debug_luma1),
+        .rowbuff_write_count (crt_debug_rowbuff_write_count),
+        .uart_tx_pin  (ftdi_rxd)
+    );
 `endif
 
 endmodule

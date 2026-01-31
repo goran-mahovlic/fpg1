@@ -116,6 +116,21 @@ IOBUF PORT "gpdi_dp[3]" IO_TYPE=LVCMOS33 DRIVE=4;
 IOBUF PORT "gpdi_dn[3]" IO_TYPE=LVCMOS33 DRIVE=4;
 
 # =============================================================================
+# GPDI Control Pins (HDMI HPD workaround) - TASK-214, TASK-215
+# =============================================================================
+# gpdi_scl = I2C DDC SCL - drive HIGH for HPD workaround
+# Some monitors use DDC activity as wake-up indication
+LOCATE COMP "gpdi_scl" SITE "E12";
+IOBUF PORT "gpdi_scl" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;
+
+# gpdi_hpd = HDMI Hot Plug Detect (TASK-216 FIX)
+# Pin B20 is the actual HPD pin on ULX3S GPDI connector
+# HPD is INPUT - monitor pulls HIGH when connected, FPGA reads it
+# PULLMODE=DOWN so HPD=0 when monitor not connected, HPD=1 when connected
+LOCATE COMP "gpdi_hpd" SITE "B20";
+IOBUF PORT "gpdi_hpd" IO_TYPE=LVCMOS33 PULLMODE=DOWN;
+
+# =============================================================================
 # WIFI/ESP32 CONTROL
 # =============================================================================
 # wifi_gpio0=1 keeps ESP32 from rebooting the FPGA

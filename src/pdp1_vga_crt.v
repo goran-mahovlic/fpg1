@@ -34,7 +34,18 @@ module pdp1_vga_crt (
 
   input  variable_brightness,                                  /* Should we respect specified brightness levels? */
 
-  input  pixel_available                                       /* High when there is a pixel to be written */
+  input  pixel_available,                                      /* High when there is a pixel to be written */
+
+  // DEBUG outputs
+  output wire [5:0] debug_write_ptr,                           /* FIFO write pointer for debug */
+  output wire [5:0] debug_read_ptr,                            /* FIFO read pointer for debug */
+  output wire       debug_wren,                                /* Write enable signal for debug */
+  output wire [10:0] debug_search_counter,                     /* Search counter MSBs for debug */
+  output wire [11:0] debug_luma1,                              /* Luma from ring buffer 1 output */
+  output wire       debug_rowbuff_wren,                        /* Rowbuffer write enable for LED */
+  output wire       debug_inside_visible,                      /* inside_visible_area signal */
+  output wire       debug_pixel_to_rowbuff,                    /* Non-zero pixel written to rowbuffer */
+  output wire [15:0] debug_rowbuff_write_count                 /* Non-zero pixels written to rowbuffer per frame */
 );
 
 //////////////////  PARAMETERS  ///////////////////
@@ -109,6 +120,7 @@ integer i;                                                     /* Used in for lo
 
 reg [31:0] pass_counter = 32'd1;                               /* Counts vertical refresh cycles */
 reg [9:0]  erase_counter;
+reg        pixel_found;                                        /* Used in rowbuffer write logic to track if pixel was found */
 
 reg [31:0] search_counter;                                     /* Counts how many clock cycles passed since we didn't see the pixel to be added on any of the ring buffer taps */
 
@@ -124,6 +136,45 @@ reg [15:0] pixel_out;
 reg prev_wren_i, prev_prev_wren_i, wren;                       /* Store write enable signals to detect a rising edge */
 
 reg inside_visible_area;                                       /* Indicate if we are currently within area which is visible */
+
+// DEBUG: Export internal signals
+assign debug_write_ptr = buffer_write_ptr;
+assign debug_read_ptr = buffer_read_ptr;
+assign debug_wren = wren;
+assign debug_search_counter = search_counter[31:21];  // MSBs to see if it's large
+assign debug_luma1 = luma_1;
+
+// DEBUG: Provjeri koordinate u vidljivom rasponu (0-511 za PDP-1, ili 0-479 za 640x480)
+wire [9:0] dbg_px = pixel_x_i;
+wire [9:0] dbg_py = pixel_y_i;
+wire dbg_coord_in_range = (pixel_x_i < 10'd512) && (pixel_y_i < 10'd512);
+
+// DEBUG: Export rowbuffer write signal za LED indikator
+assign debug_rowbuff_wren = rowbuff_wren;
+
+// DEBUG: Export inside_visible_area signal
+assign debug_inside_visible = inside_visible_area;
+
+// DEBUG: Signalizacija da se piksel upisuje u rowbuffer (non-zero data)
+assign debug_pixel_to_rowbuff = rowbuff_wren && (rowbuff_wdata != 8'd0);
+
+// DEBUG: Brojac non-zero piksela upisanih u rowbuffer po frameu
+reg [15:0] rowbuff_nonzero_count;
+reg [15:0] debug_rowbuff_count_latched;
+reg [10:0] prev_v_counter_dbg;
+
+always @(posedge clk) begin
+    prev_v_counter_dbg <= vertical_counter;
+    // Detect frame start (v_counter wraps)
+    if (vertical_counter == 11'd0 && prev_v_counter_dbg != 11'd0) begin
+        debug_rowbuff_count_latched <= rowbuff_nonzero_count;
+        rowbuff_nonzero_count <= 16'd0;
+    end else if (rowbuff_wren && rowbuff_wdata != 8'd0) begin
+        rowbuff_nonzero_count <= rowbuff_nonzero_count + 1'b1;
+    end
+end
+
+assign debug_rowbuff_write_count = debug_rowbuff_count_latched;
 
 
 
@@ -231,17 +282,19 @@ always @(posedge clk) begin
 
      begin
      /* Dimming old pixels at the points where ring buffers connect. They are stored into registers and connected: 1->2, 2->3, 3->4, 4->1 */
-     shiftout_1 <= luma_4[11:4] ? { pixel_4_y, pixel_4_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_4) : luma_4 } : 0;
-     shiftout_2 <= luma_1[11:4] ? { pixel_1_y, pixel_1_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_1) : luma_1 } : 0;
-     shiftout_3 <= luma_2[11:4] ? { pixel_2_y, pixel_2_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_2) : luma_2 }: 0;
-     shiftout_4 <= luma_3[11:4] ? { pixel_3_y, pixel_3_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_3) : luma_3 }: 0;
+     /* DEBUG: DIMMING ISKLJUČEN - pikseli ostaju na maksimalnoj luminoznosti */
+     shiftout_1 <= luma_4[11:4] ? { pixel_4_y, pixel_4_x, luma_4 } : 0;
+     shiftout_2 <= luma_1[11:4] ? { pixel_1_y, pixel_1_x, luma_1 } : 0;
+     shiftout_3 <= luma_2[11:4] ? { pixel_2_y, pixel_2_x, luma_2 } : 0;
+     shiftout_4 <= luma_3[11:4] ? { pixel_3_y, pixel_3_x, luma_3 } : 0;
 
      /* Add new pixel */
 
      /* If we didn't find a pixel on one of the taps withing 1024 clock cycles (inter-tap distance), assume there is
         nothing to update and once we find a dark pixel we can re-use, add the current one to that position */
+     /* DEBUG: Smanjen search_counter threshold na 64 za brze dodavanje piksela */
 
-     if (buffer_write_ptr != buffer_read_ptr && search_counter > 1024 && (!luma_1[11:4] || !luma_2[11:4] || !luma_3[11:4] || !luma_4[11:4]))
+     if (buffer_write_ptr != buffer_read_ptr && search_counter > 64 && (!luma_1[11:4] || !luma_2[11:4] || !luma_3[11:4] || !luma_4[11:4]))
      begin
          if (luma_4[11:4] == 0)
                shiftout_1 <= { { next_pixel_y, next_pixel_x, 12'd4095 } };
@@ -328,30 +381,47 @@ always @(posedge clk) begin
 
    output_pixel(pixel_out);
 
-   if (erase_counter < current_x)                              /* This is so the last column gets erased */
-      begin
-         rowbuff_wraddress <= {current_y[2:0], erase_counter};
-         rowbuff_wdata <= 0;
-         erase_counter <= erase_counter + 1'b1;
+   // =========================================================================
+   // FIX: Odvojeni erase i pixel write - pixel write ima prioritet
+   // =========================================================================
+   // PROBLEM: Stari kod je imao erase u if, pixel write u else - erase je blokirao pixel write
+   // RJESENJE: Pixel write se uvijek pokusava, erase samo kad nema piksela za upisati
+
+   // Prvo provjeri ima li piksela za upisati iz ring buffera
+   // Pixel write prioritet - trazi piksel koji treba upisati u rowbuffer
+   pixel_found = 1'b0;
+
+   for (i=8; i>0; i=i-1'b1) begin
+      if (!pixel_found && current_y < taps1[i * DATA_WIDTH-1 -: 10] && taps1[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps1[i * DATA_WIDTH - 21 -: 8] > 0) begin
+         rowbuff_wraddress <= {taps1[i * DATA_WIDTH - 8 -: 3], taps1[i * DATA_WIDTH - 11 -: 10]};
+         rowbuff_wdata <= taps1[i * DATA_WIDTH - 21 -: 8];
+         pixel_found = 1'b1;
       end
+      else if (!pixel_found && current_y < taps2[i * DATA_WIDTH-1 -: 10] && taps2[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps2[i * DATA_WIDTH - 21 -: 8] > 0) begin
+         rowbuff_wraddress <= {taps2[i * DATA_WIDTH - 8 -: 3], taps2[i * DATA_WIDTH - 11 -: 10]};
+         rowbuff_wdata <= taps2[i * DATA_WIDTH - 21 -: 8];
+         pixel_found = 1'b1;
+      end
+      else if (!pixel_found && current_y < taps3[i * DATA_WIDTH-1 -: 10] && taps3[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps3[i * DATA_WIDTH - 21 -: 8] > 0) begin
+         rowbuff_wraddress <= {taps3[i * DATA_WIDTH - 8 -: 3], taps3[i * DATA_WIDTH - 11 -: 10]};
+         rowbuff_wdata <= taps3[i * DATA_WIDTH - 21 -: 8];
+         pixel_found = 1'b1;
+      end
+      else if (!pixel_found && current_y < taps4[i * DATA_WIDTH-1 -: 10] && taps4[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps4[i * DATA_WIDTH - 21 -: 8] > 0) begin
+         rowbuff_wraddress <= {taps4[i * DATA_WIDTH - 8 -: 3], taps4[i * DATA_WIDTH - 11 -: 10]};
+         rowbuff_wdata <= taps4[i * DATA_WIDTH - 21 -: 8];
+         pixel_found = 1'b1;
+      end
+   end
 
-   else
-   /* Multi row scanline buffer, look 7 lines ahead and fill corresponding pixels with matches found in the ring buffer */
-   for (i=8; i>0; i=i-1'b1)
-      if (current_y < taps1[i * DATA_WIDTH-1 -: 10] && taps1[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps1[i * DATA_WIDTH - 21 -: 8] > 0)
-         begin  rowbuff_wraddress <= {taps1[i * DATA_WIDTH - 8 -: 3], taps1[i * DATA_WIDTH - 11 -: 10]}; rowbuff_wdata <= taps1[i * DATA_WIDTH - 21 -: 8]; end
-      else
-      if (current_y < taps2[i * DATA_WIDTH-1 -: 10] && taps2[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps2[i * DATA_WIDTH - 21 -: 8] > 0)
-         begin  rowbuff_wraddress <= {taps2[i * DATA_WIDTH - 8 -: 3], taps2[i * DATA_WIDTH - 11 -: 10]}; rowbuff_wdata <= taps2[i * DATA_WIDTH - 21 -: 8]; end
-      else
-      if (current_y < taps3[i * DATA_WIDTH-1 -: 10] && taps3[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps3[i * DATA_WIDTH - 21 -: 8] > 0)
-         begin  rowbuff_wraddress <= {taps3[i * DATA_WIDTH - 8 -: 3], taps3[i * DATA_WIDTH - 11 -: 10]}; rowbuff_wdata <= taps3[i * DATA_WIDTH - 21 -: 8]; end
-      else
-      if (current_y < taps4[i * DATA_WIDTH-1 -: 10] && taps4[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps4[i * DATA_WIDTH - 21 -: 8] > 0)
-         begin  rowbuff_wraddress <= {taps4[i * DATA_WIDTH - 8 -: 3], taps4[i * DATA_WIDTH - 11 -: 10]}; rowbuff_wdata <= taps4[i * DATA_WIDTH - 21 -: 8]; end
-      else
+   // Ako nije pronaden piksel, nastavi s erase-om (ne blokiraj pixel write)
+   if (!pixel_found && erase_counter < current_x) begin
+      rowbuff_wraddress <= {current_y[2:0], erase_counter};
+      rowbuff_wdata <= 0;
+      erase_counter <= erase_counter + 1'b1;
+   end
 
-   /* Erase counter is the x index used to erase the last column of the 1280 x 8 buffer used to store the next lines to be drawn. */
+   // Reset erase counter na kraju linije
    if (horizontal_counter == `h_line_timing)
       erase_counter <= 0;
 
@@ -364,8 +434,9 @@ always @(posedge clk) begin
    if (horizontal_counter == `h_line_timing)
       pass_counter <= pass_counter + 1'b1;                     /* Counts the number of vertical refresh passes, used to slow down pixel dimming (do one for every n passes) */
 
-   prev_prev_wren_i <= prev_wren_i;                            /* Positive edge detect on a write enable signal, with additional clock to allow the signal to stabilize */
+   prev_prev_wren_i <= prev_wren_i;                            /* Falling edge detect on a write enable signal, with additional clock to allow the signal to stabilize */
    prev_wren_i <= pixel_available;
+   /* FIX: Falling edge detection - piksel je spreman kad signal PADA */
    wren <= prev_prev_wren_i & ~prev_wren_i;
 
 end
