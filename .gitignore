@@ -1,0 +1,36 @@
+# Build artifacts
+build/*.json
+build/*.log
+*.vcd
+*.fst
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.tmp
+*.bak
+fpg1/
+fpg1_partial_emard/
+# Internal reports
+TASK-*.md
+
+# Internal documentation with local paths
+HARDWARE_TEST.md
+TOOLCHAIN.md
+ARCHITECTURE.md
+RESEARCH.md
+PLAN.md
+VERILATOR-*.txt
+regoc/
+docs/
+# Build logs and binaries
+build_*.log
+tb/tb_*
