@@ -29,6 +29,11 @@
 `define   v_visible_offset       11'd40        /* v_front + v_sync + v_back = 3 + 6 + 31 = 40 */
 `define   v_visible_offset_end   11'd808       /* v_visible_offset + v_visible = 40 + 768 = 808 */
 
+/* CRT vertical offset - pomice PDP-1 sliku dolje za N linija */
+/* PDP-1 ima 1024x1024 koordinatni sustav, VGA prikazuje 768 linija */
+/* Offset 128 pomice vidljivo podrucje s 0-767 na 128-895 */
+`define   v_crt_offset           10'd128       /* Vertikalni pomak slike u PDP-1 koordinatama */
+
 
 /* Joystick, defined in core configuration string as 
    "J,Left,Right,Thrust,Fire,HyperSpace;", therefore:

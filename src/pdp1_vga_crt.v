@@ -192,6 +192,11 @@ assign p31_w = p31;
 assign current_y = (vertical_counter >= `v_visible_offset && vertical_counter < `v_visible_offset_end) ? vertical_counter - `v_visible_offset : 11'b0;
 assign current_x = (horizontal_counter >= `h_visible_offset + `h_center_offset && horizontal_counter < `h_visible_offset_end + `h_center_offset) ? horizontal_counter - (`h_visible_offset + `h_center_offset): 11'b0;
 
+/* PDP-1 Y koordinata = current_y + v_crt_offset */
+/* Ovo pomice vidljivo podrucje u PDP-1 koordinatnom sustavu */
+wire [9:0] pdp1_y;
+assign pdp1_y = current_y + `v_crt_offset;
+
 
 ///////////////////  MODULES  /////////////////////
 
@@ -409,22 +414,22 @@ always @(posedge clk) begin
    pixel_found = 1'b0;
 
    for (i=8; i>0; i=i-1'b1) begin
-      if (!pixel_found && current_y < taps1[i * DATA_WIDTH-1 -: 10] && taps1[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps1[i * DATA_WIDTH - 21 -: 8] > 0) begin
+      if (!pixel_found && pdp1_y < taps1[i * DATA_WIDTH-1 -: 10] && taps1[i * DATA_WIDTH-1 -: 10] - pdp1_y <= 3'd7 && taps1[i * DATA_WIDTH - 21 -: 8] > 0) begin
          rowbuff_wraddress <= {taps1[i * DATA_WIDTH - 8 -: 3], taps1[i * DATA_WIDTH - 11 -: 10]};
          rowbuff_wdata <= taps1[i * DATA_WIDTH - 21 -: 8];
          pixel_found = 1'b1;
       end
-      else if (!pixel_found && current_y < taps2[i * DATA_WIDTH-1 -: 10] && taps2[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps2[i * DATA_WIDTH - 21 -: 8] > 0) begin
+      else if (!pixel_found && pdp1_y < taps2[i * DATA_WIDTH-1 -: 10] && taps2[i * DATA_WIDTH-1 -: 10] - pdp1_y <= 3'd7 && taps2[i * DATA_WIDTH - 21 -: 8] > 0) begin
          rowbuff_wraddress <= {taps2[i * DATA_WIDTH - 8 -: 3], taps2[i * DATA_WIDTH - 11 -: 10]};
          rowbuff_wdata <= taps2[i * DATA_WIDTH - 21 -: 8];
          pixel_found = 1'b1;
       end
-      else if (!pixel_found && current_y < taps3[i * DATA_WIDTH-1 -: 10] && taps3[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps3[i * DATA_WIDTH - 21 -: 8] > 0) begin
+      else if (!pixel_found && pdp1_y < taps3[i * DATA_WIDTH-1 -: 10] && taps3[i * DATA_WIDTH-1 -: 10] - pdp1_y <= 3'd7 && taps3[i * DATA_WIDTH - 21 -: 8] > 0) begin
          rowbuff_wraddress <= {taps3[i * DATA_WIDTH - 8 -: 3], taps3[i * DATA_WIDTH - 11 -: 10]};
          rowbuff_wdata <= taps3[i * DATA_WIDTH - 21 -: 8];
          pixel_found = 1'b1;
       end
-      else if (!pixel_found && current_y < taps4[i * DATA_WIDTH-1 -: 10] && taps4[i * DATA_WIDTH-1 -: 10] - current_y <= 3'd7 && taps4[i * DATA_WIDTH - 21 -: 8] > 0) begin
+      else if (!pixel_found && pdp1_y < taps4[i * DATA_WIDTH-1 -: 10] && taps4[i * DATA_WIDTH-1 -: 10] - pdp1_y <= 3'd7 && taps4[i * DATA_WIDTH - 21 -: 8] > 0) begin
          rowbuff_wraddress <= {taps4[i * DATA_WIDTH - 8 -: 3], taps4[i * DATA_WIDTH - 11 -: 10]};
          rowbuff_wdata <= taps4[i * DATA_WIDTH - 21 -: 8];
          pixel_found = 1'b1;

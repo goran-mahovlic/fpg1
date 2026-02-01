@@ -813,6 +813,7 @@ module top_pdp1
     serial_debug serial_debug_inst (
         .clk          (clk_pixel),
         .rst_n        (rst_pixel_n),
+        .enable       (sw[1]),          // TASK-OPT: SW[1]=1 enables debug, SW[1]=0 disables
         .frame_tick   (frame_tick),
         .angle        (anim_debug_angle),
         .pixel_x      (anim_pixel_x),
@@ -864,6 +865,7 @@ module top_pdp1
     serial_debug serial_debug_cpu_inst (
         .clk          (clk_pixel),
         .rst_n        (rst_pixel_n),
+        .enable       (sw[1]),          // TASK-OPT: SW[1]=1 enables debug, SW[1]=0 disables
         .frame_tick   (cpu_frame_tick),
         .angle        (cpu_pc[7:0]),           // PC low byte umjesto angle
         .pixel_x      (cpu_pixel_x),           // CPU pixel X

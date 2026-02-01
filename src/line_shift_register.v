@@ -25,9 +25,9 @@ module line_shift_register
     localparam ADDR_WIDTH = 11;          // 2^11 = 2048 > 1264 (povecano s 10 na 11!)
     localparam MEM_DEPTH = 1 << ADDR_WIDTH;
 
-    // BRAM inference - registered outputs for proper BRAM mapping
-    // Using (* ram_style = "block" *) attribute for Yosys/ECP5
-    (* ram_style = "block" *)
+    // Distributed RAM inference - uses LUTs instead of BRAM for better timing
+    // TASK-OPT: Changed from "block" to "distributed" for timing improvement
+    (* ram_style = "distributed" *)
     reg [7:0] mem [0:MEM_DEPTH-1];
 
     // Initialize to 0 to prevent garbage on power-up

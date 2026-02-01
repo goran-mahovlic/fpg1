@@ -118,6 +118,7 @@ endmodule
 module serial_debug (
     input  wire        clk,
     input  wire        rst_n,
+    input  wire        enable,         // SW[1] kontrola: 0=disabled, 1=enabled
     input  wire        frame_tick,
     input  wire [7:0]  angle,
     input  wire [9:0]  pixel_x,
@@ -406,8 +407,13 @@ module serial_debug (
 
             case (state)
                 ST_IDLE: begin
+                    // TASK-OPT: Skip all processing when disabled (SW[1]=0)
+                    if (!enable) begin
+                        // Do nothing when disabled - saves timing resources
+                        pixel_msg_pending <= 1'b0;  // Clear any pending messages
+                    end
                     // Priority 1: Send pixel debug message if pending and UART is free
-                    if (pixel_msg_pending) begin
+                    else if (pixel_msg_pending) begin
                         // Prepare pixel debug message buffer
                         // Format: "P:xxxxx X:xxx Y:xxx B:x R:xxxx\n"
                         msg_buffer[0]  <= "P";
