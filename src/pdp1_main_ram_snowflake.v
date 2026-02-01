@@ -37,7 +37,7 @@ module pdp1_main_ram (
     // Initialize from HEX file at synthesis time
     // snowflake.hex contains a simple test/demo program
     initial begin
-        $readmemh("/home/klaudio/port_fpg1/src/rom/snowflake.hex", mem);
+        $readmemh("src/rom/snowflake.hex", mem);
     end
 
     // Port A - synchronous read/write

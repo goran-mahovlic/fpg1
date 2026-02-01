@@ -11,7 +11,7 @@
 // - RGB output logiranje kroz vise frameova
 //
 // Pokretanje:
-//   cd /home/klaudio/port_fpg1
+//   cd <project-root>
 //   iverilog -I src -o sim/tb_pdp1_vga_crt sim/tb_pdp1_vga_crt.v \
 //            src/pdp1_vga_crt.v src/pdp1_vga_rowbuffer.v \
 //            src/line_shift_register.v src/pixel_ring_buffer.v

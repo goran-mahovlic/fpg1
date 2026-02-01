@@ -19,3 +19,5 @@ Thumbs.db
 *.bak
 fpg1/
 fpg1_partial_emard/
+# Internal reports
+TASK-*.md

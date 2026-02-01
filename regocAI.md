@@ -197,11 +197,10 @@ Features:
 **Toolchain:** Open source (yosys + nextpnr-ecp5 + ecppack)
 
 ```bash
-# Prerequisites
-source ~/Programs/oss-cad-suite/environment
+# Prerequisites - install oss-cad-suite from https://github.com/YosysHQ/oss-cad-suite-build
+source <path-to-oss-cad-suite>/environment
 
 # Build
-cd /home/klaudio/port_fpg1
 make clean && make pdp1
 
 # Output
