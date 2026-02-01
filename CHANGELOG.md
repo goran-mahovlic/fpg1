@@ -50,7 +50,7 @@
 
 #### Fix #1: RAM Path (Critical)
 - **Problem:** `$readmemh("rom/spacewar.hex")` used relative path - Yosys couldn't find file
-- **Solution:** Changed to absolute path `/home/klaudio/port_fpg1/src/rom/spacewar.hex`
+- **Solution:** Changed to relative path `src/rom/spacewar.hex`
 - **File:** `src/pdp1_main_ram.v` line 40
 
 #### Fix #2: Edge Detection

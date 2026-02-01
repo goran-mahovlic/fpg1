@@ -1,104 +1,62 @@
-# PDP-1 FPGA Emulator - ULX3S Port
+# PDP-1 Spacewar! - Lattice ECP5 Port
 
-Port of the PDP-1 emulator from Altera Cyclone V to Lattice ECP5 (ULX3S board).
+Port of the classic PDP-1 emulator from Intel Cyclone V (MiSTer) to Lattice ECP5 (ULX3S board).
 
-## Status: v1.0.0 ✅ WORKING!
+## Status
 
-**Resolution:** 640x480@60Hz
-**Timing:** PASS
-**Hardware:** ULX3S (ECP5-85F)
+| Parameter | Value |
+|-----------|-------|
+| Resolution | 1024x768 @ 50Hz |
+| Target FPGA | Lattice ECP5-45F / ECP5-85F |
+| Board | ULX3S v3.1.7 |
+| Status | Working (ships not visible - known issue) |
 
 ## Quick Start
 
 ```bash
-# Build bitstream
-make all
+# Install OSS CAD Suite from https://github.com/YosysHQ/oss-cad-suite-build
+source <path-to-oss-cad-suite>/environment
+
+# Build
+make clean && make pdp1
 
 # Program ULX3S
-make program
+fujprog build/pdp1.bit
 
-# Or manually:
-fujprog bit/pdp1_640x480_v1.bit
+# Or flash to SPI (persistent)
+fujprog -j flash build/pdp1.bit
 ```
-
-## Directory Structure
-
-```
-port_fpg1/
-├── bit/                    # Bitstreams
-│   └── pdp1_640x480_v1.bit # Current production bitstream
-├── build/                  # Build artifacts
-├── docs/                   # Design documentation
-│   └── ESP32_OSD_DESIGN.md # OSD system design (V2)
-├── regoc/                  # REGOČ session reports
-│   ├── SESSION_2026-01-31.md
-│   ├── AGENTS.md
-│   └── CHANGELOG.md
-├── src/                    # Verilog source
-├── tb/                     # Testbenches
-├── tools/                  # Build tools
-├── ARCHITECTURE.md         # System architecture
-├── HARDWARE_TEST.md        # Hardware test procedures
-├── RESEARCH.md             # Research notes
-└── Makefile                # Build system
-```
-
-## Clock Configuration
-
-| Clock | Frequency | Purpose |
-|-------|-----------|---------|
-| clk_shift | 125 MHz | HDMI serialization (5x pixel) |
-| clk_pixel | 25 MHz | 640x480@60Hz video |
-| clk_cpu | 50 MHz | PDP-1 emulation |
 
 ## Controls
 
-### Keyboard
-- **Space:** Fire
-- **W/A/S/D:** Thrust/Rotate
-- **H:** Hyperspace
-
-### ULX3S Buttons
-- **BTN1-4:** Player 2 controls
-- **BTN5:** Menu toggle
-- **BTN6:** Hyperspace
-
-## Requirements
-
-- OSS CAD Suite (Yosys, nextpnr-ecp5, ecppack)
-- ULX3S board (ECP5-85F recommended)
-- fujprog for programming
+| Button | Function |
+|--------|----------|
+| BTN4 | Left |
+| BTN5 | Right |
+| BTN6 | Thrust |
+| BTN7 | Fire |
+| BTN8 | Hyperspace |
 
 ## Documentation
 
-- [Architecture](ARCHITECTURE.md)
-- [Hardware Testing](HARDWARE_TEST.md)
-- [Research Notes](RESEARCH.md)
-- [ESP32 OSD Design](docs/ESP32_OSD_DESIGN.md)
+See [regocAI.md](regocAI.md) for detailed documentation including:
+- Comparison with original hrvach/fpg1
+- All changes and reasons
+- Clock and timing configuration
+- Known issues and status
 
----
+## Credits
 
-## Original Project Notes
-
-> emard ti poručuje: fpg1 se nije držao good practicea u kojoj se mora odvojit registarska logika od kombinacijske
-
-> fpg1 je koristio i neki altera specific circularni buffer sa nekoliko tap-ova pomoću kojeg je odradio vector CRT fadeout
-
-### References
-- `/home/klaudio/Programs/oss-cad-suite-build/` - OSS CAD Suite
-- `/home/klaudio/port_fpg1/fpg1_partial_emard/` - Emard's partial port
-- https://github.com/emard - ULX3S creator
-- https://github.com/lawrie - FPGA contributor
-
----
-
-## REGOČ
-
-This project was developed using the REGOČ multi-agent orchestration system.
-
-See `regoc/` for session reports and agent contributions.
+- **Hrvoje Cavrak (hrvach)** - Original PDP-1 FPGA implementation
+- **Emard** - ECP5 video infrastructure
+- **REGOC AI Team** - ECP5/ULX3S port
 
 ## License
 
-Based on original PDP-1 emulator.
-ULX3S port by REGOČ Team (2026).
+MIT License (inherited from original project)
+
+## Links
+
+- [Original Project](https://github.com/hrvach/fpg1)
+- [ULX3S Board](https://ulx3s.github.io/)
+- [OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build)

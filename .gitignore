@@ -21,3 +21,13 @@ fpg1/
 fpg1_partial_emard/
 # Internal reports
 TASK-*.md
+
+# Internal documentation with local paths
+HARDWARE_TEST.md
+TOOLCHAIN.md
+ARCHITECTURE.md
+RESEARCH.md
+PLAN.md
+VERILATOR-*.txt
+regoc/
+docs/
