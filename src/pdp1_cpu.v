@@ -383,12 +383,13 @@ begin
          begin
             pixel_shift_out <= 1'b1;
             pixel_brightness <= instruction[8:6];  // BUGFIX: koristi instruction (IR) umjesto DI - brightness bitovi su dio IOT instrukcije
-            // FIX: Koordinate kao u originalu - puni 10-bit raspon BEZ dijeljenja
+            // FIX: Koordinate kao original (IO[17:8] + 512) ali skalirane za 512x512 display
             // PDP-1 generira 10-bit signed (-512 do +511)
-            // Dodaj 256 za offset u unsigned prostor (0-1023 -> centar na 256)
-            // X inverzija se radi u CRT modulu kao u originalu
-            pixel_x_latched <= IO[17:8] + 10'd256;  // Puni 10 bita + offset
-            pixel_y_latched <= AC[17:8] + 10'd256;  // Puni 10 bita + offset
+            // Original: IO[17:8] + 512 = 0-1023 za 1024x1024 display
+            // Za 512x512: (IO[17:8] + 512) >> 1 = 0-511
+            // Arithmetic shift za ispravno rukovanje signed vrijednostima
+            pixel_x_latched <= (IO[17:8] + 10'd512) >> 1;  // 0-1023 -> 0-511
+            pixel_y_latched <= (AC[17:8] + 10'd512) >> 1;  // 0-1023 -> 0-511
             // TASK-PIXEL-DEBUG: Increment pixel counter on each pixel output
             debug_pixel_count <= debug_pixel_count + 1'b1;
          end

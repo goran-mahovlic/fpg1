@@ -265,23 +265,25 @@ always @(posedge clk) begin
             buffer_write_ptr <= buffer_write_ptr + 1'b1;
           end
 `else
-          // PDP-1 MODE: IDENTIČNO ORIGINALU - X/Y swap + X inverzija
-          // Original: { buffer_pixel_y, buffer_pixel_x } <= { ~pixel_x_i, pixel_y_i };
-          // To znači: Y_buffer = ~X_input, X_buffer = Y_input (rotacija 90° + mirror)
+          // PDP-1 MODE: X/Y swap + X inverzija za 512x512 display
+          // Original za 1024x1024: { buffer_pixel_y, buffer_pixel_x } <= { ~pixel_x_i, pixel_y_i };
+          // Za 512x512: koristimo 9-bit inverziju (511-x umjesto 1023-x)
+          // Koordinate iz CPU-a su vec skalirane na 0-511
+          // inverted_x = 9-bit invert = 511 - x (za range 0-511)
           if (variable_brightness && pixel_brightness > 3'b0 && pixel_brightness < 3'b100)
           begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
+            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { {1'b0, ~pixel_x_i[8:0]}, pixel_y_i };
 
-            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { ~pixel_x_i + 1'b1, pixel_y_i };
-            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { ~pixel_x_i, pixel_y_i + 1'b1 };
-            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { ~pixel_x_i - 1'b1, pixel_y_i };
-            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { ~pixel_x_i, pixel_y_i - 1'b1 };
+            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { {1'b0, ~pixel_x_i[8:0]} + 1'b1, pixel_y_i };
+            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { {1'b0, ~pixel_x_i[8:0]}, pixel_y_i + 1'b1 };
+            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { {1'b0, ~pixel_x_i[8:0]} - 1'b1, pixel_y_i };
+            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { {1'b0, ~pixel_x_i[8:0]}, pixel_y_i - 1'b1 };
 
             buffer_write_ptr <= buffer_write_ptr + 3'd5;
           end
           else
           begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
+            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { {1'b0, ~pixel_x_i[8:0]}, pixel_y_i };
             buffer_write_ptr <= buffer_write_ptr + 1'b1;
           end
 `endif
