@@ -383,13 +383,12 @@ begin
          begin
             pixel_shift_out <= 1'b1;
             pixel_brightness <= instruction[8:6];  // BUGFIX: koristi instruction (IR) umjesto DI - brightness bitovi su dio IOT instrukcije
-            // FIX BUG 2: Latch coordinates when display_crt is executed
-            // SKALIRANJE: PDP-1 generira 10-bit signed (-512 do +511)
-            // Potrebno: arithmetic right shift (dijeli s 2 cuvajuci predznak)
-            // Sign-extension: kopiraj sign bit prilikom skracivanja
-            // Zatim dodaj 256 za centriranje u 512x512 prostor
-            pixel_x_latched <= {{1{IO[17]}}, IO[17:9]} + 10'd256;  // Sign-extend /2, centar 256
-            pixel_y_latched <= {{1{AC[17]}}, AC[17:9]} + 10'd256;  // Sign-extend /2, centar 256
+            // FIX: Koordinate kao u originalu - puni 10-bit raspon BEZ dijeljenja
+            // PDP-1 generira 10-bit signed (-512 do +511)
+            // Dodaj 256 za offset u unsigned prostor (0-1023 -> centar na 256)
+            // X inverzija se radi u CRT modulu kao u originalu
+            pixel_x_latched <= IO[17:8] + 10'd256;  // Puni 10 bita + offset
+            pixel_y_latched <= AC[17:8] + 10'd256;  // Puni 10 bita + offset
             // TASK-PIXEL-DEBUG: Increment pixel counter on each pixel output
             debug_pixel_count <= debug_pixel_count + 1'b1;
          end
@@ -844,14 +843,14 @@ always @(posedge clk) begin
                i_shift, i_jmp, i_law, i_xct, i_jsp, i_skp, i_opr:
                   waste_cycles <= 12'd0;                                         /* Waste no cycles, these instructions last only 5 us */
                i_mu_:
-                  waste_cycles <= hw_mul_enabled ? 12'd125 : 12'd31;            /* Scaled /8 for 6.25MHz: 125 cycles * 160 ns = +20 us if hw mul enabled, otherwise +5 us */
+                  waste_cycles <= hw_mul_enabled ? 12'd1000 : 12'd250;          /* Scaled for 50MHz: 1000 cycles * 20 ns = +20 us if hw mul enabled, otherwise +5 us */
                i_di_:
-                  waste_cycles <= hw_mul_enabled ? 12'd219 : 12'd31;            /* Scaled /8 for 6.25MHz: 219 cycles * 160 ns = +35 us if hw div enabled, otherwise +5 us */
+                  waste_cycles <= hw_mul_enabled ? 12'd1750 : 12'd250;          /* Scaled for 50MHz: 1750 cycles * 20 ns = +35 us if hw div enabled, otherwise +5 us */
                i_iot:
-                  waste_cycles <= (crt_wait && (MEM_BUFF[5:0] == display_crt))   /* Scaled /8 for 6.25MHz: 281 cycles * 160 ns = +45 us if writing to CRT */
-                                 ? 12'd281 : 12'd0;
+                  waste_cycles <= (crt_wait && (MEM_BUFF[5:0] == display_crt))   /* Scaled for 50MHz: 2250 cycles * 20 ns = +45 us if writing to CRT */
+                                 ? 12'd2250 : 12'd0;
                default:
-                  waste_cycles <= 12'd31;                                        /* Scaled /8 for 6.25MHz: 31 cycles * 160 ns = +5 us */
+                  waste_cycles <= 12'd250;                                       /* Scaled for 50MHz: 250 cycles * 20 ns = +5 us */
             endcase
 
          flush_to_ram:

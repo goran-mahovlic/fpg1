@@ -42,7 +42,7 @@ module clk_25_shift_pixel_cpu
         .in_hz      (25000000),     // 25 MHz input
         .out0_hz    (125000000),    // 125 MHz shift clock (HDMI DDR, 5x pixel)
         .out1_hz    (25000000),     // 25 MHz pixel clock (640x480@60Hz)
-        .out2_hz    (6250000),      // 6.25 MHz CPU clock (TASK-216: reduced for timing)
+        .out2_hz    (50000000),     // 50 MHz CPU clock (originalna PDP-1 brzina)
         .out3_hz    (0)             // unused
     )
     pll_inst
