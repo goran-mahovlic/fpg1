@@ -66,7 +66,13 @@ module pdp1_cpu (
    /* Debug outputs (TASK-DEBUG: CPU state monitoring) */
    output reg  [15:0] debug_instr_count,           /* Total instructions executed (wraps at 65535) */
    output reg  [15:0] debug_iot_count,             /* IOT instructions executed (display commands) */
-   output wire        debug_cpu_running            /* CPU is running (not halted) */
+   output wire        debug_cpu_running,           /* CPU is running (not halted) */
+
+   /* Pixel debug outputs (TASK-PIXEL-DEBUG: per-pixel tracking for image reconstruction) */
+   output reg  [31:0] debug_pixel_count,           /* Total pixels sent (32-bit counter) */
+   output wire [9:0]  debug_pixel_x,               /* Last pixel X coordinate */
+   output wire [9:0]  debug_pixel_y,               /* Last pixel Y coordinate */
+   output wire [2:0]  debug_pixel_brightness       /* Last pixel brightness (0-7) */
    );
 
 
@@ -136,6 +142,10 @@ reg   [0:0]  OV, CARRY, SKIP_FLAG, SKIP_REST_OF_INSTR, DIFFERENT_SIGNS;       /*
 reg [33:0] division_quotient;          /* Store results from the lpm_divide component */
 reg [16:0] division_remainder;
 
+// FIX BUG 2: Latched pixel coordinates for CRT output
+reg [9:0] pixel_x_latched;
+reg [9:0] pixel_y_latched;
+
 //////////////////  FUNCTIONS  ////////////////////
 
 function automatic [17:0] fix_zero;                               /* 1's complement is used, and two representations of zero exist. This converts -0 to +0 (all ones to all zeros). */
@@ -193,11 +203,20 @@ begin
    // Debug counters reset
    debug_instr_count <= 16'd0;
    debug_iot_count   <= 16'd0;
+   debug_pixel_count <= 32'd0;
+   // FIX BUG 2: Initialize latched pixel coordinates to center
+   pixel_x_latched <= 10'd256;
+   pixel_y_latched <= 10'd256;
 end
 endtask
 
 // Debug output: CPU running status
 assign debug_cpu_running = cpu_running;
+
+// Pixel debug outputs: expose latched coordinates and brightness
+assign debug_pixel_x = pixel_x_latched;
+assign debug_pixel_y = pixel_y_latched;
+assign debug_pixel_brightness = pixel_brightness;
 
 task execute_instruction;
     input [4:0] opcode;
@@ -363,7 +382,16 @@ begin
          display_crt:
          begin
             pixel_shift_out <= 1'b1;
-            pixel_brightness <= DI[8:6];
+            pixel_brightness <= instruction[8:6];  // BUGFIX: koristi instruction (IR) umjesto DI - brightness bitovi su dio IOT instrukcije
+            // FIX BUG 2: Latch coordinates when display_crt is executed
+            // SKALIRANJE: PDP-1 generira 10-bit signed (-512 do +511)
+            // Potrebno: arithmetic right shift (dijeli s 2 cuvajuci predznak)
+            // Sign-extension: kopiraj sign bit prilikom skracivanja
+            // Zatim dodaj 256 za centriranje u 512x512 prostor
+            pixel_x_latched <= {{1{IO[17]}}, IO[17:9]} + 10'd256;  // Sign-extend /2, centar 256
+            pixel_y_latched <= {{1{AC[17]}}, AC[17:9]} + 10'd256;  // Sign-extend /2, centar 256
+            // TASK-PIXEL-DEBUG: Increment pixel counter on each pixel output
+            debug_pixel_count <= debug_pixel_count + 1'b1;
          end
 
          read_gamepad:
@@ -702,12 +730,10 @@ assign multiply_input  = AC[17] ? { ~AC[16:0], ~IO[17:1] } : { AC[16:0], IO[17:1
 assign multiply_result = abs_nosign(AC) * abs_nosign(DI);
 
 // PDP-1 coordinates are signed 10-bit (-512 to +511), mapped to display coordinates
-// Original: add 512 to center at 512 (1024x1024 display)
-// VRATENO NA UNSIGNED kao original:
-// IO[17:8] i AC[17:8] su 10 MSB bita - direktno dodaj 256 za centar
-// Unsigned aritmetika - koordinate 0-511 mapirane u centar 512x512 prostora
-assign pixel_x_out = IO[17:8] + 10'd256;
-assign pixel_y_out = AC[17:8] + 10'd256;
+// FIX BUG 2: Use latched coordinates instead of combinational
+// Coordinates are latched in display_crt case when pixel_shift_out is set
+assign pixel_x_out = pixel_x_latched;
+assign pixel_y_out = pixel_y_latched;
 
 assign typewriter_char_out = IO[5:0];
 

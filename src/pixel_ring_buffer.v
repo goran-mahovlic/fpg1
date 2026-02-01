@@ -24,14 +24,16 @@ module pixel_ring_buffer
     input wire clock,
     input wire [31:0] shiftin,
     output wire [31:0] shiftout,
-    output wire [255:0] taps
+    output wire [255:0] taps,
+    // Debug output: current write pointer position (ring buffer fill indicator)
+    output wire [9:0] debug_wrptr
 );
 
     // Parameters
     localparam DEPTH = 1024;        // Depth per BRAM instance
     localparam WIDTH = 32;          // Data width: 10-bit Y, 10-bit X, 12-bit luma
     localparam ADDR_WIDTH = 10;     // log2(1024) = 10 bits
-    localparam TAP_DISTANCE = 1024; // Distance between taps (FIX: povećano s 128)
+    localparam TAP_DISTANCE = 800;  // BILO: 128 (jedna VGA linija)
 
     // Write pointer - shared across all memories
     reg [ADDR_WIDTH-1:0] wrptr = 0;
@@ -131,5 +133,8 @@ module pixel_ring_buffer
 
     // shiftout is the oldest data (same as tap7)
     assign shiftout = tap_data7;
+
+    // Debug: expose write pointer for monitoring ring buffer position
+    assign debug_wrptr = wrptr;
 
 endmodule

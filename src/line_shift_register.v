@@ -18,7 +18,7 @@ module line_shift_register
 );
 
     // Parameters
-    localparam TAP_DISTANCE = 800;
+    localparam TAP_DISTANCE = 799;  // 800 - 1 za BRAM read latency = točno jedna VGA linija
     localparam ADDR_WIDTH = 10;          // 2^10 = 1024 > 800
     localparam MEM_DEPTH = 1 << ADDR_WIDTH;
 

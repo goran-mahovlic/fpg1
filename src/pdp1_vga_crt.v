@@ -45,7 +45,8 @@ module pdp1_vga_crt (
   output wire       debug_rowbuff_wren,                        /* Rowbuffer write enable for LED */
   output wire       debug_inside_visible,                      /* inside_visible_area signal */
   output wire       debug_pixel_to_rowbuff,                    /* Non-zero pixel written to rowbuffer */
-  output wire [15:0] debug_rowbuff_write_count                 /* Non-zero pixels written to rowbuffer per frame */
+  output wire [15:0] debug_rowbuff_write_count,                /* Non-zero pixels written to rowbuffer per frame */
+  output wire [9:0]  debug_ring_buffer_wrptr                   /* Ring buffer 1 write pointer for pixel debug */
 );
 
 //////////////////  PARAMETERS  ///////////////////
@@ -59,7 +60,8 @@ parameter
 
 function automatic [11:0] dim_pixel;
    input [11:0] luma;
-	dim_pixel = (luma > 12'd3864 && luma < 12'd3936) ? 12'd2576 : luma - 1'b1;              /* Sudden drop in brightness is to simulate the secondary (green-ish) phosphor afterglow */
+   // FIX BUG 5: Brzi decay - oduzmi 8 umjesto 1 za vidljiviji phosphor trail
+   dim_pixel = (luma > 12'd8) ? luma - 12'd8 : 12'd0;
 endfunction
 
 
@@ -209,10 +211,16 @@ line_shift_register line3(.clock(clk), .shiftout(p33_w), .shiftin(rowbuff_rdata)
 /* Create 4 pixel ring buffers with 8 taps each and connect them in a loop (a.k.a. hadron collider style) */
 /* e.g. ring_buffer_1 .. shiftout_1_w -> {pixel_1_y, pixel_1_x, luma_1} -> shiftout_2 .. ring_buffer_2    */
 
-pixel_ring_buffer ring_buffer_1(.clock(clk),  .shiftin(shiftout_1),  .shiftout(shiftout_1_w),  .taps(taps1) );
-pixel_ring_buffer ring_buffer_2(.clock(clk),  .shiftin(shiftout_2),  .shiftout(shiftout_2_w),  .taps(taps2) );
-pixel_ring_buffer ring_buffer_3(.clock(clk),  .shiftin(shiftout_3),  .shiftout(shiftout_3_w),  .taps(taps3) );
-pixel_ring_buffer ring_buffer_4(.clock(clk),  .shiftin(shiftout_4),  .shiftout(shiftout_4_w),  .taps(taps4) );
+// Debug wire for ring buffer 1 write pointer
+wire [9:0] ring_buf1_wrptr;
+
+pixel_ring_buffer ring_buffer_1(.clock(clk),  .shiftin(shiftout_1),  .shiftout(shiftout_1_w),  .taps(taps1), .debug_wrptr(ring_buf1_wrptr) );
+pixel_ring_buffer ring_buffer_2(.clock(clk),  .shiftin(shiftout_2),  .shiftout(shiftout_2_w),  .taps(taps2), .debug_wrptr() );
+pixel_ring_buffer ring_buffer_3(.clock(clk),  .shiftin(shiftout_3),  .shiftout(shiftout_3_w),  .taps(taps3), .debug_wrptr() );
+pixel_ring_buffer ring_buffer_4(.clock(clk),  .shiftin(shiftout_4),  .shiftout(shiftout_4_w),  .taps(taps4), .debug_wrptr() );
+
+// Debug: expose ring buffer 1 write pointer
+assign debug_ring_buffer_wrptr = ring_buf1_wrptr;
 
 
 ////////////////  ALWAYS BLOCKS  //////////////////
@@ -257,21 +265,28 @@ always @(posedge clk) begin
             buffer_write_ptr <= buffer_write_ptr + 1'b1;
           end
 `else
-          // PDP-1 MODE: originalna transformacija
+          // PDP-1 MODE: direktno mapiranje bez X inverzije
+          // Koordinate su vec skalirane u pdp1_cpu.v
           if (variable_brightness && pixel_brightness > 3'b0 && pixel_brightness < 3'b100)
           begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
+            buffer_pixel_x[buffer_write_ptr] <= pixel_x_i;
+            buffer_pixel_y[buffer_write_ptr] <= pixel_y_i;
 
-            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { ~pixel_x_i + 1'b1, pixel_y_i };
-            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { ~pixel_x_i, pixel_y_i + 1'b1};
-            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { ~pixel_x_i - 1'b1, pixel_y_i };
-            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { ~pixel_x_i, pixel_y_i - 1'b1};
+            buffer_pixel_x[buffer_write_ptr + 3'd1] <= pixel_x_i + 1'b1;
+            buffer_pixel_y[buffer_write_ptr + 3'd1] <= pixel_y_i;
+            buffer_pixel_x[buffer_write_ptr + 3'd2] <= pixel_x_i;
+            buffer_pixel_y[buffer_write_ptr + 3'd2] <= pixel_y_i + 1'b1;
+            buffer_pixel_x[buffer_write_ptr + 3'd3] <= pixel_x_i - 1'b1;
+            buffer_pixel_y[buffer_write_ptr + 3'd3] <= pixel_y_i;
+            buffer_pixel_x[buffer_write_ptr + 3'd4] <= pixel_x_i;
+            buffer_pixel_y[buffer_write_ptr + 3'd4] <= pixel_y_i - 1'b1;
 
             buffer_write_ptr <= buffer_write_ptr + 3'd5;
           end
           else
           begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
+            buffer_pixel_x[buffer_write_ptr] <= pixel_x_i;
+            buffer_pixel_y[buffer_write_ptr] <= pixel_y_i;
             buffer_write_ptr <= buffer_write_ptr + 1'b1;
           end
 `endif
@@ -292,9 +307,9 @@ always @(posedge clk) begin
 
      /* If we didn't find a pixel on one of the taps withing 1024 clock cycles (inter-tap distance), assume there is
         nothing to update and once we find a dark pixel we can re-use, add the current one to that position */
-     /* FIX: search_counter threshold vraćen na 1024 (TAP_DISTANCE) */
+     /* FIX BUG 4: search_counter threshold povecan na 640 (>TAP_DISTANCE 512) */
 
-     if (buffer_write_ptr != buffer_read_ptr && search_counter > 1024 && (!luma_1[11:4] || !luma_2[11:4] || !luma_3[11:4] || !luma_4[11:4]))
+     if (buffer_write_ptr != buffer_read_ptr && search_counter > 640 && (!luma_1[11:4] || !luma_2[11:4] || !luma_3[11:4] || !luma_4[11:4]))
      begin
          if (luma_4[11:4] == 0)
                shiftout_1 <= { { next_pixel_y, next_pixel_x, 12'd4095 } };
@@ -422,7 +437,8 @@ always @(posedge clk) begin
    end
 
    // Reset erase counter na kraju linije
-   if (horizontal_counter == `h_line_timing)
+   // FIX: h_counter ide 0-799, nikad ne dođe do 800!
+   if (horizontal_counter == `h_line_timing - 1)
       erase_counter <= 0;
 
 end
@@ -431,7 +447,8 @@ end
 always @(posedge clk) begin
    inside_visible_area <= (horizontal_counter >= `h_visible_offset + `h_center_offset && horizontal_counter < `h_visible_offset_end + `h_center_offset);
 
-   if (horizontal_counter == `h_line_timing)
+   // FIX: h_counter ide 0-799, nikad ne dođe do 800!
+   if (horizontal_counter == `h_line_timing - 1)
       pass_counter <= pass_counter + 1'b1;                     /* Counts the number of vertical refresh passes, used to slow down pixel dimming (do one for every n passes) */
 
    prev_prev_wren_i <= prev_wren_i;                            /* Falling edge detect on a write enable signal, with additional clock to allow the signal to stabilize */

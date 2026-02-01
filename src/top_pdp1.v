@@ -221,6 +221,7 @@ module top_pdp1
     wire       crt_debug_inside_visible;
     wire       crt_debug_pixel_to_rowbuff;
     wire [15:0] crt_debug_rowbuff_write_count;
+    wire [9:0] crt_debug_ring_buffer_wrptr;  // Ring buffer write pointer for pixel debug
 
 `ifdef TEST_ANIMATION
     // =========================================================================
@@ -292,6 +293,12 @@ module top_pdp1
     wire [15:0] cpu_debug_iot_count;    // IOT instructions executed
     wire        cpu_debug_running;       // CPU is running
 
+    // Pixel debug outputs (TASK-PIXEL-DEBUG)
+    wire [31:0] cpu_debug_pixel_count;  // Total pixels sent
+    wire [9:0]  cpu_debug_pixel_x;      // Last pixel X coordinate
+    wire [9:0]  cpu_debug_pixel_y;      // Last pixel Y coordinate
+    wire [2:0]  cpu_debug_pixel_brightness; // Last pixel brightness
+
     // CRT output signals from CPU
     wire [9:0]  cpu_pixel_x;
     wire [9:0]  cpu_pixel_y;
@@ -314,20 +321,20 @@ module top_pdp1
 
     // FIX #2 (Emard): Ispravan bit mapping prema fpg1 originalu
     // Map ULX3S buttons/switches to PDP-1 gamepad input
-    // joystick_emu[7:0] from ulx3s_input module
-    // [0]=left, [1]=right, [2]=thrust/up, [3]=fire/down
-    // [4]=hyperspace, [5:7]=P2 controls (ako postoje)
+    // joystick_emu[7:0] from ulx3s_input module (ISPRAVLJENO):
+    // [0]=P1 fire, [1]=P1 CCW(left), [2]=P1 thrust, [3]=P1 CW(right)
+    // [4]=P2 fire, [5]=P2 CCW(left), [6]=P2 thrust, [7]=P2 CW(right)
     // PDP-1 gamepad format: bit 17=CW(right), 16=CCW(left), 15=thrust, 14=fire
     assign gamepad_in = {
-        joystick_emu[1],   // bit 17 - P1 CW (rotate right)
-        joystick_emu[0],   // bit 16 - P1 CCW (rotate left)
-        joystick_emu[2],   // bit 15 - P1 thrust
-        joystick_emu[3],   // bit 14 - P1 fire
+        joystick_emu[3],   // bit 17 - P1 CW (rotate right) - BTN[4]
+        joystick_emu[1],   // bit 16 - P1 CCW (rotate left) - BTN[3]
+        joystick_emu[2],   // bit 15 - P1 thrust - BTN[1]
+        joystick_emu[0],   // bit 14 - P1 fire - BTN[0]
         10'b0,             // bits 13-4 unused
-        joystick_emu[5],   // bit 3 - P2 CW (rotate right)
-        joystick_emu[4],   // bit 2 - P2 CCW (rotate left)
+        joystick_emu[7],   // bit 3 - P2 CW (rotate right)
+        joystick_emu[5],   // bit 2 - P2 CCW (rotate left)
         joystick_emu[6],   // bit 1 - P2 thrust
-        joystick_emu[7]    // bit 0 - P2 fire
+        joystick_emu[4]    // bit 0 - P2 fire
     };
 
     // Console switches for CPU control
@@ -433,7 +440,7 @@ module top_pdp1
 
         // Configuration
         .hw_mul_enabled         (1'b1),      // Enable hardware multiply/divide
-        .crt_wait               (1'b0),      // Disable CRT wait for faster execution
+        .crt_wait               (1'b1),      // Enable CRT wait for proper display timing
 
         // Console switches
         .console_switches       (console_switches),
@@ -444,7 +451,13 @@ module top_pdp1
         // Debug outputs (TASK-DEBUG)
         .debug_instr_count      (cpu_debug_instr_count),
         .debug_iot_count        (cpu_debug_iot_count),
-        .debug_cpu_running      (cpu_debug_running)
+        .debug_cpu_running      (cpu_debug_running),
+
+        // Pixel debug outputs (TASK-PIXEL-DEBUG)
+        .debug_pixel_count      (cpu_debug_pixel_count),
+        .debug_pixel_x          (cpu_debug_pixel_x),
+        .debug_pixel_y          (cpu_debug_pixel_y),
+        .debug_pixel_brightness (cpu_debug_pixel_brightness)
     );
 
     // Map CPU outputs to test pattern signals (for CRT display)
@@ -523,7 +536,8 @@ module top_pdp1
         .debug_rowbuff_wren (crt_debug_rowbuff_wren),
         .debug_inside_visible (crt_debug_inside_visible),
         .debug_pixel_to_rowbuff (crt_debug_pixel_to_rowbuff),
-        .debug_rowbuff_write_count (crt_debug_rowbuff_write_count)
+        .debug_rowbuff_write_count (crt_debug_rowbuff_write_count),
+        .debug_ring_buffer_wrptr (crt_debug_ring_buffer_wrptr)
     );
 
     // =========================================================================
@@ -818,6 +832,13 @@ module top_pdp1
         .cpu_instr_count    (16'd0),
         .cpu_iot_count      (16'd0),
         .cpu_running        (1'b0),
+        // Pixel debug signals (not used in TEST_ANIMATION mode - use animation signals)
+        .pixel_count        (32'd0),
+        .pixel_debug_x      (anim_pixel_x),
+        .pixel_debug_y      (anim_pixel_y),
+        .pixel_brightness   (anim_brightness),
+        .pixel_shift_out    (anim_pixel_valid),
+        .ring_buffer_wrptr  (crt_debug_ring_buffer_wrptr),
         .uart_tx_pin  (ftdi_rxd)
     );
 `else
@@ -862,6 +883,13 @@ module top_pdp1
         .cpu_instr_count    (cpu_debug_instr_count),
         .cpu_iot_count      (cpu_debug_iot_count),
         .cpu_running        (cpu_debug_running),
+        // Pixel debug signals (TASK-PIXEL-DEBUG)
+        .pixel_count        (cpu_debug_pixel_count),
+        .pixel_debug_x      (cpu_debug_pixel_x),
+        .pixel_debug_y      (cpu_debug_pixel_y),
+        .pixel_brightness   (cpu_debug_pixel_brightness),
+        .pixel_shift_out    (cpu_pixel_shift),
+        .ring_buffer_wrptr  (crt_debug_ring_buffer_wrptr),
         .uart_tx_pin  (ftdi_rxd)
     );
 `endif
