@@ -61,8 +61,11 @@ parameter
 
 function automatic [11:0] dim_pixel;
    input [11:0] luma;
-   // FIX BUG 5: Brzi decay - oduzmi 8 umjesto 1 za vidljiviji phosphor trail
-   dim_pixel = (luma > 12'd8) ? luma - 12'd8 : 12'd0;
+   // VRACENA ORIGINALNA LOGIKA (fpg1/src/pdp1_vga_crt.v):
+   // - Standardni decay: luma - 1
+   // - Step-down na 2576 kad luma u rasponu 3864-3936 (afterglow simulacija)
+   // Prijašnji kod (luma - 8) bio je 8x brži i uništavao pokretne objekte (brodove)
+   dim_pixel = (luma > 12'd3864 && luma < 12'd3936) ? 12'd2576 : luma - 1'b1;
 endfunction
 
 
