@@ -1,11 +1,12 @@
 // pdp1_vga_crt.v
 // TASK-194: CRT phosphor decay emulation for PDP-1 vector display
 // TASK-200: Prilagodeno za 640x480@60Hz (timing fix)
+// TASK-XXX: Upgrade na 1024x768@50Hz (Jelena Horvat)
 // Adapted for ECP5/Yosys synthesis by REGOC Team
 //
-// This module implements a 640 x 480 @ 60 Hz vector display output.
+// This module implements a 1024 x 768 @ 50 Hz vector display output.
 // Uses BRAM-based shift registers to simulate phosphor decay.
-// PDP-1 512x512 display is scaled/centered within 640x480 frame.
+// PDP-1 512x512 display is scaled/centered within 1024x768 frame.
 //
 // Architecture:
 // - pdp1_vga_rowbuffer: Stores next 8 lines to be drawn (64 Kbit BRAM)
@@ -19,7 +20,7 @@
 // - pixel_ring_buffer.v
 
 module pdp1_vga_crt (
-  input clk,                                                   /* Clock input, 640 x 480 @ 60 Hz is 25 MHz pixel clock */
+  input clk,                                                   /* Clock input, 1024 x 768 @ 50 Hz is 51 MHz pixel clock */
 
   input [10:0] horizontal_counter,                             /* Current video drawing position */
   input [10:0] vertical_counter,
@@ -304,9 +305,10 @@ always @(posedge clk) begin
 
      /* Add new pixel */
 
-     /* If we didn't find a pixel on one of the taps withing 1024 clock cycles (inter-tap distance), assume there is
+     /* If we didn't find a pixel on one of the taps within inter-tap distance, assume there is
         nothing to update and once we find a dark pixel we can re-use, add the current one to that position */
-     /* FIX BUG 4: search_counter threshold povecan na 640 (>TAP_DISTANCE 512) */
+     /* FIX BUG 4: search_counter threshold mora biti > TAP_DISTANCE ring buffera (512) */
+     /* TASK-XXX: Threshold zadrzan na 640, dovoljan za ring buffer TAP_DISTANCE 512 */
 
      if (buffer_write_ptr != buffer_read_ptr && search_counter > 640 && (!luma_1[11:4] || !luma_2[11:4] || !luma_3[11:4] || !luma_4[11:4]))
      begin

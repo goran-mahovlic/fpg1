@@ -137,6 +137,13 @@ module serial_debug (
     input  wire [15:0] cpu_instr_count,     // CPU instructions executed
     input  wire [15:0] cpu_iot_count,       // CPU IOT (display) instructions
     input  wire        cpu_running,         // CPU is running
+    // Pixel debug signals (TASK-PIXEL-DEBUG: per-pixel tracking)
+    input  wire [31:0] pixel_count,         // Total pixel count from CPU
+    input  wire [9:0]  pixel_debug_x,       // Pixel X coordinate
+    input  wire [9:0]  pixel_debug_y,       // Pixel Y coordinate
+    input  wire [2:0]  pixel_brightness,    // Pixel brightness (0-7)
+    input  wire        pixel_shift_out,     // Pixel output strobe (trigger for debug message)
+    input  wire [9:0]  ring_buffer_wrptr,   // Ring buffer write pointer (fill level indicator)
     output wire        uart_tx_pin
 );
 
@@ -286,11 +293,22 @@ module serial_debug (
     // Total 52 characters
 
     localparam MSG_LEN = 52;
+    localparam PIXEL_MSG_LEN = 28;  // "P:xxxxx X:xxx Y:xxx B:x R:xxx\n"
 
     reg [7:0] msg_buffer [0:MSG_LEN-1];
     reg [5:0] msg_index;
     reg       sending;
     reg       frame_tick_latched;
+
+    // Pixel debug state
+    reg        pixel_shift_latched;
+    reg        pixel_msg_pending;
+    reg [31:0] latched_pixel_count;
+    reg [9:0]  latched_pixel_x;
+    reg [9:0]  latched_pixel_y;
+    reg [2:0]  latched_pixel_brightness;
+    reg [9:0]  latched_ring_wrptr;
+    reg        sending_pixel_msg;  // Flag to indicate we're sending pixel message
 
     // Decimal conversion for X and Y (0-639 range)
     wire [3:0] x_hundreds = latched_x / 100;
@@ -318,6 +336,32 @@ module serial_debug (
     wire [3:0] rb_tens      = (latched_rowbuff_count / 10) % 10;
     wire [3:0] rb_units     = latched_rowbuff_count % 10;
 
+    // ==========================================================================
+    // PIXEL DEBUG: Decimal conversion for pixel count (5 digits, 0-99999)
+    // ==========================================================================
+    wire [16:0] pixel_count_mod = latched_pixel_count % 100000;  // Wrap at 100000
+    wire [3:0] pc_ten_thousands = pixel_count_mod / 10000;
+    wire [3:0] pc_thousands     = (pixel_count_mod / 1000) % 10;
+    wire [3:0] pc_hundreds      = (pixel_count_mod / 100) % 10;
+    wire [3:0] pc_tens          = (pixel_count_mod / 10) % 10;
+    wire [3:0] pc_units         = pixel_count_mod % 10;
+
+    // Pixel X coordinate (3 digits, 0-999)
+    wire [3:0] px_hundreds = latched_pixel_x / 100;
+    wire [3:0] px_tens     = (latched_pixel_x / 10) % 10;
+    wire [3:0] px_units    = latched_pixel_x % 10;
+
+    // Pixel Y coordinate (3 digits, 0-999)
+    wire [3:0] py_hundreds = latched_pixel_y / 100;
+    wire [3:0] py_tens     = (latched_pixel_y / 10) % 10;
+    wire [3:0] py_units    = latched_pixel_y % 10;
+
+    // Ring buffer write pointer (3 digits, 0-1023)
+    wire [3:0] rw_thousands = latched_ring_wrptr / 1000;
+    wire [3:0] rw_hundreds  = (latched_ring_wrptr / 100) % 10;
+    wire [3:0] rw_tens      = (latched_ring_wrptr / 10) % 10;
+    wire [3:0] rw_units     = latched_ring_wrptr % 10;
+
     // =========================================================================
     // State machine for sending message
     // =========================================================================
@@ -336,15 +380,76 @@ module serial_debug (
             tx_send            <= 1'b0;
             tx_data            <= 8'd0;
             frame_tick_latched <= 1'b0;
+            pixel_shift_latched <= 1'b0;
+            pixel_msg_pending   <= 1'b0;
+            sending_pixel_msg   <= 1'b0;
+            latched_pixel_count <= 32'd0;
+            latched_pixel_x     <= 10'd0;
+            latched_pixel_y     <= 10'd0;
+            latched_pixel_brightness <= 3'd0;
+            latched_ring_wrptr  <= 10'd0;
         end else begin
-            // Latch frame_tick rising edge
-            frame_tick_latched <= frame_tick;
+            // Latch frame_tick and pixel_shift rising edges
+            frame_tick_latched  <= frame_tick;
+            pixel_shift_latched <= pixel_shift_out;
             tx_send <= 1'b0;  // Default
+
+            // Latch pixel data on pixel_shift_out rising edge
+            if (pixel_shift_out && !pixel_shift_latched) begin
+                latched_pixel_count <= pixel_count;
+                latched_pixel_x     <= pixel_debug_x;
+                latched_pixel_y     <= pixel_debug_y;
+                latched_pixel_brightness <= pixel_brightness;
+                latched_ring_wrptr  <= ring_buffer_wrptr;
+                pixel_msg_pending   <= 1'b1;  // Mark that we have a pixel to send
+            end
 
             case (state)
                 ST_IDLE: begin
-                    // Start sending on frame_tick rising edge
-                    if (frame_tick && !frame_tick_latched) begin
+                    // Priority 1: Send pixel debug message if pending and UART is free
+                    if (pixel_msg_pending) begin
+                        // Prepare pixel debug message buffer
+                        // Format: "P:xxxxx X:xxx Y:xxx B:x R:xxxx\n"
+                        msg_buffer[0]  <= "P";
+                        msg_buffer[1]  <= ":";
+                        msg_buffer[2]  <= digit_to_ascii(pc_ten_thousands);
+                        msg_buffer[3]  <= digit_to_ascii(pc_thousands);
+                        msg_buffer[4]  <= digit_to_ascii(pc_hundreds);
+                        msg_buffer[5]  <= digit_to_ascii(pc_tens);
+                        msg_buffer[6]  <= digit_to_ascii(pc_units);
+                        msg_buffer[7]  <= " ";
+                        msg_buffer[8]  <= "X";
+                        msg_buffer[9]  <= ":";
+                        msg_buffer[10] <= digit_to_ascii(px_hundreds);
+                        msg_buffer[11] <= digit_to_ascii(px_tens);
+                        msg_buffer[12] <= digit_to_ascii(px_units);
+                        msg_buffer[13] <= " ";
+                        msg_buffer[14] <= "Y";
+                        msg_buffer[15] <= ":";
+                        msg_buffer[16] <= digit_to_ascii(py_hundreds);
+                        msg_buffer[17] <= digit_to_ascii(py_tens);
+                        msg_buffer[18] <= digit_to_ascii(py_units);
+                        msg_buffer[19] <= " ";
+                        msg_buffer[20] <= "B";
+                        msg_buffer[21] <= ":";
+                        msg_buffer[22] <= digit_to_ascii({1'b0, latched_pixel_brightness});
+                        msg_buffer[23] <= " ";
+                        msg_buffer[24] <= "R";
+                        msg_buffer[25] <= ":";
+                        msg_buffer[26] <= digit_to_ascii(rw_thousands);
+                        msg_buffer[27] <= digit_to_ascii(rw_hundreds);
+                        msg_buffer[28] <= digit_to_ascii(rw_tens);
+                        msg_buffer[29] <= digit_to_ascii(rw_units);
+                        msg_buffer[30] <= 8'd13;  // '\r' (CR)
+                        msg_buffer[31] <= 8'd10;  // '\n' (LF)
+
+                        msg_index <= 6'd0;
+                        sending_pixel_msg <= 1'b1;
+                        pixel_msg_pending <= 1'b0;
+                        state     <= ST_SEND;
+                    end
+                    // Priority 2: Send frame info on frame_tick rising edge
+                    else if (frame_tick && !frame_tick_latched) begin
                         // Prepare message buffer
                         // Format: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R\n"
                         msg_buffer[0]  <= "F";
@@ -408,6 +513,7 @@ module serial_debug (
                         msg_buffer[51] <= 8'd0;   // Padding
 
                         msg_index <= 6'd0;
+                        sending_pixel_msg <= 1'b0;
                         state     <= ST_SEND;
                     end
                 end
@@ -423,11 +529,21 @@ module serial_debug (
                 ST_WAIT: begin
                     if (tx_busy) begin
                         // UART started transmission
-                        if (msg_index < MSG_LEN - 1) begin
-                            msg_index <= msg_index + 1'b1;
-                            state     <= ST_SEND;
+                        // Check message length based on type
+                        if (sending_pixel_msg) begin
+                            if (msg_index < PIXEL_MSG_LEN + 3) begin  // 32 chars for pixel msg
+                                msg_index <= msg_index + 1'b1;
+                                state     <= ST_SEND;
+                            end else begin
+                                state <= ST_IDLE;
+                            end
                         end else begin
-                            state <= ST_IDLE;
+                            if (msg_index < MSG_LEN - 1) begin
+                                msg_index <= msg_index + 1'b1;
+                                state     <= ST_SEND;
+                            end else begin
+                                state <= ST_IDLE;
+                            end
                         end
                     end
                 end

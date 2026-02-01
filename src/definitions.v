@@ -1,24 +1,33 @@
-/* 640 x 480 @ 60 Hz constants (TASK-200: smanjena rezolucija za timing fix) */
-/* Pixel clock: 25 MHz, Frame rate: 25M / (800*525) = 59.52 Hz              */
+/* 1024 x 768 @ 50 Hz constants (TASK-XXX: upgrade rezolucije, Jelena Horvat)   */
+/* Pixel clock: 51 MHz, Frame rate: 51M / (1264*808) = 49.93 Hz                 */
+/*                                                                               */
+/* Timing izracun za 1024x768@50Hz:                                             */
+/* H total = 1024 + 24 (front) + 136 (sync) + 80 (back) = 1264                  */
+/* V total = 768 + 3 (front) + 6 (sync) + 31 (back) = 808                       */
+/* Frame rate = 51,000,000 / (1264 * 808) = 49.93 Hz                            */
+/*                                                                               */
+/* NAPOMENA: Koristimo 50Hz umjesto 60Hz jer:                                   */
+/* - 60Hz: 65 MHz pixel = 325 MHz shift (marginalno za ECP5)                    */
+/* - 50Hz: 51 MHz pixel = 255 MHz shift (sigurno < 400 MHz limit)               */
 
-`define   h_front_porch          11'd16
-`define   h_back_porch           11'd48
+`define   h_front_porch          11'd24
+`define   h_back_porch           11'd80
 
-`define   h_sync_pulse           11'd96
+`define   h_sync_pulse           11'd136
 
-`define   v_sync_pulse           11'd2
-`define   v_front_porch          11'd10
-`define   v_back_porch           11'd33
+`define   v_sync_pulse           11'd6
+`define   v_front_porch          11'd3
+`define   v_back_porch           11'd31
 
-`define   h_line_timing          11'd800
-`define   v_line_timing          11'd525
+`define   h_line_timing          11'd1264      /* 1024 + 24 + 136 + 80 = 1264 */
+`define   v_line_timing          11'd808       /* 768 + 3 + 6 + 31 = 808 */
 
-`define   h_visible_offset       11'd160       /* h_front_porch + h_sync_pulse + h_back_porch = 16+96+48 = 160 */
-`define   h_center_offset        11'd64        /* (640-512)/2 = 64, za centriranje PDP-1 512x512 displeja */
-`define   h_visible_offset_end   11'd736       /* h_visible_offset + 512 + h_center_offset = 160 + 512 + 64 = 736 */
+`define   h_visible_offset       11'd240       /* h_sync + h_back + h_front = 136 + 80 + 24 = 240 */
+`define   h_center_offset        11'd256       /* (1024-512)/2 = 256, za centriranje PDP-1 512x512 displeja */
+`define   h_visible_offset_end   11'd1008      /* h_visible_offset + 512 + h_center_offset = 240 + 512 + 256 = 1008 */
 
-`define   v_visible_offset       11'd45        /* v_front_porch + v_sync_pulse + v_back_porch = 10+2+33 = 45 */
-`define   v_visible_offset_end   11'd525       /* v_visible_offset + 480 = 45 + 480 = 525 */
+`define   v_visible_offset       11'd40        /* v_front + v_sync + v_back = 3 + 6 + 31 = 40 */
+`define   v_visible_offset_end   11'd808       /* v_visible_offset + v_visible = 40 + 768 = 808 */
 
 
 /* Joystick, defined in core configuration string as 
