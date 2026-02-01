@@ -28,7 +28,8 @@ FPGA_IDCODE  := 0x41112043
 
 # ==== Toolchain putanje ====
 # OSS CAD Suite lokacija - prilagoditi ako je drugacije instalirano
-OSS_CAD_SUITE := /home/klaudio/Programs/oss-cad-suite
+# Set OSS_CAD_SUITE environment variable or use default
+OSS_CAD_SUITE ?= $(HOME)/Programs/oss-cad-suite
 
 # Alati (pretpostavlja aktivirani environment ili punu putanju)
 YOSYS        := yosys

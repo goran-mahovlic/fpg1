@@ -31,3 +31,6 @@ PLAN.md
 VERILATOR-*.txt
 regoc/
 docs/
+# Build logs and binaries
+build_*.log
+tb/tb_*
