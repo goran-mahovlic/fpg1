@@ -6,7 +6,7 @@
 //
 // This module implements a 1024 x 768 @ 50 Hz vector display output.
 // Uses BRAM-based shift registers to simulate phosphor decay.
-// PDP-1 512x512 display is scaled/centered within 1024x768 frame.
+// PDP-1 1024x1024 display mapped to 1024x768 frame (768 lines visible).
 //
 // Architecture:
 // - pdp1_vga_rowbuffer: Stores next 8 lines to be drawn (64 Kbit BRAM)
@@ -147,10 +147,10 @@ assign debug_wren = wren;
 assign debug_search_counter = search_counter[31:21];  // MSBs to see if it's large
 assign debug_luma1 = luma_1;
 
-// DEBUG: Provjeri koordinate u vidljivom rasponu (0-511 za PDP-1, ili 0-479 za 640x480)
+// DEBUG: Provjeri koordinate u vidljivom rasponu (0-1023 za puni 1024x1024 PDP-1 display)
 wire [9:0] dbg_px = pixel_x_i;
 wire [9:0] dbg_py = pixel_y_i;
-wire dbg_coord_in_range = (pixel_x_i < 10'd512) && (pixel_y_i < 10'd512);
+wire dbg_coord_in_range = (pixel_x_i < 10'd1024) && (pixel_y_i < 10'd1024);
 
 // DEBUG: Export rowbuffer write signal za LED indikator
 assign debug_rowbuff_wren = rowbuff_wren;
@@ -266,27 +266,25 @@ always @(posedge clk) begin
             buffer_write_ptr <= buffer_write_ptr + 1'b1;
           end
 `else
-          // PDP-1 MODE: X/Y swap + X inverzija + skaliranje za 512x512 display
+          // PDP-1 MODE: X/Y swap + X inverzija - PUNI 1024x1024 display
           // Koordinate iz CPU-a su 0-1023 (kao original)
-          // 1) Inverzija X: ~pixel_x_i = 1023 - pixel_x_i
-          // 2) Skaliranje: >> 1 za mapiranje 1024 -> 512
-          // 3) X/Y swap: invertirani X ide u Y buffer, Y ide u X buffer
-          // scaled_x = pixel_y_i >> 1  (Y postaje X, skaliran)
-          // scaled_y = (~pixel_x_i) >> 1  (invertirani X postaje Y, skaliran)
+          // 1) Inverzija X: ~pixel_x_i = 1023 - pixel_x_i (10-bit inverzija)
+          // 2) X/Y swap: invertirani X ide u Y buffer, Y ide u X buffer
+          // BEZ skaliranja - koristi pune 10-bit koordinate za 1024x1024 display
           if (variable_brightness && pixel_brightness > 3'b0 && pixel_brightness < 3'b100)
           begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { (~pixel_x_i) >> 1, pixel_y_i >> 1 };
+            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
 
-            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { ((~pixel_x_i) >> 1) + 1'b1, pixel_y_i >> 1 };
-            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { (~pixel_x_i) >> 1, (pixel_y_i >> 1) + 1'b1 };
-            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { ((~pixel_x_i) >> 1) - 1'b1, pixel_y_i >> 1 };
-            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { (~pixel_x_i) >> 1, (pixel_y_i >> 1) - 1'b1 };
+            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { ~pixel_x_i + 1'b1, pixel_y_i };
+            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { ~pixel_x_i, pixel_y_i + 1'b1 };
+            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { ~pixel_x_i - 1'b1, pixel_y_i };
+            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { ~pixel_x_i, pixel_y_i - 1'b1 };
 
             buffer_write_ptr <= buffer_write_ptr + 3'd5;
           end
           else
           begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { (~pixel_x_i) >> 1, pixel_y_i >> 1 };
+            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
             buffer_write_ptr <= buffer_write_ptr + 1'b1;
           end
 `endif

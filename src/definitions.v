@@ -23,8 +23,8 @@
 `define   v_line_timing          11'd808       /* 768 + 3 + 6 + 31 = 808 */
 
 `define   h_visible_offset       11'd240       /* h_sync + h_back + h_front = 136 + 80 + 24 = 240 */
-`define   h_center_offset        11'd256       /* (1024-512)/2 = 256, za centriranje PDP-1 512x512 displeja */
-`define   h_visible_offset_end   11'd1008      /* h_visible_offset + 512 + h_center_offset = 240 + 512 + 256 = 1008 */
+`define   h_center_offset        11'd0         /* Bez centriranja - koristi puni 1024x1024 PDP-1 display */
+`define   h_visible_offset_end   11'd1264      /* h_visible_offset + 1024 = 240 + 1024 = 1264 */
 
 `define   v_visible_offset       11'd40        /* v_front + v_sync + v_back = 3 + 6 + 31 = 40 */
 `define   v_visible_offset_end   11'd808       /* v_visible_offset + v_visible = 40 + 768 = 808 */
