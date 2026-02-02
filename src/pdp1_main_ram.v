@@ -37,7 +37,7 @@ module pdp1_main_ram (
     // Initialize from HEX file at synthesis time
     // spacewar.hex contains the Spacewar! program
     initial begin
-        $readmemh("src/rom/spacewar.hex", mem);
+        $readmemh("src/rom/snowflake.hex", mem);
     end
 
     // Port A - synchronous read/write

@@ -427,7 +427,7 @@ module top_pdp1
 
     // Test word and address switches (active-high)
     wire [17:0] w_test_word    = 18'b0;
-    wire [17:0] w_test_address = 18'o4;   // Start address: octal 4 (Spacewar! entry)
+    wire [17:0] w_test_address = 18'o100;  // Start address: octal 100 (Snowflake entry)
 
     // =========================================================================
     // CDC: DIP SWITCH SYNCHRONIZATION (External -> clk_cpu domain)
@@ -469,7 +469,7 @@ module top_pdp1
     // NOTE: SW[1] controls ONLY serial debug (via w_single_player signal),
     //       NOT starfield. This separation fixes the explosion visibility bug.
     // -------------------------------------------------------------------------
-    wire [5:0] w_sense_switches = {r_btn_sync, r_sw_sync[3:2], 1'b1, r_sw_sync[0]};
+    wire [5:0] w_sense_switches = {r_btn_sync, r_sw_sync[3:0]};
 
     // =========================================================================
     // PDP-1 MAIN RAM (4096 x 18-bit, clk_cpu domain)
@@ -531,7 +531,7 @@ module top_pdp1
         .tape_rcv_word          (18'b0),
 
         // Start address
-        .start_address          (12'o4),            // Spacewar! entry point
+        .start_address          (12'o100),          // Snowflake entry point
 
         // Configuration
         .hw_mul_enabled         (1'b1),             // Enable hardware multiply/divide
