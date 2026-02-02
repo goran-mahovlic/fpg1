@@ -382,7 +382,7 @@ begin
          display_crt:
          begin
             pixel_shift_out <= 1'b1;
-            pixel_brightness <= instruction[8:6];  // BUGFIX: koristi instruction (IR) umjesto DI - brightness bitovi su dio IOT instrukcije
+            pixel_brightness <= IO[8:6];  // FIX: Brightness iz IO registra (PDP-1 IO bits 9-11 = Verilog bits 8:6)
             // FIX: Koordinate IDENTIČNO originalu - puni 10-bit (0-1023)
             // Skaliranje za 512x512 display se radi u CRT modulu
             // PDP-1 generira 10-bit signed (-512 do +511)

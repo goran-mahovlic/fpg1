@@ -15,7 +15,7 @@ module vga2dvid
     parameter C_depth = 8       // Color depth (1-8 bits)
 )
 (
-    input  wire                   clk_pixel,  // Pixel clock (25 MHz for 640x480)
+    input  wire                   clk_pixel,  // Pixel clock (51 MHz for 1024x768@50Hz)
     input  wire                   clk_shift,  // Shift clock: DDR=5x, SDR=10x pixel clock
     input  wire [C_depth-1:0]     in_red,
     input  wire [C_depth-1:0]     in_green,

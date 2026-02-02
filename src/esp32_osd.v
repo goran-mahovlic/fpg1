@@ -25,8 +25,8 @@
 
 module esp32_osd #(
     parameter [2:0]  OSD_COLOR     = 3'd4,     // Default: cyan
-    parameter [11:0] OSD_X_OFFSET  = 12'd192,  // Center 640-256/2
-    parameter [11:0] OSD_Y_OFFSET  = 12'd176   // Center 480-128/2
+    parameter [11:0] OSD_X_OFFSET  = 12'd384,  // Center 1024-256/2
+    parameter [11:0] OSD_Y_OFFSET  = 12'd320   // Center 768-128/2
 ) (
     // System clocks
     input         clk_sys,            // 50 MHz system clock

@@ -1,195 +1,214 @@
 //============================================================================
-// ULX3S Input Module for PDP-1 Spacewar!
-// TASK-195: Keyboard/Joystick Mapping
-// Author: Grga Pitic, REGOC periferija expert
+// Module: ulx3s_input
+// Description: ULX3S Button/Switch Input Handler for PDP-1 Spacewar!
 //============================================================================
+// Author: Grga Pitic, REGOC periferija expert
+// Date: 2026-01-31
+// Updated: 2026-02-02 (Best practices applied)
 //
-// ULX3S Hardware:
-//   - 7 buttons: BTN[6:0]
-//   - 4 DIP switches: SW[3:0]
+// HARDWARE INTERFACE:
+//   ULX3S Board:
+//     - 7 buttons: BTN[6:0] (active LOW on PCB)
+//     - 4 DIP switches: SW[3:0]
 //
-// Button Layout (active high after active-low board input):
-//   BTN[0] = PWR (active low on board, directly under FPGA)
+// BUTTON LAYOUT (active HIGH after inversion):
+//   BTN[0] = PWR (directly under FPGA)
 //   BTN[1] = UP
 //   BTN[2] = DOWN
 //   BTN[3] = LEFT
 //   BTN[4] = RIGHT
-//   BTN[5] = F1 (active low on board)
-//   BTN[6] = F2 (active low on board)
+//   BTN[5] = F1
+//   BTN[6] = F2
 //
-// Spacewar! Control Mapping:
-//   Player 1 (Left player - "Needle"):
-//     BTN[3] = Rotate CCW (counter-clockwise)
-//     BTN[4] = Rotate CW (clockwise)
-//     BTN[1] = Thrust
+// SPACEWAR! CONTROL MAPPING:
+//   Player 1 (Needle - left player):
 //     BTN[0] = Fire torpedo
+//     BTN[1] = Thrust
+//     BTN[3] = Rotate CCW
+//     BTN[4] = Rotate CW
 //
-//   Player 2 (Right player - "Wedge"):
+//   Player 2 (Wedge - right player, SW[0] held):
+//     SW[0] + BTN[2] = Fire torpedo
+//     SW[0] + BTN[1] = Thrust
 //     SW[0] + BTN[3] = Rotate CCW
 //     SW[0] + BTN[4] = Rotate CW
-//     SW[0] + BTN[1] = Thrust
-//     SW[0] + BTN[2] = Fire torpedo
 //
-//   Alternative: SW[1] enables single-player mode (P1 only)
+//   Mode Control:
+//     SW[1] = Single player mode (P2 disabled)
 //
-// Output joystick_emu format (matches keyboard.v):
-//   [0] = P1 fire
-//   [1] = P1 left (CCW)
-//   [2] = P1 thrust
-//   [3] = P1 right (CW)
-//   [4] = P2 fire
-//   [5] = P2 left (CCW)
-//   [6] = P2 thrust
-//   [7] = P2 right (CW)
+// OUTPUT FORMAT (joystick_emu[7:0]):
+//   [0] = P1 fire      [4] = P2 fire
+//   [1] = P1 CCW       [5] = P2 CCW
+//   [2] = P1 thrust    [6] = P2 thrust
+//   [3] = P1 CW        [7] = P2 CW
+//
+// CDC HANDLING:
+//   All button/switch inputs are synchronized with 2-FF synchronizers
+//   marked with ASYNC_REG attribute for proper placement.
+//
+// DEBOUNCE:
+//   Each button has independent counter-based debounce (default 10ms).
+//   State changes only accepted after stable for DEBOUNCE_MS.
 //
 //============================================================================
 
+`default_nettype none
+
 module ulx3s_input #(
-    parameter CLK_FREQ = 25_000_000,   // Clock frequency in Hz
-    parameter DEBOUNCE_MS = 10         // Debounce time in milliseconds
+    parameter CLK_FREQ    = 25_000_000, // Clock frequency in Hz
+    parameter DEBOUNCE_MS = 10          // Debounce time in milliseconds
 )(
-    input  wire        clk,
-    input  wire        rst_n,
+    // Clock and Reset
+    input  wire        i_clk,           // System clock
+    input  wire        i_rst_n,         // Active-low synchronous reset
 
-    // ULX3S hardware inputs (directly from pins, active low buttons)
-    input  wire [6:0]  btn_n,          // Buttons active low from board
-    input  wire [3:0]  sw,             // DIP switches
+    // ULX3S Hardware Inputs (directly from pins)
+    input  wire [6:0]  i_btn_n,         // Buttons (active LOW from board)
+    input  wire [3:0]  i_sw,            // DIP switches
 
-    // Joystick emulation output (active high, directly usable)
-    output reg  [7:0]  joystick_emu,
+    // Joystick Emulation Output
+    output reg  [7:0]  o_joystick_emu,  // Active HIGH joystick signals
 
-    // LED feedback output
-    output wire [7:0]  led_feedback,
+    // LED Feedback Output
+    output wire [7:0]  o_led_feedback,  // Mirror of joystick state
 
-    // Additional control signals
-    output wire        p2_mode_active, // Player 2 mode active indicator
-    output wire        single_player   // Single player mode indicator
+    // Mode Indicators
+    output wire        o_p2_mode_active,// Player 2 mode active (SW[0])
+    output wire        o_single_player  // Single player mode (SW[1])
 );
 
 //============================================================================
-// Parameters and Constants
+// Local Parameters
 //============================================================================
+// Debounce counter: DEBOUNCE_MS milliseconds at CLK_FREQ
 localparam DEBOUNCE_COUNT = (CLK_FREQ / 1000) * DEBOUNCE_MS;
-localparam CNT_WIDTH = $clog2(DEBOUNCE_COUNT + 1);
+localparam CNT_WIDTH      = $clog2(DEBOUNCE_COUNT + 1);
 
 //============================================================================
-// Active high conversion from active low buttons
+// Signal Declarations
 //============================================================================
-wire [6:0] btn_raw;
-assign btn_raw = ~btn_n;  // Convert active low to active high
+// Active-high button signal (inverted from active-low input)
+wire [6:0] w_btn_raw;
+assign w_btn_raw = ~i_btn_n;
 
-//============================================================================
-// Debounce Logic
-// - Each button gets its own debounce counter
-// - Output is stable after DEBOUNCE_MS milliseconds
-//============================================================================
-reg [CNT_WIDTH-1:0] debounce_cnt [6:0];
-reg [6:0] btn_sync_0, btn_sync_1;  // Double FF synchronizer
-reg [6:0] btn_debounced;
+// CDC synchronizer registers (2-FF for metastability protection)
+(* ASYNC_REG = "TRUE" *) reg [6:0] r_btn_meta;   // First FF (may be metastable)
+(* ASYNC_REG = "TRUE" *) reg [6:0] r_btn_sync;   // Second FF (stable)
 
+// Debounce state
+reg [CNT_WIDTH-1:0] r_debounce_cnt [6:0];  // Per-button debounce counter
+reg [6:0]           r_btn_debounced;        // Debounced button state
+
+// Loop variable (for generate alternative)
 integer i;
 
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        btn_sync_0 <= 7'b0;
-        btn_sync_1 <= 7'b0;
-        btn_debounced <= 7'b0;
+//============================================================================
+// Button CDC Synchronization and Debounce
+//============================================================================
+always @(posedge i_clk or negedge i_rst_n) begin
+    if (!i_rst_n) begin
+        r_btn_meta      <= 7'b0;
+        r_btn_sync      <= 7'b0;
+        r_btn_debounced <= 7'b0;
         for (i = 0; i < 7; i = i + 1) begin
-            debounce_cnt[i] <= 0;
+            r_debounce_cnt[i] <= {CNT_WIDTH{1'b0}};
         end
     end else begin
-        // Synchronize inputs (metastability protection)
-        btn_sync_0 <= btn_raw;
-        btn_sync_1 <= btn_sync_0;
+        // Stage 1: Metastability capture
+        r_btn_meta <= w_btn_raw;
+        // Stage 2: Synchronized output
+        r_btn_sync <= r_btn_meta;
 
-        // Debounce each button
+        // Debounce logic: each button independent
         for (i = 0; i < 7; i = i + 1) begin
-            if (btn_sync_1[i] != btn_debounced[i]) begin
-                // Button state changed, start/continue counting
-                if (debounce_cnt[i] < DEBOUNCE_COUNT) begin
-                    debounce_cnt[i] <= debounce_cnt[i] + 1;
+            if (r_btn_sync[i] != r_btn_debounced[i]) begin
+                // Button state differs from debounced state
+                if (r_debounce_cnt[i] < DEBOUNCE_COUNT) begin
+                    r_debounce_cnt[i] <= r_debounce_cnt[i] + 1'b1;
                 end else begin
-                    // Stable for long enough, accept new state
-                    btn_debounced[i] <= btn_sync_1[i];
-                    debounce_cnt[i] <= 0;
+                    // Stable for DEBOUNCE_MS, accept new state
+                    r_btn_debounced[i] <= r_btn_sync[i];
+                    r_debounce_cnt[i]  <= {CNT_WIDTH{1'b0}};
                 end
             end else begin
                 // Button stable, reset counter
-                debounce_cnt[i] <= 0;
+                r_debounce_cnt[i] <= {CNT_WIDTH{1'b0}};
             end
         end
     end
 end
 
 //============================================================================
-// DIP Switch Synchronization (no debounce needed, they're stable)
+// DIP Switch CDC Synchronization
+// Switches are mechanically stable, no debounce needed
 //============================================================================
-reg [3:0] sw_sync_0, sw_sync_1;
-reg [3:0] sw_stable;
+(* ASYNC_REG = "TRUE" *) reg [3:0] r_sw_meta;   // First FF (may be metastable)
+(* ASYNC_REG = "TRUE" *) reg [3:0] r_sw_sync;   // Second FF (stable)
+reg [3:0] r_sw_stable;                          // Third FF (output register)
 
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        sw_sync_0 <= 4'b0;
-        sw_sync_1 <= 4'b0;
-        sw_stable <= 4'b0;
+always @(posedge i_clk or negedge i_rst_n) begin
+    if (!i_rst_n) begin
+        r_sw_meta   <= 4'b0;
+        r_sw_sync   <= 4'b0;
+        r_sw_stable <= 4'b0;
     end else begin
-        sw_sync_0 <= sw;
-        sw_sync_1 <= sw_sync_0;
-        sw_stable <= sw_sync_1;
+        r_sw_meta   <= i_sw;
+        r_sw_sync   <= r_sw_meta;
+        r_sw_stable <= r_sw_sync;
     end
 end
 
 //============================================================================
-// Mode Control
+// Mode Control Outputs
 //============================================================================
-assign p2_mode_active = sw_stable[0];  // SW[0] = Player 2 mode modifier
-assign single_player  = sw_stable[1];  // SW[1] = Single player mode
+assign o_p2_mode_active = r_sw_stable[0];  // SW[0] = Player 2 mode modifier
+assign o_single_player  = r_sw_stable[1];  // SW[1] = Single player mode
 
 //============================================================================
-// Joystick Mapping Logic
+// Joystick Mapping Logic (Combinational)
 //============================================================================
-// Player 1 controls (active when SW[0] = 0, or always in single player)
-wire p1_fire, p1_ccw, p1_thrust, p1_cw;
+// Internal mode wires for cleaner logic
+wire w_p2_mode   = r_sw_stable[0];
+wire w_single_p  = r_sw_stable[1];
 
-// Player 2 controls (active when SW[0] = 1 and not single player)
-wire p2_fire, p2_ccw, p2_thrust, p2_cw;
+// Player 1 controls (active when SW[0]=0)
+wire w_p1_fire   = r_btn_debounced[0] & ~w_p2_mode;  // BTN[0] = Fire
+wire w_p1_ccw    = r_btn_debounced[3] & ~w_p2_mode;  // BTN[3] = LEFT = CCW
+wire w_p1_thrust = r_btn_debounced[1] & ~w_p2_mode;  // BTN[1] = UP = Thrust
+wire w_p1_cw     = r_btn_debounced[4] & ~w_p2_mode;  // BTN[4] = RIGHT = CW
 
-// Player 1: Direct button mapping
-assign p1_fire   = btn_debounced[0] & ~p2_mode_active;  // BTN[0] = Fire
-assign p1_ccw    = btn_debounced[3] & ~p2_mode_active;  // BTN[3] = LEFT = CCW
-assign p1_thrust = btn_debounced[1] & ~p2_mode_active;  // BTN[1] = UP = Thrust
-assign p1_cw     = btn_debounced[4] & ~p2_mode_active;  // BTN[4] = RIGHT = CW
-
-// Player 2: Same buttons but with SW[0] modifier
-assign p2_fire   = btn_debounced[2] & p2_mode_active & ~single_player;  // BTN[2] = DOWN = Fire
-assign p2_ccw    = btn_debounced[3] & p2_mode_active & ~single_player;  // BTN[3] = LEFT = CCW
-assign p2_thrust = btn_debounced[1] & p2_mode_active & ~single_player;  // BTN[1] = UP = Thrust
-assign p2_cw     = btn_debounced[4] & p2_mode_active & ~single_player;  // BTN[4] = RIGHT = CW
+// Player 2 controls (active when SW[0]=1 and not single player)
+wire w_p2_fire   = r_btn_debounced[2] & w_p2_mode & ~w_single_p;  // BTN[2] = DOWN = Fire
+wire w_p2_ccw    = r_btn_debounced[3] & w_p2_mode & ~w_single_p;  // BTN[3] = LEFT = CCW
+wire w_p2_thrust = r_btn_debounced[1] & w_p2_mode & ~w_single_p;  // BTN[1] = UP = Thrust
+wire w_p2_cw     = r_btn_debounced[4] & w_p2_mode & ~w_single_p;  // BTN[4] = RIGHT = CW
 
 //============================================================================
-// Output Assignment
+// Output Register
+// Registered output for clean timing to downstream logic
 //============================================================================
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        joystick_emu <= 8'b0;
+always @(posedge i_clk or negedge i_rst_n) begin
+    if (!i_rst_n) begin
+        o_joystick_emu <= 8'b0;
     end else begin
-        joystick_emu[0] <= p1_fire;    // P1 fire
-        joystick_emu[1] <= p1_ccw;     // P1 left (CCW)
-        joystick_emu[2] <= p1_thrust;  // P1 thrust
-        joystick_emu[3] <= p1_cw;      // P1 right (CW)
-        joystick_emu[4] <= p2_fire;    // P2 fire
-        joystick_emu[5] <= p2_ccw;     // P2 left (CCW)
-        joystick_emu[6] <= p2_thrust;  // P2 thrust
-        joystick_emu[7] <= p2_cw;      // P2 right (CW)
+        o_joystick_emu[0] <= w_p1_fire;    // P1 fire
+        o_joystick_emu[1] <= w_p1_ccw;     // P1 left (CCW)
+        o_joystick_emu[2] <= w_p1_thrust;  // P1 thrust
+        o_joystick_emu[3] <= w_p1_cw;      // P1 right (CW)
+        o_joystick_emu[4] <= w_p2_fire;    // P2 fire
+        o_joystick_emu[5] <= w_p2_ccw;     // P2 left (CCW)
+        o_joystick_emu[6] <= w_p2_thrust;  // P2 thrust
+        o_joystick_emu[7] <= w_p2_cw;      // P2 right (CW)
     end
 end
 
 //============================================================================
-// LED Feedback
-// - Shows current joystick state for debugging
-// - Lower 4 LEDs = Player 1 controls
-// - Upper 4 LEDs = Player 2 controls (when active)
+// LED Feedback Output
+// Direct mirror of joystick state for visual debugging
+// Lower 4 LEDs = Player 1, Upper 4 LEDs = Player 2
 //============================================================================
-assign led_feedback = joystick_emu;
+assign o_led_feedback = o_joystick_emu;
 
 endmodule
+
+`default_nettype wire  // Restore default for other modules

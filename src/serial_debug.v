@@ -2,258 +2,306 @@
 // Serial Debug Module: UART TX for Debug Output
 // =============================================================================
 // TASK-DEBUG: Debug infrastruktura za crni ekran problem
-// Autor: Debug Team, REGOC
-// Datum: 2026-01-31
+// Author: Debug Team, REGOC
+// Date: 2026-01-31
+// Updated: 2026-02-02 (Best practices applied)
 //
-// OPIS:
-//   Jednostavan UART TX modul za slanje debug informacija na PC.
-//   Na svaki frame_tick salje ASCII string s debug podacima.
+// DESCRIPTION:
+//   Simple UART TX module for sending debug information to PC.
+//   Sends ASCII string with debug data on each frame_tick.
 //
-// FORMAT:
-//   "F:xxxx A:yy X:zzz Y:www\r\n"
-//   F = frame counter (hex)
-//   A = animation angle (hex)
-//   X = pixel X coordinate (decimal)
-//   Y = pixel Y coordinate (decimal)
+// DEBUG OUTPUT FORMAT:
+//   Frame Message: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R\r\n"
+//     F  = Frame counter (hex, 4 digits)
+//     PC = CPU Program Counter (hex, 3 digits for 12-bit)
+//     I  = Instruction count (hex, 4 digits)
+//     D  = Display/IOT count (hex, 4 digits)
+//     V  = pixel_valid count per frame (decimal, 4 digits)
+//     X  = Pixel X coordinate (decimal, 3 digits)
+//     Y  = Pixel Y coordinate (decimal, 3 digits)
+//     R  = Running indicator (R=running, .=halted)
 //
-// SPECIFIKACIJA:
-//   - Baud: 115200
-//   - Clock: 25 MHz
-//   - Pin: ftdi_rxd (L4) - FPGA TX prema PC-u
+//   Pixel Message: "P:xxxxx X:xxx Y:xxx B:x R:xxxx\r\n"
+//     P  = Pixel count (decimal, 5 digits, wraps at 100000)
+//     X  = Pixel X coordinate (decimal, 3 digits)
+//     Y  = Pixel Y coordinate (decimal, 3 digits)
+//     B  = Pixel brightness (0-7)
+//     R  = Ring buffer write pointer (decimal, 4 digits)
+//
+// SPECIFICATIONS:
+//   - Baud Rate: 115200
+//   - Data Bits: 8
+//   - Stop Bits: 1
+//   - Parity: None
+//   - Clock: 51 MHz (1024x768@50Hz pixel clock)
+//   - Pin: ftdi_rxd (L4) - FPGA TX to PC
+//
+// SECURITY NOTE:
+//   Debug output can be disabled via SW[1] (enable input).
+//   When disabled, no serial data is transmitted.
 //
 // =============================================================================
 
+`default_nettype none
+
 // =============================================================================
-// UART TX Module
+// Module: uart_tx
+// Description: UART transmitter with configurable baud rate
+// FSM: 4-state Moore machine (IDLE -> START_BIT -> DATA_BITS -> STOP_BIT)
 // =============================================================================
 module uart_tx #(
-    parameter CLK_FREQ = 25000000,
-    parameter BAUD     = 115200
+    parameter CLK_FREQ = 25000000,  // Input clock frequency in Hz
+    parameter BAUD     = 115200     // Desired baud rate
 )(
-    input  wire       clk,
-    input  wire       rst_n,
-    input  wire [7:0] data,
-    input  wire       send,
-    output reg        tx,
-    output reg        busy
+    input  wire       i_clk,        // System clock
+    input  wire       i_rst_n,      // Active-low synchronous reset
+    input  wire [7:0] i_data,       // Data byte to transmit
+    input  wire       i_send,       // Send strobe (pulse to start transmission)
+    output reg        o_tx,         // UART TX output (directly to pin)
+    output reg        o_busy        // Busy flag (high during transmission)
 );
-    // Clocks per bit: 25000000 / 115200 = 217
+    // =========================================================================
+    // Local Parameters
+    // =========================================================================
+    // Clocks per bit calculation: CLK_FREQ / BAUD
+    // Example: 51000000 / 115200 = 443 clocks per bit
     localparam CLKS_PER_BIT = CLK_FREQ / BAUD;
 
-    // State machine
-    localparam IDLE      = 3'd0;
-    localparam START_BIT = 3'd1;
-    localparam DATA_BITS = 3'd2;
-    localparam STOP_BIT  = 3'd3;
+    // FSM State Encoding (binary for 4 states)
+    localparam [2:0] ST_IDLE      = 3'd0;  // Waiting for send command
+    localparam [2:0] ST_START_BIT = 3'd1;  // Transmitting start bit (low)
+    localparam [2:0] ST_DATA_BITS = 3'd2;  // Transmitting 8 data bits LSB first
+    localparam [2:0] ST_STOP_BIT  = 3'd3;  // Transmitting stop bit (high)
 
-    reg [2:0]  state;
-    reg [7:0]  shift_reg;
-    reg [2:0]  bit_index;
-    reg [15:0] clk_count;
+    // =========================================================================
+    // Signal Declarations
+    // =========================================================================
+    reg [2:0]  r_state;      // FSM current state
+    reg [7:0]  r_shift_reg;  // Shift register for data bits
+    reg [2:0]  r_bit_index;  // Current bit being transmitted (0-7)
+    reg [15:0] r_clk_count;  // Baud rate clock divider counter
 
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            state     <= IDLE;
-            tx        <= 1'b1;  // Idle high
-            busy      <= 1'b0;
-            shift_reg <= 8'd0;
-            bit_index <= 3'd0;
-            clk_count <= 16'd0;
+    // =========================================================================
+    // Sequential Logic: UART TX FSM (Single-block style for compact FSM)
+    // =========================================================================
+    always @(posedge i_clk) begin
+        if (!i_rst_n) begin
+            r_state     <= ST_IDLE;
+            o_tx        <= 1'b1;  // UART idle state is high
+            o_busy      <= 1'b0;
+            r_shift_reg <= 8'd0;
+            r_bit_index <= 3'd0;
+            r_clk_count <= 16'd0;
         end else begin
-            case (state)
-                IDLE: begin
-                    tx   <= 1'b1;
-                    busy <= 1'b0;
-                    if (send) begin
-                        shift_reg <= data;
-                        state     <= START_BIT;
-                        busy      <= 1'b1;
-                        clk_count <= 16'd0;
+            case (r_state)
+                ST_IDLE: begin
+                    o_tx   <= 1'b1;  // Maintain idle high
+                    o_busy <= 1'b0;
+                    if (i_send) begin
+                        r_shift_reg <= i_data;
+                        r_state     <= ST_START_BIT;
+                        o_busy      <= 1'b1;
+                        r_clk_count <= 16'd0;
                     end
                 end
 
-                START_BIT: begin
-                    tx <= 1'b0;  // Start bit is low
-                    if (clk_count < CLKS_PER_BIT - 1) begin
-                        clk_count <= clk_count + 1'b1;
+                ST_START_BIT: begin
+                    o_tx <= 1'b0;  // Start bit is always low
+                    if (r_clk_count < CLKS_PER_BIT - 1) begin
+                        r_clk_count <= r_clk_count + 1'b1;
                     end else begin
-                        clk_count <= 16'd0;
-                        bit_index <= 3'd0;
-                        state     <= DATA_BITS;
+                        r_clk_count <= 16'd0;
+                        r_bit_index <= 3'd0;
+                        r_state     <= ST_DATA_BITS;
                     end
                 end
 
-                DATA_BITS: begin
-                    tx <= shift_reg[bit_index];
-                    if (clk_count < CLKS_PER_BIT - 1) begin
-                        clk_count <= clk_count + 1'b1;
+                ST_DATA_BITS: begin
+                    o_tx <= r_shift_reg[r_bit_index];  // LSB first
+                    if (r_clk_count < CLKS_PER_BIT - 1) begin
+                        r_clk_count <= r_clk_count + 1'b1;
                     end else begin
-                        clk_count <= 16'd0;
-                        if (bit_index < 7) begin
-                            bit_index <= bit_index + 1'b1;
+                        r_clk_count <= 16'd0;
+                        if (r_bit_index < 7) begin
+                            r_bit_index <= r_bit_index + 1'b1;
                         end else begin
-                            state <= STOP_BIT;
+                            r_state <= ST_STOP_BIT;
                         end
                     end
                 end
 
-                STOP_BIT: begin
-                    tx <= 1'b1;  // Stop bit is high
-                    if (clk_count < CLKS_PER_BIT - 1) begin
-                        clk_count <= clk_count + 1'b1;
+                ST_STOP_BIT: begin
+                    o_tx <= 1'b1;  // Stop bit is always high
+                    if (r_clk_count < CLKS_PER_BIT - 1) begin
+                        r_clk_count <= r_clk_count + 1'b1;
                     end else begin
-                        state <= IDLE;
+                        r_state <= ST_IDLE;
                     end
                 end
 
-                default: state <= IDLE;
+                default: r_state <= ST_IDLE;  // Safe state recovery
             endcase
         end
     end
+
 endmodule
 
 // =============================================================================
-// Serial Debug Wrapper
+// Module: serial_debug
+// Description: Debug wrapper that formats and sends diagnostic data via UART
 // =============================================================================
 module serial_debug (
-    input  wire        clk,
-    input  wire        rst_n,
-    input  wire        enable,         // SW[1] kontrola: 0=disabled, 1=enabled
-    input  wire        frame_tick,
-    input  wire [7:0]  angle,
-    input  wire [9:0]  pixel_x,
-    input  wire [9:0]  pixel_y,
-    input  wire        pixel_valid,
-    input  wire [7:0]  led_status,    // LED status za debug
-    // Additional debug signals
-    input  wire        pixel_avail_synced,  // Synced signal going to CRT
-    input  wire        crt_wren,            // CRT internal write enable
-    input  wire [5:0]  crt_write_ptr,       // CRT FIFO write pointer
-    input  wire [5:0]  crt_read_ptr,        // CRT FIFO read pointer
-    input  wire [10:0] search_counter_msb,  // Search counter MSBs
-    input  wire [11:0] luma1,               // Luma from ring buffer output
-    input  wire [15:0] rowbuff_write_count, // Non-zero pixels written to rowbuffer per frame
-    // CPU debug signals (TASK-DEBUG)
-    input  wire [11:0] cpu_pc,              // CPU Program Counter
-    input  wire [15:0] cpu_instr_count,     // CPU instructions executed
-    input  wire [15:0] cpu_iot_count,       // CPU IOT (display) instructions
-    input  wire        cpu_running,         // CPU is running
-    // Pixel debug signals (TASK-PIXEL-DEBUG: per-pixel tracking)
-    input  wire [31:0] pixel_count,         // Total pixel count from CPU
-    input  wire [9:0]  pixel_debug_x,       // Pixel X coordinate
-    input  wire [9:0]  pixel_debug_y,       // Pixel Y coordinate
-    input  wire [2:0]  pixel_brightness,    // Pixel brightness (0-7)
-    input  wire        pixel_shift_out,     // Pixel output strobe (trigger for debug message)
-    input  wire [9:0]  ring_buffer_wrptr,   // Ring buffer write pointer (fill level indicator)
-    output wire        uart_tx_pin
+    // Clock and Reset
+    input  wire        i_clk,               // System clock (51 MHz)
+    input  wire        i_rst_n,             // Active-low synchronous reset
+
+    // Control
+    input  wire        i_enable,            // Enable debug output (SW[1]: 0=disabled, 1=enabled)
+
+    // Frame Timing
+    input  wire        i_frame_tick,        // Pulse at start of each frame
+
+    // Display Debug Inputs
+    input  wire [7:0]  i_angle,             // Animation angle (legacy, unused)
+    input  wire [9:0]  i_pixel_x,           // Current pixel X coordinate
+    input  wire [9:0]  i_pixel_y,           // Current pixel Y coordinate
+    input  wire        i_pixel_valid,       // Pixel valid strobe (unused)
+    input  wire [7:0]  i_led_status,        // LED status for debug display
+
+    // CRT Pipeline Debug
+    input  wire        i_pixel_avail_synced,// Synced pixel available signal to CRT
+    input  wire        i_crt_wren,          // CRT internal write enable
+    input  wire [5:0]  i_crt_write_ptr,     // CRT FIFO write pointer
+    input  wire [5:0]  i_crt_read_ptr,      // CRT FIFO read pointer
+    input  wire [10:0] i_search_counter_msb,// Search counter MSBs
+    input  wire [11:0] i_luma1,             // Luma from ring buffer output
+    input  wire [15:0] i_rowbuff_write_count, // Non-zero pixels written per frame
+
+    // CPU Debug Inputs
+    input  wire [11:0] i_cpu_pc,            // CPU Program Counter (12-bit)
+    input  wire [15:0] i_cpu_instr_count,   // CPU instructions executed
+    input  wire [15:0] i_cpu_iot_count,     // CPU IOT (display) instructions
+    input  wire        i_cpu_running,       // CPU running flag
+
+    // Pixel Debug Inputs (per-pixel tracking)
+    input  wire [31:0] i_pixel_count,       // Total pixel count from CPU
+    input  wire [9:0]  i_pixel_debug_x,     // Pixel X coordinate
+    input  wire [9:0]  i_pixel_debug_y,     // Pixel Y coordinate
+    input  wire [2:0]  i_pixel_brightness,  // Pixel brightness (0-7)
+    input  wire        i_pixel_shift_out,   // Pixel output strobe
+    input  wire [9:0]  i_ring_buffer_wrptr, // Ring buffer write pointer
+
+    // UART Output
+    output wire        o_uart_tx            // UART TX pin (directly to FTDI)
 );
 
     // =========================================================================
-    // UART TX instance
+    // UART TX Instance
     // =========================================================================
-    reg  [7:0] tx_data;
-    reg        tx_send;
-    wire       tx_busy;
+    reg  [7:0] r_tx_data;   // Data byte to send
+    reg        r_tx_send;   // Send strobe
+    wire       w_tx_busy;   // UART busy flag
 
     uart_tx #(
-        .CLK_FREQ (25000000),
-        .BAUD     (115200)
-    ) uart_inst (
-        .clk    (clk),
-        .rst_n  (rst_n),
-        .data   (tx_data),
-        .send   (tx_send),
-        .tx     (uart_tx_pin),
-        .busy   (tx_busy)
+        .CLK_FREQ (51000000),  // 51 MHz pixel clock (1024x768@50Hz PLL)
+        .BAUD     (115200)     // Standard baud rate
+    ) u_uart_tx (
+        .i_clk    (i_clk),
+        .i_rst_n  (i_rst_n),
+        .i_data   (r_tx_data),
+        .i_send   (r_tx_send),
+        .o_tx     (o_uart_tx),
+        .o_busy   (w_tx_busy)
     );
 
     // =========================================================================
-    // Frame counter
+    // Frame Counter
     // =========================================================================
-    reg [15:0] frame_counter;
+    reg [15:0] r_frame_counter;
 
-    always @(posedge clk) begin
-        if (!rst_n)
-            frame_counter <= 16'd0;
-        else if (frame_tick)
-            frame_counter <= frame_counter + 1'b1;
+    always @(posedge i_clk) begin
+        if (!i_rst_n)
+            r_frame_counter <= 16'd0;
+        else if (i_frame_tick)
+            r_frame_counter <= r_frame_counter + 1'b1;
     end
 
     // =========================================================================
-    // Latch values on frame_tick
+    // Latched Values (captured on frame_tick)
     // =========================================================================
-    reg [7:0]  latched_angle;
-    reg [9:0]  latched_x;
-    reg [9:0]  latched_y;
-    reg [15:0] latched_frame;
-    reg [7:0]  latched_led;
-    reg [5:0]  latched_write_ptr;
-    reg [5:0]  latched_read_ptr;
-    reg [10:0] latched_search_cnt;
-    reg [11:0] latched_luma1;
+    reg [7:0]  r_latched_angle;
+    reg [9:0]  r_latched_x;
+    reg [9:0]  r_latched_y;
+    reg [15:0] r_latched_frame;
+    reg [7:0]  r_latched_led;
+    reg [5:0]  r_latched_write_ptr;
+    reg [5:0]  r_latched_read_ptr;
+    reg [10:0] r_latched_search_cnt;
+    reg [11:0] r_latched_luma1;
 
-    // Count pixel_valid and crt_wren events per frame
-    reg [15:0] pv_count;      // pixel_valid count this frame
-    reg [15:0] wren_count;    // crt_wren count this frame
-    reg [15:0] latched_pv_count;
-    reg [15:0] latched_wren_count;
-    reg [15:0] latched_rowbuff_count;
+    // Event counters (pixel_valid and crt_wren per frame)
+    reg [15:0] r_pv_count;           // pixel_valid count this frame
+    reg [15:0] r_wren_count;         // crt_wren count this frame
+    reg [15:0] r_latched_pv_count;   // Latched pixel_valid count
+    reg [15:0] r_latched_wren_count; // Latched crt_wren count
+    reg [15:0] r_latched_rowbuff_count;
 
-    // CPU debug latches (TASK-DEBUG)
-    reg [11:0] latched_pc;
-    reg [15:0] latched_instr_count;
-    reg [15:0] latched_iot_count;
-    reg        latched_running;
+    // CPU debug latches
+    reg [11:0] r_latched_pc;
+    reg [15:0] r_latched_instr_count;
+    reg [15:0] r_latched_iot_count;
+    reg        r_latched_running;
 
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            latched_angle <= 8'd0;
-            latched_x     <= 10'd0;
-            latched_y     <= 10'd0;
-            latched_frame <= 16'd0;
-            latched_led   <= 8'd0;
-            latched_write_ptr <= 6'd0;
-            latched_read_ptr  <= 6'd0;
-            latched_search_cnt <= 11'd0;
-            latched_luma1 <= 12'd0;
-            pv_count <= 16'd0;
-            wren_count <= 16'd0;
-            latched_pv_count <= 16'd0;
-            latched_wren_count <= 16'd0;
-            latched_rowbuff_count <= 16'd0;
+    always @(posedge i_clk) begin
+        if (!i_rst_n) begin
+            r_latched_angle     <= 8'd0;
+            r_latched_x         <= 10'd0;
+            r_latched_y         <= 10'd0;
+            r_latched_frame     <= 16'd0;
+            r_latched_led       <= 8'd0;
+            r_latched_write_ptr <= 6'd0;
+            r_latched_read_ptr  <= 6'd0;
+            r_latched_search_cnt <= 11'd0;
+            r_latched_luma1     <= 12'd0;
+            r_pv_count          <= 16'd0;
+            r_wren_count        <= 16'd0;
+            r_latched_pv_count  <= 16'd0;
+            r_latched_wren_count <= 16'd0;
+            r_latched_rowbuff_count <= 16'd0;
             // CPU debug init
-            latched_pc <= 12'd0;
-            latched_instr_count <= 16'd0;
-            latched_iot_count <= 16'd0;
-            latched_running <= 1'b0;
+            r_latched_pc          <= 12'd0;
+            r_latched_instr_count <= 16'd0;
+            r_latched_iot_count   <= 16'd0;
+            r_latched_running     <= 1'b0;
         end else begin
-            // Count events
-            if (pixel_avail_synced)
-                pv_count <= pv_count + 1'b1;
-            if (crt_wren)
-                wren_count <= wren_count + 1'b1;
+            // Count events during frame
+            if (i_pixel_avail_synced)
+                r_pv_count <= r_pv_count + 1'b1;
+            if (i_crt_wren)
+                r_wren_count <= r_wren_count + 1'b1;
 
-            if (frame_tick) begin
-                latched_angle <= angle;
-                latched_x     <= pixel_x;
-                latched_y     <= pixel_y;
-                latched_frame <= frame_counter;
-                latched_led   <= led_status;
-                latched_write_ptr <= crt_write_ptr;
-                latched_read_ptr  <= crt_read_ptr;
-                latched_search_cnt <= search_counter_msb;
-                latched_luma1 <= luma1;
-                // Latch and reset counters
-                latched_pv_count <= pv_count;
-                latched_wren_count <= wren_count;
-                latched_rowbuff_count <= rowbuff_write_count;
-                pv_count <= 16'd0;
-                wren_count <= 16'd0;
+            // Latch all values on frame_tick
+            if (i_frame_tick) begin
+                r_latched_angle     <= i_angle;
+                r_latched_x         <= i_pixel_x;
+                r_latched_y         <= i_pixel_y;
+                r_latched_frame     <= r_frame_counter;
+                r_latched_led       <= i_led_status;
+                r_latched_write_ptr <= i_crt_write_ptr;
+                r_latched_read_ptr  <= i_crt_read_ptr;
+                r_latched_search_cnt <= i_search_counter_msb;
+                r_latched_luma1     <= i_luma1;
+                // Latch and reset per-frame counters
+                r_latched_pv_count  <= r_pv_count;
+                r_latched_wren_count <= r_wren_count;
+                r_latched_rowbuff_count <= i_rowbuff_write_count;
+                r_pv_count          <= 16'd0;
+                r_wren_count        <= 16'd0;
                 // Latch CPU debug values
-                latched_pc <= cpu_pc;
-                latched_instr_count <= cpu_instr_count;
-                latched_iot_count <= cpu_iot_count;
-                latched_running <= cpu_running;
+                r_latched_pc          <= i_cpu_pc;
+                r_latched_instr_count <= i_cpu_instr_count;
+                r_latched_iot_count   <= i_cpu_iot_count;
+                r_latched_running     <= i_cpu_running;
             end
         end
     end
@@ -280,283 +328,268 @@ module serial_debug (
     endfunction
 
     // =========================================================================
-    // Message buffer - CPU Debug Format (TASK-DEBUG)
+    // Message Buffer and FSM State
     // =========================================================================
-    // Format: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R\n"
-    // F = Frame counter (hex)
-    // PC = Program Counter (hex, 3 digits for 12 bits)
-    // I = Instruction count (hex)
-    // D = Display/IOT count (hex)
-    // V = pixel_valid count per frame (decimal)
-    // X = pixel X coordinate
-    // Y = pixel Y coordinate
-    // R = Running indicator (R=running, .=halted)
-    // Total 52 characters
+    // Frame Message Length: 52 characters
+    // Pixel Message Length: 32 characters (28 + CR/LF + padding)
+    localparam MSG_LEN       = 52;
+    localparam PIXEL_MSG_LEN = 28;
 
-    localparam MSG_LEN = 52;
-    localparam PIXEL_MSG_LEN = 28;  // "P:xxxxx X:xxx Y:xxx B:x R:xxx\n"
+    reg [7:0] r_msg_buffer [0:MSG_LEN-1];  // Message character buffer
+    reg [5:0] r_msg_index;                 // Current character index
+    reg       r_sending;                   // Unused - kept for compatibility
+    reg       r_frame_tick_d;              // Delayed frame_tick for edge detection
 
-    reg [7:0] msg_buffer [0:MSG_LEN-1];
-    reg [5:0] msg_index;
-    reg       sending;
-    reg       frame_tick_latched;
+    // Pixel debug state registers
+    reg        r_pixel_shift_d;            // Delayed pixel_shift for edge detection
+    reg        r_pixel_msg_pending;        // Pixel message waiting to be sent
+    reg [31:0] r_latched_pixel_count;      // Latched pixel count
+    reg [9:0]  r_latched_pixel_x;          // Latched pixel X
+    reg [9:0]  r_latched_pixel_y;          // Latched pixel Y
+    reg [2:0]  r_latched_pixel_brightness; // Latched pixel brightness
+    reg [9:0]  r_latched_ring_wrptr;       // Latched ring buffer write pointer
+    reg        r_sending_pixel_msg;        // Currently sending pixel (not frame) msg
 
-    // Pixel debug state
-    reg        pixel_shift_latched;
-    reg        pixel_msg_pending;
-    reg [31:0] latched_pixel_count;
-    reg [9:0]  latched_pixel_x;
-    reg [9:0]  latched_pixel_y;
-    reg [2:0]  latched_pixel_brightness;
-    reg [9:0]  latched_ring_wrptr;
-    reg        sending_pixel_msg;  // Flag to indicate we're sending pixel message
+    // =========================================================================
+    // Decimal Conversion Wires (Combinational)
+    // =========================================================================
+    // Frame X/Y coordinates (0-639 range)
+    wire [3:0] w_x_hundreds = r_latched_x / 100;
+    wire [3:0] w_x_tens     = (r_latched_x / 10) % 10;
+    wire [3:0] w_x_units    = r_latched_x % 10;
 
-    // Decimal conversion for X and Y (0-639 range)
-    wire [3:0] x_hundreds = latched_x / 100;
-    wire [3:0] x_tens     = (latched_x / 10) % 10;
-    wire [3:0] x_units    = latched_x % 10;
+    wire [3:0] w_y_hundreds = r_latched_y / 100;
+    wire [3:0] w_y_tens     = (r_latched_y / 10) % 10;
+    wire [3:0] w_y_units    = r_latched_y % 10;
 
-    wire [3:0] y_hundreds = latched_y / 100;
-    wire [3:0] y_tens     = (latched_y / 10) % 10;
-    wire [3:0] y_units    = latched_y % 10;
+    // Per-frame counters (0-9999 range)
+    wire [3:0] w_pv_thousands = r_latched_pv_count / 1000;
+    wire [3:0] w_pv_hundreds  = (r_latched_pv_count / 100) % 10;
+    wire [3:0] w_pv_tens      = (r_latched_pv_count / 10) % 10;
+    wire [3:0] w_pv_units     = r_latched_pv_count % 10;
 
-    // Decimal conversion for pv_count and wren_count (0-9999 range)
-    wire [3:0] pv_thousands = latched_pv_count / 1000;
-    wire [3:0] pv_hundreds  = (latched_pv_count / 100) % 10;
-    wire [3:0] pv_tens      = (latched_pv_count / 10) % 10;
-    wire [3:0] pv_units     = latched_pv_count % 10;
+    wire [3:0] w_wr_thousands = r_latched_wren_count / 1000;
+    wire [3:0] w_wr_hundreds  = (r_latched_wren_count / 100) % 10;
+    wire [3:0] w_wr_tens      = (r_latched_wren_count / 10) % 10;
+    wire [3:0] w_wr_units     = r_latched_wren_count % 10;
 
-    wire [3:0] wr_thousands = latched_wren_count / 1000;
-    wire [3:0] wr_hundreds  = (latched_wren_count / 100) % 10;
-    wire [3:0] wr_tens      = (latched_wren_count / 10) % 10;
-    wire [3:0] wr_units     = latched_wren_count % 10;
+    // Rowbuffer write count (0-9999 range)
+    wire [3:0] w_rb_thousands = r_latched_rowbuff_count / 1000;
+    wire [3:0] w_rb_hundreds  = (r_latched_rowbuff_count / 100) % 10;
+    wire [3:0] w_rb_tens      = (r_latched_rowbuff_count / 10) % 10;
+    wire [3:0] w_rb_units     = r_latched_rowbuff_count % 10;
 
-    // Decimal conversion for rowbuff_write_count (0-9999 range)
-    wire [3:0] rb_thousands = latched_rowbuff_count / 1000;
-    wire [3:0] rb_hundreds  = (latched_rowbuff_count / 100) % 10;
-    wire [3:0] rb_tens      = (latched_rowbuff_count / 10) % 10;
-    wire [3:0] rb_units     = latched_rowbuff_count % 10;
-
-    // ==========================================================================
-    // PIXEL DEBUG: Decimal conversion for pixel count (5 digits, 0-99999)
-    // ==========================================================================
-    wire [16:0] pixel_count_mod = latched_pixel_count % 100000;  // Wrap at 100000
-    wire [3:0] pc_ten_thousands = pixel_count_mod / 10000;
-    wire [3:0] pc_thousands     = (pixel_count_mod / 1000) % 10;
-    wire [3:0] pc_hundreds      = (pixel_count_mod / 100) % 10;
-    wire [3:0] pc_tens          = (pixel_count_mod / 10) % 10;
-    wire [3:0] pc_units         = pixel_count_mod % 10;
+    // =========================================================================
+    // Pixel Debug: Decimal Conversion (5 digits, wraps at 100000)
+    // =========================================================================
+    wire [16:0] w_pixel_count_mod = r_latched_pixel_count % 100000;
+    wire [3:0] w_pc_ten_thousands = w_pixel_count_mod / 10000;
+    wire [3:0] w_pc_thousands     = (w_pixel_count_mod / 1000) % 10;
+    wire [3:0] w_pc_hundreds      = (w_pixel_count_mod / 100) % 10;
+    wire [3:0] w_pc_tens          = (w_pixel_count_mod / 10) % 10;
+    wire [3:0] w_pc_units         = w_pixel_count_mod % 10;
 
     // Pixel X coordinate (3 digits, 0-999)
-    wire [3:0] px_hundreds = latched_pixel_x / 100;
-    wire [3:0] px_tens     = (latched_pixel_x / 10) % 10;
-    wire [3:0] px_units    = latched_pixel_x % 10;
+    wire [3:0] w_px_hundreds = r_latched_pixel_x / 100;
+    wire [3:0] w_px_tens     = (r_latched_pixel_x / 10) % 10;
+    wire [3:0] w_px_units    = r_latched_pixel_x % 10;
 
     // Pixel Y coordinate (3 digits, 0-999)
-    wire [3:0] py_hundreds = latched_pixel_y / 100;
-    wire [3:0] py_tens     = (latched_pixel_y / 10) % 10;
-    wire [3:0] py_units    = latched_pixel_y % 10;
+    wire [3:0] w_py_hundreds = r_latched_pixel_y / 100;
+    wire [3:0] w_py_tens     = (r_latched_pixel_y / 10) % 10;
+    wire [3:0] w_py_units    = r_latched_pixel_y % 10;
 
-    // Ring buffer write pointer (3 digits, 0-1023)
-    wire [3:0] rw_thousands = latched_ring_wrptr / 1000;
-    wire [3:0] rw_hundreds  = (latched_ring_wrptr / 100) % 10;
-    wire [3:0] rw_tens      = (latched_ring_wrptr / 10) % 10;
-    wire [3:0] rw_units     = latched_ring_wrptr % 10;
+    // Ring buffer write pointer (4 digits, 0-1023)
+    wire [3:0] w_rw_thousands = r_latched_ring_wrptr / 1000;
+    wire [3:0] w_rw_hundreds  = (r_latched_ring_wrptr / 100) % 10;
+    wire [3:0] w_rw_tens      = (r_latched_ring_wrptr / 10) % 10;
+    wire [3:0] w_rw_units     = r_latched_ring_wrptr % 10;
 
     // =========================================================================
-    // State machine for sending message
+    // Message Sending FSM
+    // FSM: 3-state machine (IDLE -> SEND -> WAIT)
     // =========================================================================
-    localparam ST_IDLE     = 2'd0;
-    localparam ST_PREPARE  = 2'd1;
-    localparam ST_SEND     = 2'd2;
-    localparam ST_WAIT     = 2'd3;
+    localparam [1:0] ST_MSG_IDLE = 2'd0;  // Waiting for trigger
+    localparam [1:0] ST_MSG_SEND = 2'd2;  // Loading byte to UART
+    localparam [1:0] ST_MSG_WAIT = 2'd3;  // Waiting for UART busy
 
-    reg [1:0] state;
+    reg [1:0] r_msg_state;
 
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            state              <= ST_IDLE;
-            msg_index          <= 6'd0;
-            sending            <= 1'b0;
-            tx_send            <= 1'b0;
-            tx_data            <= 8'd0;
-            frame_tick_latched <= 1'b0;
-            pixel_shift_latched <= 1'b0;
-            pixel_msg_pending   <= 1'b0;
-            sending_pixel_msg   <= 1'b0;
-            latched_pixel_count <= 32'd0;
-            latched_pixel_x     <= 10'd0;
-            latched_pixel_y     <= 10'd0;
-            latched_pixel_brightness <= 3'd0;
-            latched_ring_wrptr  <= 10'd0;
+    always @(posedge i_clk) begin
+        if (!i_rst_n) begin
+            r_msg_state              <= ST_MSG_IDLE;
+            r_msg_index              <= 6'd0;
+            r_sending                <= 1'b0;
+            r_tx_send                <= 1'b0;
+            r_tx_data                <= 8'd0;
+            r_frame_tick_d           <= 1'b0;
+            r_pixel_shift_d          <= 1'b0;
+            r_pixel_msg_pending      <= 1'b0;
+            r_sending_pixel_msg      <= 1'b0;
+            r_latched_pixel_count    <= 32'd0;
+            r_latched_pixel_x        <= 10'd0;
+            r_latched_pixel_y        <= 10'd0;
+            r_latched_pixel_brightness <= 3'd0;
+            r_latched_ring_wrptr     <= 10'd0;
         end else begin
-            // Latch frame_tick and pixel_shift rising edges
-            frame_tick_latched  <= frame_tick;
-            pixel_shift_latched <= pixel_shift_out;
-            tx_send <= 1'b0;  // Default
+            // Edge detection for triggers
+            r_frame_tick_d  <= i_frame_tick;
+            r_pixel_shift_d <= i_pixel_shift_out;
+            r_tx_send       <= 1'b0;  // Default: no send
 
             // Latch pixel data on pixel_shift_out rising edge
-            if (pixel_shift_out && !pixel_shift_latched) begin
-                latched_pixel_count <= pixel_count;
-                latched_pixel_x     <= pixel_debug_x;
-                latched_pixel_y     <= pixel_debug_y;
-                latched_pixel_brightness <= pixel_brightness;
-                latched_ring_wrptr  <= ring_buffer_wrptr;
-                pixel_msg_pending   <= 1'b1;  // Mark that we have a pixel to send
+            if (i_pixel_shift_out && !r_pixel_shift_d) begin
+                r_latched_pixel_count    <= i_pixel_count;
+                r_latched_pixel_x        <= i_pixel_debug_x;
+                r_latched_pixel_y        <= i_pixel_debug_y;
+                r_latched_pixel_brightness <= i_pixel_brightness;
+                r_latched_ring_wrptr     <= i_ring_buffer_wrptr;
+                r_pixel_msg_pending      <= 1'b1;
             end
 
-            case (state)
-                ST_IDLE: begin
-                    // TASK-OPT: Skip all processing when disabled (SW[1]=0)
-                    if (!enable) begin
-                        // Do nothing when disabled - saves timing resources
-                        pixel_msg_pending <= 1'b0;  // Clear any pending messages
+            case (r_msg_state)
+                ST_MSG_IDLE: begin
+                    // Skip processing when disabled (saves power/timing)
+                    if (!i_enable) begin
+                        r_pixel_msg_pending <= 1'b0;
                     end
-                    // Priority 1: Send pixel debug message if pending and UART is free
-                    else if (pixel_msg_pending) begin
-                        // Prepare pixel debug message buffer
-                        // Format: "P:xxxxx X:xxx Y:xxx B:x R:xxxx\n"
-                        msg_buffer[0]  <= "P";
-                        msg_buffer[1]  <= ":";
-                        msg_buffer[2]  <= digit_to_ascii(pc_ten_thousands);
-                        msg_buffer[3]  <= digit_to_ascii(pc_thousands);
-                        msg_buffer[4]  <= digit_to_ascii(pc_hundreds);
-                        msg_buffer[5]  <= digit_to_ascii(pc_tens);
-                        msg_buffer[6]  <= digit_to_ascii(pc_units);
-                        msg_buffer[7]  <= " ";
-                        msg_buffer[8]  <= "X";
-                        msg_buffer[9]  <= ":";
-                        msg_buffer[10] <= digit_to_ascii(px_hundreds);
-                        msg_buffer[11] <= digit_to_ascii(px_tens);
-                        msg_buffer[12] <= digit_to_ascii(px_units);
-                        msg_buffer[13] <= " ";
-                        msg_buffer[14] <= "Y";
-                        msg_buffer[15] <= ":";
-                        msg_buffer[16] <= digit_to_ascii(py_hundreds);
-                        msg_buffer[17] <= digit_to_ascii(py_tens);
-                        msg_buffer[18] <= digit_to_ascii(py_units);
-                        msg_buffer[19] <= " ";
-                        msg_buffer[20] <= "B";
-                        msg_buffer[21] <= ":";
-                        msg_buffer[22] <= digit_to_ascii({1'b0, latched_pixel_brightness});
-                        msg_buffer[23] <= " ";
-                        msg_buffer[24] <= "R";
-                        msg_buffer[25] <= ":";
-                        msg_buffer[26] <= digit_to_ascii(rw_thousands);
-                        msg_buffer[27] <= digit_to_ascii(rw_hundreds);
-                        msg_buffer[28] <= digit_to_ascii(rw_tens);
-                        msg_buffer[29] <= digit_to_ascii(rw_units);
-                        msg_buffer[30] <= 8'd13;  // '\r' (CR)
-                        msg_buffer[31] <= 8'd10;  // '\n' (LF)
+                    // Priority 1: Pixel debug message
+                    else if (r_pixel_msg_pending) begin
+                        // Format: "P:xxxxx X:xxx Y:xxx B:x R:xxxx\r\n"
+                        r_msg_buffer[0]  <= "P";
+                        r_msg_buffer[1]  <= ":";
+                        r_msg_buffer[2]  <= digit_to_ascii(w_pc_ten_thousands);
+                        r_msg_buffer[3]  <= digit_to_ascii(w_pc_thousands);
+                        r_msg_buffer[4]  <= digit_to_ascii(w_pc_hundreds);
+                        r_msg_buffer[5]  <= digit_to_ascii(w_pc_tens);
+                        r_msg_buffer[6]  <= digit_to_ascii(w_pc_units);
+                        r_msg_buffer[7]  <= " ";
+                        r_msg_buffer[8]  <= "X";
+                        r_msg_buffer[9]  <= ":";
+                        r_msg_buffer[10] <= digit_to_ascii(w_px_hundreds);
+                        r_msg_buffer[11] <= digit_to_ascii(w_px_tens);
+                        r_msg_buffer[12] <= digit_to_ascii(w_px_units);
+                        r_msg_buffer[13] <= " ";
+                        r_msg_buffer[14] <= "Y";
+                        r_msg_buffer[15] <= ":";
+                        r_msg_buffer[16] <= digit_to_ascii(w_py_hundreds);
+                        r_msg_buffer[17] <= digit_to_ascii(w_py_tens);
+                        r_msg_buffer[18] <= digit_to_ascii(w_py_units);
+                        r_msg_buffer[19] <= " ";
+                        r_msg_buffer[20] <= "B";
+                        r_msg_buffer[21] <= ":";
+                        r_msg_buffer[22] <= digit_to_ascii({1'b0, r_latched_pixel_brightness});
+                        r_msg_buffer[23] <= " ";
+                        r_msg_buffer[24] <= "R";
+                        r_msg_buffer[25] <= ":";
+                        r_msg_buffer[26] <= digit_to_ascii(w_rw_thousands);
+                        r_msg_buffer[27] <= digit_to_ascii(w_rw_hundreds);
+                        r_msg_buffer[28] <= digit_to_ascii(w_rw_tens);
+                        r_msg_buffer[29] <= digit_to_ascii(w_rw_units);
+                        r_msg_buffer[30] <= 8'd13;  // CR
+                        r_msg_buffer[31] <= 8'd10;  // LF
 
-                        msg_index <= 6'd0;
-                        sending_pixel_msg <= 1'b1;
-                        pixel_msg_pending <= 1'b0;
-                        state     <= ST_SEND;
+                        r_msg_index         <= 6'd0;
+                        r_sending_pixel_msg <= 1'b1;
+                        r_pixel_msg_pending <= 1'b0;
+                        r_msg_state         <= ST_MSG_SEND;
                     end
-                    // Priority 2: Send frame info on frame_tick rising edge
-                    else if (frame_tick && !frame_tick_latched) begin
-                        // Prepare message buffer
-                        // Format: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R\n"
-                        msg_buffer[0]  <= "F";
-                        msg_buffer[1]  <= ":";
-                        msg_buffer[2]  <= hex_to_ascii(latched_frame[15:12]);
-                        msg_buffer[3]  <= hex_to_ascii(latched_frame[11:8]);
-                        msg_buffer[4]  <= hex_to_ascii(latched_frame[7:4]);
-                        msg_buffer[5]  <= hex_to_ascii(latched_frame[3:0]);
-                        msg_buffer[6]  <= " ";
-                        // PC: Program Counter (3 hex digits for 12 bits)
-                        msg_buffer[7]  <= "P";
-                        msg_buffer[8]  <= "C";
-                        msg_buffer[9]  <= ":";
-                        msg_buffer[10] <= hex_to_ascii(latched_pc[11:8]);
-                        msg_buffer[11] <= hex_to_ascii(latched_pc[7:4]);
-                        msg_buffer[12] <= hex_to_ascii(latched_pc[3:0]);
-                        msg_buffer[13] <= " ";
-                        // I: Instruction count (4 hex digits)
-                        msg_buffer[14] <= "I";
-                        msg_buffer[15] <= ":";
-                        msg_buffer[16] <= hex_to_ascii(latched_instr_count[15:12]);
-                        msg_buffer[17] <= hex_to_ascii(latched_instr_count[11:8]);
-                        msg_buffer[18] <= hex_to_ascii(latched_instr_count[7:4]);
-                        msg_buffer[19] <= hex_to_ascii(latched_instr_count[3:0]);
-                        msg_buffer[20] <= " ";
-                        // D: Display/IOT count (4 hex digits)
-                        msg_buffer[21] <= "D";
-                        msg_buffer[22] <= ":";
-                        msg_buffer[23] <= hex_to_ascii(latched_iot_count[15:12]);
-                        msg_buffer[24] <= hex_to_ascii(latched_iot_count[11:8]);
-                        msg_buffer[25] <= hex_to_ascii(latched_iot_count[7:4]);
-                        msg_buffer[26] <= hex_to_ascii(latched_iot_count[3:0]);
-                        msg_buffer[27] <= " ";
-                        // V: pixel_valid count per frame (decimal)
-                        msg_buffer[28] <= "V";
-                        msg_buffer[29] <= ":";
-                        msg_buffer[30] <= digit_to_ascii(pv_thousands);
-                        msg_buffer[31] <= digit_to_ascii(pv_hundreds);
-                        msg_buffer[32] <= digit_to_ascii(pv_tens);
-                        msg_buffer[33] <= digit_to_ascii(pv_units);
-                        msg_buffer[34] <= " ";
-                        // X: pixel X coordinate
-                        msg_buffer[35] <= "X";
-                        msg_buffer[36] <= ":";
-                        msg_buffer[37] <= digit_to_ascii(x_hundreds);
-                        msg_buffer[38] <= digit_to_ascii(x_tens);
-                        msg_buffer[39] <= digit_to_ascii(x_units);
-                        msg_buffer[40] <= " ";
-                        // Y: pixel Y coordinate
-                        msg_buffer[41] <= "Y";
-                        msg_buffer[42] <= ":";
-                        msg_buffer[43] <= digit_to_ascii(y_hundreds);
-                        msg_buffer[44] <= digit_to_ascii(y_tens);
-                        msg_buffer[45] <= digit_to_ascii(y_units);
-                        msg_buffer[46] <= " ";
-                        // R: Running indicator
-                        msg_buffer[47] <= latched_running ? "R" : ".";
-                        msg_buffer[48] <= " ";
-                        msg_buffer[49] <= 8'd13;  // '\r' (CR)
-                        msg_buffer[50] <= 8'd10;  // '\n' (LF)
-                        msg_buffer[51] <= 8'd0;   // Padding
+                    // Priority 2: Frame info message on rising edge
+                    else if (i_frame_tick && !r_frame_tick_d) begin
+                        // Format: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R\r\n"
+                        r_msg_buffer[0]  <= "F";
+                        r_msg_buffer[1]  <= ":";
+                        r_msg_buffer[2]  <= hex_to_ascii(r_latched_frame[15:12]);
+                        r_msg_buffer[3]  <= hex_to_ascii(r_latched_frame[11:8]);
+                        r_msg_buffer[4]  <= hex_to_ascii(r_latched_frame[7:4]);
+                        r_msg_buffer[5]  <= hex_to_ascii(r_latched_frame[3:0]);
+                        r_msg_buffer[6]  <= " ";
+                        r_msg_buffer[7]  <= "P";
+                        r_msg_buffer[8]  <= "C";
+                        r_msg_buffer[9]  <= ":";
+                        r_msg_buffer[10] <= hex_to_ascii(r_latched_pc[11:8]);
+                        r_msg_buffer[11] <= hex_to_ascii(r_latched_pc[7:4]);
+                        r_msg_buffer[12] <= hex_to_ascii(r_latched_pc[3:0]);
+                        r_msg_buffer[13] <= " ";
+                        r_msg_buffer[14] <= "I";
+                        r_msg_buffer[15] <= ":";
+                        r_msg_buffer[16] <= hex_to_ascii(r_latched_instr_count[15:12]);
+                        r_msg_buffer[17] <= hex_to_ascii(r_latched_instr_count[11:8]);
+                        r_msg_buffer[18] <= hex_to_ascii(r_latched_instr_count[7:4]);
+                        r_msg_buffer[19] <= hex_to_ascii(r_latched_instr_count[3:0]);
+                        r_msg_buffer[20] <= " ";
+                        r_msg_buffer[21] <= "D";
+                        r_msg_buffer[22] <= ":";
+                        r_msg_buffer[23] <= hex_to_ascii(r_latched_iot_count[15:12]);
+                        r_msg_buffer[24] <= hex_to_ascii(r_latched_iot_count[11:8]);
+                        r_msg_buffer[25] <= hex_to_ascii(r_latched_iot_count[7:4]);
+                        r_msg_buffer[26] <= hex_to_ascii(r_latched_iot_count[3:0]);
+                        r_msg_buffer[27] <= " ";
+                        r_msg_buffer[28] <= "V";
+                        r_msg_buffer[29] <= ":";
+                        r_msg_buffer[30] <= digit_to_ascii(w_pv_thousands);
+                        r_msg_buffer[31] <= digit_to_ascii(w_pv_hundreds);
+                        r_msg_buffer[32] <= digit_to_ascii(w_pv_tens);
+                        r_msg_buffer[33] <= digit_to_ascii(w_pv_units);
+                        r_msg_buffer[34] <= " ";
+                        r_msg_buffer[35] <= "X";
+                        r_msg_buffer[36] <= ":";
+                        r_msg_buffer[37] <= digit_to_ascii(w_x_hundreds);
+                        r_msg_buffer[38] <= digit_to_ascii(w_x_tens);
+                        r_msg_buffer[39] <= digit_to_ascii(w_x_units);
+                        r_msg_buffer[40] <= " ";
+                        r_msg_buffer[41] <= "Y";
+                        r_msg_buffer[42] <= ":";
+                        r_msg_buffer[43] <= digit_to_ascii(w_y_hundreds);
+                        r_msg_buffer[44] <= digit_to_ascii(w_y_tens);
+                        r_msg_buffer[45] <= digit_to_ascii(w_y_units);
+                        r_msg_buffer[46] <= " ";
+                        r_msg_buffer[47] <= r_latched_running ? "R" : ".";
+                        r_msg_buffer[48] <= " ";
+                        r_msg_buffer[49] <= 8'd13;  // CR
+                        r_msg_buffer[50] <= 8'd10;  // LF
+                        r_msg_buffer[51] <= 8'd0;   // Padding
 
-                        msg_index <= 6'd0;
-                        sending_pixel_msg <= 1'b0;
-                        state     <= ST_SEND;
+                        r_msg_index         <= 6'd0;
+                        r_sending_pixel_msg <= 1'b0;
+                        r_msg_state         <= ST_MSG_SEND;
                     end
                 end
 
-                ST_SEND: begin
-                    if (!tx_busy) begin
-                        tx_data <= msg_buffer[msg_index];
-                        tx_send <= 1'b1;
-                        state   <= ST_WAIT;
+                ST_MSG_SEND: begin
+                    if (!w_tx_busy) begin
+                        r_tx_data   <= r_msg_buffer[r_msg_index];
+                        r_tx_send   <= 1'b1;
+                        r_msg_state <= ST_MSG_WAIT;
                     end
                 end
 
-                ST_WAIT: begin
-                    if (tx_busy) begin
-                        // UART started transmission
+                ST_MSG_WAIT: begin
+                    if (w_tx_busy) begin
                         // Check message length based on type
-                        if (sending_pixel_msg) begin
-                            if (msg_index < PIXEL_MSG_LEN + 3) begin  // 32 chars for pixel msg
-                                msg_index <= msg_index + 1'b1;
-                                state     <= ST_SEND;
+                        if (r_sending_pixel_msg) begin
+                            if (r_msg_index < PIXEL_MSG_LEN + 3) begin
+                                r_msg_index <= r_msg_index + 1'b1;
+                                r_msg_state <= ST_MSG_SEND;
                             end else begin
-                                state <= ST_IDLE;
+                                r_msg_state <= ST_MSG_IDLE;
                             end
                         end else begin
-                            if (msg_index < MSG_LEN - 1) begin
-                                msg_index <= msg_index + 1'b1;
-                                state     <= ST_SEND;
+                            if (r_msg_index < MSG_LEN - 1) begin
+                                r_msg_index <= r_msg_index + 1'b1;
+                                r_msg_state <= ST_MSG_SEND;
                             end else begin
-                                state <= ST_IDLE;
+                                r_msg_state <= ST_MSG_IDLE;
                             end
                         end
                     end
                 end
 
-                default: state <= ST_IDLE;
+                default: r_msg_state <= ST_MSG_IDLE;  // Safe state recovery
             endcase
         end
     end
 
 endmodule
+
+`default_nettype wire  // Restore default for other modules

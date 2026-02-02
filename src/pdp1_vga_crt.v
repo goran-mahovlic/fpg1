@@ -1,469 +1,790 @@
-// pdp1_vga_crt.v
+//==============================================================================
+// Module: pdp1_vga_crt
+// Project: PDP-1 FPGA Port
+// Description: VGA CRT emulation with phosphor decay for PDP-1 Type 30 display
+//
+// Author: REGOC Team (Kosjenka Babic - Architecture Review)
+// Created: 2026-01-31
+// Modified: 2026-02-02 - Best practices implementation
+//
 // TASK-194: CRT phosphor decay emulation for PDP-1 vector display
-// TASK-200: Prilagodeno za 640x480@60Hz (timing fix)
-// TASK-XXX: Upgrade na 1024x768@50Hz (Jelena Horvat)
-// Adapted for ECP5/Yosys synthesis by REGOC Team
+// TASK-200: Prilagodeno za 1024x768@50Hz
 //
-// This module implements a 1024 x 768 @ 50 Hz vector display output.
-// Uses BRAM-based shift registers to simulate phosphor decay.
-// PDP-1 1024x1024 display mapped to 1024x768 frame (768 lines visible).
+//------------------------------------------------------------------------------
+// Architecture Overview:
+//------------------------------------------------------------------------------
 //
-// Architecture:
-// - pdp1_vga_rowbuffer: Stores next 8 lines to be drawn (64 Kbit BRAM)
-// - line_shift_register x3: 1-line delays for 3x3 blur kernel
-// - pixel_ring_buffer x4: "Hadron collider" style circular buffers
-//   Connected: 1->2->3->4->1 for pixel storage and decay
+//  +------------------+     +-------------------+     +------------------+
+//  | PDP-1 CPU        |---->| Input FIFO        |---->| Ring Buffer      |
+//  | (pixel_x/y,      |     | (64 entry buffer) |     | "Hadron Collider"|
+//  |  brightness)     |     | for incoming      |     | 4 buffers linked |
+//  +------------------+     | pixels            |     | 1->2->3->4->1    |
+//                           +-------------------+     +--------+---------+
+//                                                              |
+//                           +-------------------+              |
+//                           | Row Buffer        |<-------------+
+//                           | (8 lines ahead)   |    (pixels written when
+//                           | 64 Kbit BRAM      |     within 8 lines of
+//                           +--------+----------+     current scanline)
+//                                    |
+//                           +--------v----------+
+//                           | Line Shift Regs   |
+//                           | (3x 1024 pixels)  |
+//                           | for 3x3 blur      |
+//                           +--------+----------+
+//                                    |
+//                           +--------v----------+
+//                           | Blur Kernel       |---->  VGA Output
+//                           | 3x3 averaging     |       (RGB 8-bit)
+//                           +-------------------+
+//
+//------------------------------------------------------------------------------
+// Ring Buffer "Hadron Collider" Architecture:
+//------------------------------------------------------------------------------
+//
+// Four pixel_ring_buffer instances connected in a circular chain.
+// Each buffer stores 1024 pixels with 8 taps for parallel access.
+//
+//     +---------+     +---------+     +---------+     +---------+
+//     | Ring 1  |---->| Ring 2  |---->| Ring 3  |---->| Ring 4  |---+
+//     | (taps1) |     | (taps2) |     | (taps3) |     | (taps4) |   |
+//     +----^----+     +---------+     +---------+     +---------+   |
+//          |                                                        |
+//          +--------------------------------------------------------+
+//          (shiftout_4 -> dim -> shiftout_1)
+//
+// At each connection point, pixel luma is decremented (phosphor decay).
+// Decay rate: luma - 1 every 8 passes (pass_counter[2:0] == 0)
+//
+//------------------------------------------------------------------------------
+// Phosphor Decay Algorithm:
+//------------------------------------------------------------------------------
+//
+// 1. New pixel enters with luma = 4095 (maximum brightness)
+// 2. Every 8 vertical passes, luma decrements by 1
+// 3. Special step-down: luma 3864-3936 -> 2576 (afterglow simulation)
+// 4. Pixel removed when luma[11:4] == 0 (visible threshold)
+//
+// This simulates P7 phosphor characteristics of original Type 30 display.
+//
+//------------------------------------------------------------------------------
+// Coordinate Transformation (PDP-1 Mode):
+//------------------------------------------------------------------------------
+//
+// PDP-1 has origin in UPPER RIGHT corner with axes:
+//   - X increases LEFT
+//   - Y increases DOWN
+//
+// Transformation: { buffer_Y, buffer_X } = { ~pixel_x_i, pixel_y_i }
+//   - ~pixel_x_i inverts X axis (1023->0, 0->1023)
+//   - X/Y swap rotates coordinate system
+//
+//------------------------------------------------------------------------------
+// Clock Domain: clk_pixel (51 MHz for 1024x768@50Hz)
+//------------------------------------------------------------------------------
 //
 // Dependencies:
-// - pdp1_vga_rowbuffer.v
-// - line_shift_register.v
-// - pixel_ring_buffer.v
+// - pdp1_vga_rowbuffer.v : 8-line lookahead buffer (64 Kbit BRAM)
+// - line_shift_register.v : 1024-pixel delay lines for blur
+// - pixel_ring_buffer.v : Circular buffer with 8 taps
+//
+//==============================================================================
+
+`default_nettype none
 
 module pdp1_vga_crt (
-  input clk,                                                   /* Clock input, 1024 x 768 @ 50 Hz is 51 MHz pixel clock */
+    //--------------------------------------------------------------------------
+    // Clock
+    //--------------------------------------------------------------------------
+    input wire              i_clk,                  // Pixel clock (51 MHz for 1024x768@50Hz)
 
-  input [10:0] horizontal_counter,                             /* Current video drawing position */
-  input [10:0] vertical_counter,
+    //--------------------------------------------------------------------------
+    // VGA Timing Inputs
+    //--------------------------------------------------------------------------
+    input wire [10:0]       i_h_counter,            // Horizontal position counter
+    input wire [10:0]       i_v_counter,            // Vertical position counter
 
-  output reg [7:0] red_out,                                    /* Outputs RGB values for corresponding pixels */
-  output reg [7:0] green_out,
-  output reg [7:0] blue_out,
+    //--------------------------------------------------------------------------
+    // VGA RGB Outputs
+    //--------------------------------------------------------------------------
+    output reg [7:0]        o_red,                  // Red channel (8-bit)
+    output reg [7:0]        o_green,                // Green channel (8-bit)
+    output reg [7:0]        o_blue,                 // Blue channel (8-bit)
 
-  input  [9:0] pixel_x_i,                                      /* Gets input from PDP as a peripheral IOT device */
-  input  [9:0] pixel_y_i,                                      /* Don't forget the input is clocked at 50 MHz */
-  input  [2:0] pixel_brightness,                               /* Pixel brightness / intensity */
+    //--------------------------------------------------------------------------
+    // PDP-1 Pixel Input Interface
+    //--------------------------------------------------------------------------
+    input wire [9:0]        i_pixel_x,              // X coordinate from PDP-1 (0-1023)
+    input wire [9:0]        i_pixel_y,              // Y coordinate from PDP-1 (0-1023)
+    input wire [2:0]        i_pixel_brightness,     // Brightness level (0=max, 7=min)
+    input wire              i_variable_brightness,  // Enable brightness-based pixel expansion
+    input wire              i_pixel_valid,          // Strobe: pixel data valid
 
-  input  variable_brightness,                                  /* Should we respect specified brightness levels? */
-
-  input  pixel_available,                                      /* High when there is a pixel to be written */
-
-  // DEBUG outputs
-  output wire [5:0] debug_write_ptr,                           /* FIFO write pointer for debug */
-  output wire [5:0] debug_read_ptr,                            /* FIFO read pointer for debug */
-  output wire       debug_wren,                                /* Write enable signal for debug */
-  output wire [10:0] debug_search_counter,                     /* Search counter MSBs for debug */
-  output wire [11:0] debug_luma1,                              /* Luma from ring buffer 1 output */
-  output wire       debug_rowbuff_wren,                        /* Rowbuffer write enable for LED */
-  output wire       debug_inside_visible,                      /* inside_visible_area signal */
-  output wire       debug_pixel_to_rowbuff,                    /* Non-zero pixel written to rowbuffer */
-  output wire [15:0] debug_rowbuff_write_count,                /* Non-zero pixels written to rowbuffer per frame */
-  output wire [9:0]  debug_ring_buffer_wrptr                   /* Ring buffer 1 write pointer for pixel debug */
+    //--------------------------------------------------------------------------
+    // Debug Outputs
+    //--------------------------------------------------------------------------
+    output wire [5:0]       o_dbg_fifo_wr_ptr,      // Input FIFO write pointer
+    output wire [5:0]       o_dbg_fifo_rd_ptr,      // Input FIFO read pointer
+    output wire             o_dbg_pixel_strobe,     // Detected pixel strobe
+    output wire [10:0]      o_dbg_search_counter,   // Search counter MSBs
+    output wire [11:0]      o_dbg_luma1,            // Luma from ring buffer 1
+    output wire             o_dbg_rowbuff_wren,     // Rowbuffer write enable
+    output wire             o_dbg_inside_visible,   // Inside visible area flag
+    output wire             o_dbg_pixel_to_rowbuff, // Pixel written to rowbuffer
+    output wire [15:0]      o_dbg_rowbuff_count,    // Non-zero pixels per frame
+    output wire [9:0]       o_dbg_ring_wrptr        // Ring buffer 1 write pointer
 );
 
-//////////////////  PARAMETERS  ///////////////////
+//==============================================================================
+// Parameters
+//==============================================================================
 
-parameter
-   DATA_WIDTH                    = 'd32,
-   offset                        = 2'd3,
-   brightness                    = 8'd242;
+parameter DATA_WIDTH  = 32;             // Ring buffer entry width: 10-bit Y + 10-bit X + 12-bit luma
+parameter BRIGHTNESS  = 8'd242;         // Blur kernel threshold (skip blur above this)
 
-//////////////////  FUNCTIONS  ////////////////////
+//==============================================================================
+// Functions
+//==============================================================================
 
+// dim_pixel: Phosphor decay function
+// Decrements luma value to simulate CRT phosphor fading.
+// Special case: Luma in range 3864-3936 jumps to 2576 (afterglow step-down)
+// This models the characteristic "two-phase" decay of P7 phosphor.
 function automatic [11:0] dim_pixel;
-   input [11:0] luma;
-   // VRACENA ORIGINALNA LOGIKA (fpg1/src/pdp1_vga_crt.v):
-   // - Standardni decay: luma - 1
-   // - Step-down na 2576 kad luma u rasponu 3864-3936 (afterglow simulacija)
-   // Prijašnji kod (luma - 8) bio je 8x brži i uništavao pokretne objekte (brodove)
-   dim_pixel = (luma > 12'd3864 && luma < 12'd3936) ? 12'd2576 : luma - 1'b1;
+    input [11:0] luma;
+    begin
+        if (luma > 12'd3864 && luma < 12'd3936)
+            dim_pixel = 12'd2576;       // Afterglow step-down
+        else
+            dim_pixel = luma - 1'b1;    // Standard linear decay
+    end
 endfunction
 
 
-////////////////////  TASKS  //////////////////////
+//==============================================================================
+// Tasks
+//==============================================================================
 
-task output_pixel;                                                                        /* It outputs a pixel and adjusts is color depending on the luminosity */
-   input [7:0] intensity;                                                                 /* A bright pixel is blue-white and a darker one is green */
-   begin
+// output_pixel: Convert intensity to RGB color
+// High intensity (>=128): Blue-white phosphor glow
+// Low intensity (<128): Green phosphor glow
+// This simulates the color shift of P7 phosphor as it decays.
+task output_pixel;
+    input [7:0] intensity;
+    begin
+        // Default low-intensity output
+        o_red   <= r_inside_visible ? {5'b0, intensity[7:5]} : 8'b0;
+        o_green <= r_inside_visible ? intensity              : 8'b0;
+        o_blue  <= r_inside_visible ? intensity[7]           : 8'b0;
 
-   red_out <= inside_visible_area ? {5'b0, intensity[7:5]} : 8'b0;
-
-      if (intensity >= 8'h80) begin
-         green_out <= inside_visible_area ? intensity      : 8'b0;
-         blue_out <= inside_visible_area ? intensity       : 8'b0;
-         red_out <= inside_visible_area ? intensity[7:6]   : 8'b0;
-      end
-      else begin
-         green_out <= inside_visible_area ? intensity      : 8'b0;
-         blue_out <= inside_visible_area ? intensity[7]    : 8'b0;
-      end
-
-   end
+        // High intensity override: shift toward blue-white
+        if (intensity >= 8'h80) begin
+            o_red   <= r_inside_visible ? intensity[7:6] : 8'b0;
+            o_green <= r_inside_visible ? intensity      : 8'b0;
+            o_blue  <= r_inside_visible ? intensity      : 8'b0;
+        end
+    end
 endtask
 
 
-////////////////////  WIRES  //////////////////////
+//==============================================================================
+// Internal Wires
+//==============================================================================
 
-wire [7:0] rowbuff_rdata;                                      /* Output from row buffer */
-wire [7:0] p31_w, p21_w, p13_w, p23_w, p33_w;                  /* Output from line shift registers */
-wire [255:0] taps1, taps2, taps3, taps4;                       /* Ring buffer taps (8 per ring buffer, 32-bit each) */
+// Row buffer read data
+wire [7:0]   w_rowbuff_rdata;
 
-wire [31:0] shiftout_1_w, shiftout_2_w,                        /* Ring buffer outputs */
-            shiftout_3_w, shiftout_4_w;
+// Line shift register outputs (for 3x3 blur kernel)
+wire [7:0]   w_line1_out;               // p13: top-right of 3x3 kernel
+wire [7:0]   w_line2_out;               // p23: middle-right of 3x3 kernel
+wire [7:0]   w_line3_out;               // p33: bottom-right of 3x3 kernel
 
-wire [9:0] current_y, current_x;                               /* Current visible screen area position */
+// Internal wires for kernel positions (directly from registers)
+wire [7:0]   w_p21;                     // Middle-left of kernel
+wire [7:0]   w_p31;                     // Bottom-left of kernel
 
-//////////////////  REGISTERS  ////////////////////
+// Ring buffer outputs (256-bit tap bus per buffer, 8 taps x 32 bits each)
+wire [255:0] w_taps1, w_taps2, w_taps3, w_taps4;
 
-reg  [12:0] rowbuff_rdaddress, rowbuff_wraddress;              /* Row buffer addressing, this is for storing next 8 lines to be drawn */
-reg  [7:0] rowbuff_wdata;
-reg  [0:0] rowbuff_wren;
+// Ring buffer shift outputs (oldest entry from each buffer)
+wire [31:0]  w_shiftout_1, w_shiftout_2, w_shiftout_3, w_shiftout_4;
 
-/* Create 3x3 pixel matrix from registers to multiply with the blur kernel */
-reg [7:0] p11, p12, p13, // <- p13_w <- line1
-          p21, p22, p23, // <- p23_w <- line2
-          p31, p32, p33; // <- p33_w <- line3 <- row buffer
+// Current visible position on screen (after timing offsets)
+wire [9:0]   w_current_x, w_current_y;
 
+// PDP-1 Y coordinate (with CRT offset applied)
+wire [9:0]   w_pdp1_y;
 
-reg [31:0] shiftout_1, shiftout_2, shiftout_3, shiftout_4;     /* Store (and manipulate) values being output from LFSR shift registers */
+//==============================================================================
+// Internal Registers
+//==============================================================================
 
-reg [9:0] pixel_x, pixel_y;
-reg [9:0] pixel_1_x, pixel_1_y, pixel_2_x, pixel_2_y,
-          pixel_3_x, pixel_3_y, pixel_4_x, pixel_4_y;
+//------------------------------------------------------------------------------
+// Row Buffer Control Registers
+//------------------------------------------------------------------------------
+reg [12:0]  r_rowbuff_rdaddr;           // Row buffer read address
+reg [12:0]  r_rowbuff_wraddr;           // Row buffer write address
+reg [7:0]   r_rowbuff_wdata;            // Row buffer write data
+reg         r_rowbuff_wren;             // Row buffer write enable
 
-reg [11:0] luma, luma_1, luma_2, luma_3, luma_4;
+//------------------------------------------------------------------------------
+// 3x3 Blur Kernel Matrix Registers
+//------------------------------------------------------------------------------
+// Pixel positions in the kernel:
+//   p11  p12  p13  <- from line1 shift register (2 lines back)
+//   p21  p22  p23  <- from line2 shift register (1 line back)
+//   p31  p32  p33  <- from line3 shift register (current line from rowbuffer)
+//
+reg [7:0]   r_p11, r_p12, r_p13;
+reg [7:0]   r_p21, r_p22, r_p23;
+reg [7:0]   r_p31, r_p32, r_p33;
 
-integer i;                                                     /* Used in for loop as index */
+//------------------------------------------------------------------------------
+// Ring Buffer Connection Registers
+//------------------------------------------------------------------------------
+// These registers connect ring buffers in a circular chain.
+// Data flows: ring1 -> shiftout_1 -> ring2 -> shiftout_2 -> ... -> ring1
+reg [31:0]  r_shiftout_1, r_shiftout_2, r_shiftout_3, r_shiftout_4;
 
-reg [31:0] pass_counter = 32'd1;                               /* Counts vertical refresh cycles */
-reg [9:0]  erase_counter;
-reg        pixel_found;                                        /* Used in rowbuffer write logic to track if pixel was found */
+//------------------------------------------------------------------------------
+// Ring Buffer Pixel Coordinates and Luma
+//------------------------------------------------------------------------------
+// Unpacked from ring buffer shift outputs: {Y[9:0], X[9:0], luma[11:0]}
+reg [9:0]   r_pixel_1_x, r_pixel_1_y;
+reg [9:0]   r_pixel_2_x, r_pixel_2_y;
+reg [9:0]   r_pixel_3_x, r_pixel_3_y;
+reg [9:0]   r_pixel_4_x, r_pixel_4_y;
+reg [11:0]  r_luma_1, r_luma_2, r_luma_3, r_luma_4;
 
-reg [31:0] search_counter;                                     /* Counts how many clock cycles passed since we didn't see the pixel to be added on any of the ring buffer taps */
+//------------------------------------------------------------------------------
+// Timing and Control Registers
+//------------------------------------------------------------------------------
+reg [31:0]  r_pass_counter = 32'd1;     // Vertical refresh cycle counter
+reg [9:0]   r_erase_counter;            // Row buffer erase position
+reg         r_pixel_found;              // Flag: pixel found for rowbuffer write
 
-reg [9:0] next_pixel_x, next_pixel_y;                          /* Store the values from the fifo buffer at read pointer to these temporary registers */
+reg [31:0]  r_search_counter;           // Cycles since last ring buffer tap match
 
-reg [9:0] buffer_pixel_x[63:0];                                /* FIFO buffer storing the pixels to be written to ring buffer (when empty slot found) */
-reg [9:0] buffer_pixel_y[63:0];
+//------------------------------------------------------------------------------
+// Input FIFO Buffer
+//------------------------------------------------------------------------------
+// 64-entry FIFO for incoming pixels awaiting ring buffer insertion
+reg [9:0]   r_fifo_pixel_x [0:63];
+reg [9:0]   r_fifo_pixel_y [0:63];
+reg [5:0]   r_fifo_rd_ptr;              // FIFO read pointer
+reg [5:0]   r_fifo_wr_ptr;              // FIFO write pointer
+reg [9:0]   r_next_pixel_x;             // Next pixel X from FIFO (prefetched)
+reg [9:0]   r_next_pixel_y;             // Next pixel Y from FIFO (prefetched)
 
-reg [5:0] buffer_read_ptr, buffer_write_ptr;                   /* Pointers to FIFO buffer position for read and write operations,
-                                                                  when not equal there is something waiting to be written */
-reg [15:0] pixel_out;
+//------------------------------------------------------------------------------
+// Output Pixel Register
+//------------------------------------------------------------------------------
+reg [15:0]  r_pixel_out;                // Blurred pixel intensity for output
 
-reg prev_wren_i, prev_prev_wren_i, wren;                       /* Store write enable signals to detect a rising edge */
+//------------------------------------------------------------------------------
+// CDC Synchronization for Pixel Valid Signal
+//------------------------------------------------------------------------------
+(* ASYNC_REG = "TRUE" *) reg r_pixel_valid_meta;    // Metastability stage
+(* ASYNC_REG = "TRUE" *) reg r_pixel_valid_sync;    // Synchronized stage
+reg         r_pixel_strobe;             // Detected falling edge (pixel ready)
 
-reg inside_visible_area;                                       /* Indicate if we are currently within area which is visible */
+//------------------------------------------------------------------------------
+// Visibility Flag
+//------------------------------------------------------------------------------
+reg         r_inside_visible;           // Current position is in visible area
 
-// DEBUG: Export internal signals
-assign debug_write_ptr = buffer_write_ptr;
-assign debug_read_ptr = buffer_read_ptr;
-assign debug_wren = wren;
-assign debug_search_counter = search_counter[31:21];  // MSBs to see if it's large
-assign debug_luma1 = luma_1;
+//------------------------------------------------------------------------------
+// Loop Index (for generate-style loops in always blocks)
+//------------------------------------------------------------------------------
+integer i;
 
-// DEBUG: Provjeri koordinate u vidljivom rasponu (0-1023 za puni 1024x1024 PDP-1 display)
-wire [9:0] dbg_px = pixel_x_i;
-wire [9:0] dbg_py = pixel_y_i;
-wire dbg_coord_in_range = (pixel_x_i < 10'd1024) && (pixel_y_i < 10'd1024);
+//==============================================================================
+// Debug Signal Assignments
+//==============================================================================
 
-// DEBUG: Export rowbuffer write signal za LED indikator
-assign debug_rowbuff_wren = rowbuff_wren;
+assign o_dbg_fifo_wr_ptr     = r_fifo_wr_ptr;
+assign o_dbg_fifo_rd_ptr     = r_fifo_rd_ptr;
+assign o_dbg_pixel_strobe    = r_pixel_strobe;
+assign o_dbg_search_counter  = r_search_counter[31:21];  // MSBs indicate large values
+assign o_dbg_luma1           = r_luma_1;
+assign o_dbg_rowbuff_wren    = r_rowbuff_wren;
+assign o_dbg_inside_visible  = r_inside_visible;
+assign o_dbg_pixel_to_rowbuff = r_rowbuff_wren && (r_rowbuff_wdata != 8'd0);
 
-// DEBUG: Export inside_visible_area signal
-assign debug_inside_visible = inside_visible_area;
+// Debug: Verify coordinates in valid range (0-1023 for full PDP-1 display)
+wire [9:0]  w_dbg_px = i_pixel_x;
+wire [9:0]  w_dbg_py = i_pixel_y;
+wire        w_dbg_coord_valid = (i_pixel_x < 10'd1024) && (i_pixel_y < 10'd1024);
 
-// DEBUG: Signalizacija da se piksel upisuje u rowbuffer (non-zero data)
-assign debug_pixel_to_rowbuff = rowbuff_wren && (rowbuff_wdata != 8'd0);
+//------------------------------------------------------------------------------
+// Debug: Non-zero Pixel Counter (per frame)
+//------------------------------------------------------------------------------
+reg [15:0]  r_dbg_rowbuff_count;
+reg [15:0]  r_dbg_rowbuff_count_latched;
+reg [10:0]  r_dbg_prev_v_counter;
 
-// DEBUG: Brojac non-zero piksela upisanih u rowbuffer po frameu
-reg [15:0] rowbuff_nonzero_count;
-reg [15:0] debug_rowbuff_count_latched;
-reg [10:0] prev_v_counter_dbg;
+always @(posedge i_clk) begin
+    r_dbg_prev_v_counter <= i_v_counter;
 
-always @(posedge clk) begin
-    prev_v_counter_dbg <= vertical_counter;
-    // Detect frame start (v_counter wraps)
-    if (vertical_counter == 11'd0 && prev_v_counter_dbg != 11'd0) begin
-        debug_rowbuff_count_latched <= rowbuff_nonzero_count;
-        rowbuff_nonzero_count <= 16'd0;
-    end else if (rowbuff_wren && rowbuff_wdata != 8'd0) begin
-        rowbuff_nonzero_count <= rowbuff_nonzero_count + 1'b1;
+    // Detect frame start (v_counter wraps to 0)
+    if (i_v_counter == 11'd0 && r_dbg_prev_v_counter != 11'd0) begin
+        r_dbg_rowbuff_count_latched <= r_dbg_rowbuff_count;
+        r_dbg_rowbuff_count <= 16'd0;
+    end else if (r_rowbuff_wren && r_rowbuff_wdata != 8'd0) begin
+        r_dbg_rowbuff_count <= r_dbg_rowbuff_count + 1'b1;
     end
 end
 
-assign debug_rowbuff_write_count = debug_rowbuff_count_latched;
+assign o_dbg_rowbuff_count = r_dbg_rowbuff_count_latched;
 
 
 
-/////////////////  ASSIGNMENTS  ///////////////////
+//==============================================================================
+// Continuous Assignments
+//==============================================================================
 
-assign p21_w = p21;
-assign p31_w = p31;
+// Wire kernel positions from registers (for line shift register inputs)
+assign w_p21 = r_p21;
+assign w_p31 = r_p31;
 
-assign current_y = (vertical_counter >= `v_visible_offset && vertical_counter < `v_visible_offset_end) ? vertical_counter - `v_visible_offset : 11'b0;
-assign current_x = (horizontal_counter >= `h_visible_offset + `h_center_offset && horizontal_counter < `h_visible_offset_end + `h_center_offset) ? horizontal_counter - (`h_visible_offset + `h_center_offset): 11'b0;
+// Calculate current visible position from timing counters
+// w_current_y: Vertical position within visible area (0 to 767)
+// w_current_x: Horizontal position within visible area (0 to 1023)
+assign w_current_y = (i_v_counter >= `v_visible_offset && i_v_counter < `v_visible_offset_end)
+                   ? i_v_counter - `v_visible_offset
+                   : 11'b0;
 
-/* PDP-1 Y koordinata = current_y + v_crt_offset */
-/* Ovo pomice vidljivo podrucje u PDP-1 koordinatnom sustavu */
-wire [9:0] pdp1_y;
-assign pdp1_y = current_y + `v_crt_offset;
+assign w_current_x = (i_h_counter >= `h_visible_offset + `h_center_offset &&
+                      i_h_counter <  `h_visible_offset_end + `h_center_offset)
+                   ? i_h_counter - (`h_visible_offset + `h_center_offset)
+                   : 11'b0;
 
-
-///////////////////  MODULES  /////////////////////
-
-/* Row buffer keeps the next 8 lines to be drawn and we populate it with pixels as ring buffer advances */
-pdp1_vga_rowbuffer rowbuffer(
-   .data(rowbuff_wdata),
-   .rdaddress(rowbuff_rdaddress),
-   .clock(clk),
-   .wraddress(rowbuff_wraddress),
-   .wren(rowbuff_wren),
-   .q(rowbuff_rdata));
-
-
-/* To enable blurring, create 3 1-line shift registers */
-/* FIX: Uklonjen current_x > 0 uvjet koji je gubio prvi piksel svake linije */
-line_shift_register line1(.clock(clk), .shiftout(p13_w), .shiftin(p21_w));
-line_shift_register line2(.clock(clk), .shiftout(p23_w), .shiftin(p31_w));
-line_shift_register line3(.clock(clk), .shiftout(p33_w), .shiftin(rowbuff_rdata));
+// PDP-1 Y coordinate with CRT offset applied
+// This shifts the visible area within PDP-1 coordinate space
+assign w_pdp1_y = w_current_y + `v_crt_offset;
 
 
-/* Create 4 pixel ring buffers with 8 taps each and connect them in a loop (a.k.a. hadron collider style) */
-/* e.g. ring_buffer_1 .. shiftout_1_w -> {pixel_1_y, pixel_1_x, luma_1} -> shiftout_2 .. ring_buffer_2    */
+//==============================================================================
+// Module Instantiations
+//==============================================================================
 
-// Debug wire for ring buffer 1 write pointer
-wire [9:0] ring_buf1_wrptr;
+//------------------------------------------------------------------------------
+// Row Buffer: 8-Line Lookahead Buffer
+//------------------------------------------------------------------------------
+// Stores the next 8 lines to be drawn. Pixels are written here from ring
+// buffers when they are within 8 lines of the current scanline position.
+// This allows time for the 3x3 blur kernel to process them.
+//
+pdp1_vga_rowbuffer u_rowbuffer (
+    .clock      (i_clk),
+    .data       (r_rowbuff_wdata),
+    .wraddress  (r_rowbuff_wraddr),
+    .wren       (r_rowbuff_wren),
+    .rdaddress  (r_rowbuff_rdaddr),
+    .q          (w_rowbuff_rdata)
+);
 
-pixel_ring_buffer ring_buffer_1(.clock(clk),  .shiftin(shiftout_1),  .shiftout(shiftout_1_w),  .taps(taps1), .debug_wrptr(ring_buf1_wrptr) );
-pixel_ring_buffer ring_buffer_2(.clock(clk),  .shiftin(shiftout_2),  .shiftout(shiftout_2_w),  .taps(taps2), .debug_wrptr() );
-pixel_ring_buffer ring_buffer_3(.clock(clk),  .shiftin(shiftout_3),  .shiftout(shiftout_3_w),  .taps(taps3), .debug_wrptr() );
-pixel_ring_buffer ring_buffer_4(.clock(clk),  .shiftin(shiftout_4),  .shiftout(shiftout_4_w),  .taps(taps4), .debug_wrptr() );
+//------------------------------------------------------------------------------
+// Line Shift Registers: 3x3 Blur Kernel Delay Lines
+//------------------------------------------------------------------------------
+// Three 1024-pixel shift registers create the 3-line delay needed for
+// the 3x3 blur kernel. Each line delay is one scanline (1024 pixels).
+//
+// Data flow:
+//   rowbuffer -> line3 -> line2 -> line1
+//              (p33)    (p23)    (p13)
+//
+line_shift_register u_line1 (
+    .clock      (i_clk),
+    .shiftin    (w_p21),
+    .shiftout   (w_line1_out)
+);
+
+line_shift_register u_line2 (
+    .clock      (i_clk),
+    .shiftin    (w_p31),
+    .shiftout   (w_line2_out)
+);
+
+line_shift_register u_line3 (
+    .clock      (i_clk),
+    .shiftin    (w_rowbuff_rdata),
+    .shiftout   (w_line3_out)
+);
+
+//------------------------------------------------------------------------------
+// Ring Buffers: "Hadron Collider" Circular Pixel Storage
+//------------------------------------------------------------------------------
+// Four ring buffers connected in a circular chain store active pixels.
+// Each buffer has 1024 entries with 8 taps for parallel read access.
+//
+// Connection pattern:
+//   ring1.shiftout -> process -> ring2.shiftin
+//   ring2.shiftout -> process -> ring3.shiftin
+//   ring3.shiftout -> process -> ring4.shiftin
+//   ring4.shiftout -> process -> ring1.shiftin (completes the circle)
+//
+// At each connection, phosphor decay is applied to the luma value.
+//
+wire [9:0] w_ring1_wrptr;               // Debug: ring buffer 1 write pointer
+
+pixel_ring_buffer u_ring_buffer_1 (
+    .i_clk      (i_clk),
+    .i_shiftin  (r_shiftout_1),
+    .o_shiftout (w_shiftout_1),
+    .o_taps     (w_taps1),
+    .o_dbg_wrptr(w_ring1_wrptr)
+);
+
+pixel_ring_buffer u_ring_buffer_2 (
+    .i_clk      (i_clk),
+    .i_shiftin  (r_shiftout_2),
+    .o_shiftout (w_shiftout_2),
+    .o_taps     (w_taps2),
+    .o_dbg_wrptr()                      // Unused debug output
+);
+
+pixel_ring_buffer u_ring_buffer_3 (
+    .i_clk      (i_clk),
+    .i_shiftin  (r_shiftout_3),
+    .o_shiftout (w_shiftout_3),
+    .o_taps     (w_taps3),
+    .o_dbg_wrptr()
+);
+
+pixel_ring_buffer u_ring_buffer_4 (
+    .i_clk      (i_clk),
+    .i_shiftin  (r_shiftout_4),
+    .o_shiftout (w_shiftout_4),
+    .o_taps     (w_taps4),
+    .o_dbg_wrptr()
+);
 
 // Debug: expose ring buffer 1 write pointer
-assign debug_ring_buffer_wrptr = ring_buf1_wrptr;
+assign o_dbg_ring_wrptr = w_ring1_wrptr;
 
 
-////////////////  ALWAYS BLOCKS  //////////////////
+//==============================================================================
+// Always Block 1: Ring Buffer Management and Pixel Insertion
+//==============================================================================
+// This block handles:
+// - FIFO prefetch of next pixel coordinates
+// - Search counter for finding empty ring buffer slots
+// - Unpacking ring buffer shift outputs to coordinate/luma registers
+// - Pixel insertion into ring buffers (new or refresh existing)
+// - Phosphor decay application at ring buffer connection points
+//
+always @(posedge i_clk) begin
+    //--------------------------------------------------------------------------
+    // Prefetch next pixel from input FIFO
+    //--------------------------------------------------------------------------
+    r_next_pixel_x <= r_fifo_pixel_x[r_fifo_rd_ptr];
+    r_next_pixel_y <= r_fifo_pixel_y[r_fifo_rd_ptr];
 
-always @(posedge clk) begin
-     next_pixel_x <= buffer_pixel_x[buffer_read_ptr];
-     next_pixel_y <= buffer_pixel_y[buffer_read_ptr];
+    //--------------------------------------------------------------------------
+    // Increment search counter (reset when pixel found in ring buffer)
+    //--------------------------------------------------------------------------
+    r_search_counter <= r_search_counter + 1'b1;
 
-     search_counter <= search_counter + 1'b1;
+    //--------------------------------------------------------------------------
+    // Unpack ring buffer shift outputs to coordinate and luma registers
+    // Format: {Y[9:0], X[9:0], luma[11:0]} = 32 bits
+    //--------------------------------------------------------------------------
+    {r_pixel_1_y, r_pixel_1_x, r_luma_1} <= w_shiftout_1;
+    {r_pixel_2_y, r_pixel_2_x, r_luma_2} <= w_shiftout_2;
+    {r_pixel_3_y, r_pixel_3_x, r_luma_3} <= w_shiftout_3;
+    {r_pixel_4_y, r_pixel_4_x, r_luma_4} <= w_shiftout_4;
 
-     { pixel_1_y, pixel_1_x, luma_1 } <= shiftout_1_w;         /* shiftout_?_w is where ring buffers (lfsr) connect to each other */
-     { pixel_2_y, pixel_2_x, luma_2 } <= shiftout_2_w;         /* Store these values to corresponding registers */
-     { pixel_3_y, pixel_3_x, luma_3 } <= shiftout_3_w;
-     { pixel_4_y, pixel_4_x, luma_4 } <= shiftout_4_w;
-
-     if(wren) begin
-          // =======================================================================
-          // KOORDINATNA TRANSFORMACIJA - ovisi o modu rada
-          // =======================================================================
-          // TEST_ANIMATION: direktne koordinate (X, Y) - bez transformacije
-          // PDP-1 MODE: origin u GORNJEM DESNOM kutu
-          //   ~pixel_x_i invertira X os (0→1023, 1023→0)
-          //   Swap X↔Y rotira koordinate za ispravnu orijentaciju
-          //   Rezultat: { buffer_pixel_y, buffer_pixel_x } = { ~X, Y }
+    //--------------------------------------------------------------------------
+    // Handle incoming pixel (on strobe)
+    //--------------------------------------------------------------------------
+    if (r_pixel_strobe) begin
+        // =======================================================================
+        // COORDINATE TRANSFORMATION - depends on operating mode
+        // =======================================================================
+        // TEST_ANIMATION: Direct coordinates (X, Y) - no transformation
+        // PDP-1 MODE: Origin in UPPER RIGHT corner
+        //   ~i_pixel_x inverts X axis (0->1023, 1023->0)
+        //   X/Y swap rotates coordinate system
+        //   Result: { buffer_Y, buffer_X } = { ~X, Y }
 
 `ifdef TEST_ANIMATION
-          // TEST_ANIMATION: direktno koristi koordinate bez transformacije
-          if (variable_brightness && pixel_brightness > 3'b0 && pixel_brightness < 3'b100)
-          begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { pixel_y_i, pixel_x_i };
-
-            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { pixel_y_i + 1'b1, pixel_x_i };
-            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { pixel_y_i, pixel_x_i + 1'b1};
-            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { pixel_y_i - 1'b1, pixel_x_i };
-            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { pixel_y_i, pixel_x_i - 1'b1};
-
-            buffer_write_ptr <= buffer_write_ptr + 3'd5;
-          end
-          else
-          begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { pixel_y_i, pixel_x_i };
-            buffer_write_ptr <= buffer_write_ptr + 1'b1;
-          end
+        // TEST_ANIMATION: Use coordinates directly without transformation
+        // BRIGHTNESS FIX: All except brightness=7 get 5x pixels
+        if (i_variable_brightness && i_pixel_brightness != 3'b111) begin
+            {r_fifo_pixel_y[r_fifo_wr_ptr], r_fifo_pixel_x[r_fifo_wr_ptr]} <= {i_pixel_y, i_pixel_x};
+            {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd1], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd1]} <= {i_pixel_y + 1'b1, i_pixel_x};
+            {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd2], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd2]} <= {i_pixel_y, i_pixel_x + 1'b1};
+            {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd3], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd3]} <= {i_pixel_y - 1'b1, i_pixel_x};
+            {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd4], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd4]} <= {i_pixel_y, i_pixel_x - 1'b1};
+            r_fifo_wr_ptr <= r_fifo_wr_ptr + 3'd5;
+        end else begin
+            {r_fifo_pixel_y[r_fifo_wr_ptr], r_fifo_pixel_x[r_fifo_wr_ptr]} <= {i_pixel_y, i_pixel_x};
+            r_fifo_wr_ptr <= r_fifo_wr_ptr + 1'b1;
+        end
 `else
-          // PDP-1 MODE: X/Y swap + X inverzija - PUNI 1024x1024 display
-          // Koordinate iz CPU-a su 0-1023 (kao original)
-          // 1) Inverzija X: ~pixel_x_i = 1023 - pixel_x_i (10-bit inverzija)
-          // 2) X/Y swap: invertirani X ide u Y buffer, Y ide u X buffer
-          // BEZ skaliranja - koristi pune 10-bit koordinate za 1024x1024 display
-          if (variable_brightness && pixel_brightness > 3'b0 && pixel_brightness < 3'b100)
-          begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
-
-            { buffer_pixel_y[buffer_write_ptr + 3'd1], buffer_pixel_x[buffer_write_ptr + 3'd1] } <= { ~pixel_x_i + 1'b1, pixel_y_i };
-            { buffer_pixel_y[buffer_write_ptr + 3'd2], buffer_pixel_x[buffer_write_ptr + 3'd2] } <= { ~pixel_x_i, pixel_y_i + 1'b1 };
-            { buffer_pixel_y[buffer_write_ptr + 3'd3], buffer_pixel_x[buffer_write_ptr + 3'd3] } <= { ~pixel_x_i - 1'b1, pixel_y_i };
-            { buffer_pixel_y[buffer_write_ptr + 3'd4], buffer_pixel_x[buffer_write_ptr + 3'd4] } <= { ~pixel_x_i, pixel_y_i - 1'b1 };
-
-            buffer_write_ptr <= buffer_write_ptr + 3'd5;
-          end
-          else
-          begin
-            { buffer_pixel_y[buffer_write_ptr], buffer_pixel_x[buffer_write_ptr] } <= { ~pixel_x_i, pixel_y_i };
-            buffer_write_ptr <= buffer_write_ptr + 1'b1;
-          end
+        // PDP-1 MODE: X/Y swap + X inversion for full 1024x1024 display
+        // Coordinates from CPU are 0-1023 (as original)
+        // 1) X inversion: ~i_pixel_x = 1023 - i_pixel_x (10-bit inversion)
+        // 2) X/Y swap: inverted X goes to Y buffer, Y goes to X buffer
+        //
+        // BRIGHTNESS FIX: All except brightness=7 (minimum) get 5x pixels
+        if (i_variable_brightness && i_pixel_brightness != 3'b111) begin
+            {r_fifo_pixel_y[r_fifo_wr_ptr], r_fifo_pixel_x[r_fifo_wr_ptr]} <= {~i_pixel_x, i_pixel_y};
+            {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd1], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd1]} <= {~i_pixel_x + 1'b1, i_pixel_y};
+            {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd2], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd2]} <= {~i_pixel_x, i_pixel_y + 1'b1};
+            {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd3], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd3]} <= {~i_pixel_x - 1'b1, i_pixel_y};
+            {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd4], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd4]} <= {~i_pixel_x, i_pixel_y - 1'b1};
+            r_fifo_wr_ptr <= r_fifo_wr_ptr + 3'd5;
+        end else begin
+            {r_fifo_pixel_y[r_fifo_wr_ptr], r_fifo_pixel_x[r_fifo_wr_ptr]} <= {~i_pixel_x, i_pixel_y};
+            r_fifo_wr_ptr <= r_fifo_wr_ptr + 1'b1;
+        end
 `endif
 
-          if (buffer_write_ptr == buffer_read_ptr)
-               search_counter <= 0;
-     end
+        // Reset search counter when FIFO was empty
+        if (r_fifo_wr_ptr == r_fifo_rd_ptr)
+            r_search_counter <= 0;
+    end
 
-     begin
-     /* Dimming old pixels at the points where ring buffers connect. They are stored into registers and connected: 1->2, 2->3, 3->4, 4->1 */
-     /* FIX: Dimming VRAĆEN - phosphor decay svakih 8 prolaza */
-     shiftout_1 <= luma_4[11:4] ? { pixel_4_y, pixel_4_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_4) : luma_4 } : 0;
-     shiftout_2 <= luma_1[11:4] ? { pixel_1_y, pixel_1_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_1) : luma_1 } : 0;
-     shiftout_3 <= luma_2[11:4] ? { pixel_2_y, pixel_2_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_2) : luma_2 } : 0;
-     shiftout_4 <= luma_3[11:4] ? { pixel_3_y, pixel_3_x, pass_counter[2:0] == 3'b0 ? dim_pixel(luma_3) : luma_3 } : 0;
+    //--------------------------------------------------------------------------
+    // Ring Buffer Processing: Phosphor Decay and Pixel Insertion
+    //--------------------------------------------------------------------------
+    begin
+        //----------------------------------------------------------------------
+        // Apply phosphor decay at ring buffer connection points
+        // Decay occurs every 8 vertical passes (pass_counter[2:0] == 0)
+        // Pixels with luma[11:4] == 0 are considered "dead" and cleared
+        //----------------------------------------------------------------------
+        r_shiftout_1 <= r_luma_4[11:4] ? {r_pixel_4_y, r_pixel_4_x, r_pass_counter[2:0] == 3'b0 ? dim_pixel(r_luma_4) : r_luma_4} : 32'd0;
+        r_shiftout_2 <= r_luma_1[11:4] ? {r_pixel_1_y, r_pixel_1_x, r_pass_counter[2:0] == 3'b0 ? dim_pixel(r_luma_1) : r_luma_1} : 32'd0;
+        r_shiftout_3 <= r_luma_2[11:4] ? {r_pixel_2_y, r_pixel_2_x, r_pass_counter[2:0] == 3'b0 ? dim_pixel(r_luma_2) : r_luma_2} : 32'd0;
+        r_shiftout_4 <= r_luma_3[11:4] ? {r_pixel_3_y, r_pixel_3_x, r_pass_counter[2:0] == 3'b0 ? dim_pixel(r_luma_3) : r_luma_3} : 32'd0;
 
-     /* Add new pixel */
+        //----------------------------------------------------------------------
+        // New Pixel Insertion: Find empty slot after search timeout
+        //----------------------------------------------------------------------
+        // If search_counter > 1024 and we haven't found the pixel in ring buffers,
+        // insert it into the first empty slot (luma[11:4] == 0)
+        //
+        if (r_fifo_wr_ptr != r_fifo_rd_ptr && r_search_counter > 1024 &&
+            (!r_luma_1[11:4] || !r_luma_2[11:4] || !r_luma_3[11:4] || !r_luma_4[11:4])) begin
 
-     /* If we didn't find a pixel on one of the taps within inter-tap distance, assume there is
-        nothing to update and once we find a dark pixel we can re-use, add the current one to that position */
-     /* FIX BUG 4: search_counter threshold mora biti > TAP_DISTANCE ring buffera (512) */
-     /* TASK-XXX: Threshold zadrzan na 640, dovoljan za ring buffer TAP_DISTANCE 512 */
+            if (r_luma_4[11:4] == 0)
+                r_shiftout_1 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+            else if (r_luma_1[11:4] == 0)
+                r_shiftout_2 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+            else if (r_luma_2[11:4] == 0)
+                r_shiftout_3 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+            else if (r_luma_3[11:4] == 0)
+                r_shiftout_4 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
 
-     if (buffer_write_ptr != buffer_read_ptr && search_counter > 640 && (!luma_1[11:4] || !luma_2[11:4] || !luma_3[11:4] || !luma_4[11:4]))
-     begin
-         if (luma_4[11:4] == 0)
-               shiftout_1 <= { { next_pixel_y, next_pixel_x, 12'd4095 } };
-         else if (luma_1[11:4] == 0)
-               shiftout_2 <= { { next_pixel_y, next_pixel_x, 12'd4095 } };
-         else if (luma_2[11:4] == 0)
-               shiftout_3 <= { { next_pixel_y, next_pixel_x, 12'd4095 } };
-         else if (luma_3[11:4] == 0)
-               shiftout_4 <= { { next_pixel_y, next_pixel_x, 12'd4095 } };
+            // Advance FIFO read pointer
+            r_fifo_rd_ptr <= r_fifo_rd_ptr + 1'b1;
+            r_next_pixel_x <= r_fifo_pixel_x[r_fifo_rd_ptr + 1'b1];
+            r_next_pixel_y <= r_fifo_pixel_y[r_fifo_rd_ptr + 1'b1];
+            r_search_counter <= 0;
+        end
 
-         buffer_read_ptr <= buffer_read_ptr + 1'b1;
+        //----------------------------------------------------------------------
+        // Existing Pixel Refresh: Update luma if pixel found in shift outputs
+        //----------------------------------------------------------------------
+        else if (r_fifo_wr_ptr != r_fifo_rd_ptr &&
+                 ((r_pixel_1_x == r_next_pixel_x && r_pixel_1_y == r_next_pixel_y) ||
+                  (r_pixel_2_x == r_next_pixel_x && r_pixel_2_y == r_next_pixel_y) ||
+                  (r_pixel_3_x == r_next_pixel_x && r_pixel_3_y == r_next_pixel_y) ||
+                  (r_pixel_4_x == r_next_pixel_x && r_pixel_4_y == r_next_pixel_y))) begin
 
-         next_pixel_x <= buffer_pixel_x[buffer_read_ptr + 1'b1];
-         next_pixel_y <= buffer_pixel_y[buffer_read_ptr + 1'b1];
+            if (r_pixel_1_x == r_next_pixel_x && r_pixel_1_y == r_next_pixel_y)
+                r_shiftout_2 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+            else if (r_pixel_2_x == r_next_pixel_x && r_pixel_2_y == r_next_pixel_y)
+                r_shiftout_3 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+            else if (r_pixel_3_x == r_next_pixel_x && r_pixel_3_y == r_next_pixel_y)
+                r_shiftout_4 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+            else if (r_pixel_4_x == r_next_pixel_x && r_pixel_4_y == r_next_pixel_y)
+                r_shiftout_1 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
 
-         search_counter <= 0;
-      end
+            // Advance FIFO read pointer
+            r_fifo_rd_ptr <= r_fifo_rd_ptr + 1'b1;
+            r_next_pixel_x <= r_fifo_pixel_x[r_fifo_rd_ptr + 1'b1];
+            r_next_pixel_y <= r_fifo_pixel_y[r_fifo_rd_ptr + 1'b1];
+            r_search_counter <= 0;
+        end
 
-     /* Update existing pixel, treat this as an existing pixel refresh only if it's visible on the screen
-        (search counter is < 1024 and we in fact found the pixel on one of the LFSR outputs) */
-
-   else if (buffer_write_ptr != buffer_read_ptr &&
-      (  (pixel_1_x == next_pixel_x && pixel_1_y == next_pixel_y)
-      || (pixel_2_x == next_pixel_x && pixel_2_y == next_pixel_y)
-      || (pixel_3_x == next_pixel_x && pixel_3_y == next_pixel_y)
-      || (pixel_4_x == next_pixel_x && pixel_4_y == next_pixel_y)
-      ))
-   begin
-      if (pixel_1_x == next_pixel_x && pixel_1_y == next_pixel_y)
-         shiftout_2 <= { next_pixel_y, next_pixel_x, 12'd4095};
-
-      else if (pixel_2_x == next_pixel_x && pixel_2_y == next_pixel_y)
-         shiftout_3 <= { next_pixel_y, next_pixel_x, 12'd4095};
-
-      else if (pixel_3_x == next_pixel_x && pixel_3_y == next_pixel_y)
-         shiftout_4 <= { next_pixel_y, next_pixel_x, 12'd4095};
-
-      else if (pixel_4_x == next_pixel_x && pixel_4_y == next_pixel_y)
-         shiftout_1 <= { next_pixel_y, next_pixel_x, 12'd4095};
-
-      /* Increment the read_ptr pointer as we have just inserted one pixel from the write fifo buffer */
-      buffer_read_ptr <= buffer_read_ptr + 1'b1;
-
-      next_pixel_x <= buffer_pixel_x[buffer_read_ptr + 1'b1];
-      next_pixel_y <= buffer_pixel_y[buffer_read_ptr + 1'b1];
-
-      search_counter <= 0;
-
-   end
-
-     /* We have seen our pixel exists in ring buffer on one of the taps. Reset search counter so we don't add another one but wait for it to appear
-     on the LSFR outputs (in shiftout_? registers). As we buffer 8 lines ahead and have 8 taps per ring buffer, we will "catch" the pixel in time to be output */
-     else
-         for (i=8; i>0; i=i-1'b1)
-            if ((taps1[i * DATA_WIDTH-1 -: 10] == next_pixel_y && taps1[i * DATA_WIDTH-11 -: 10] == next_pixel_x && taps1[i * DATA_WIDTH-21 -: 8])
-              ||(taps2[i * DATA_WIDTH-1 -: 10] == next_pixel_y && taps2[i * DATA_WIDTH-11 -: 10] == next_pixel_x && taps2[i * DATA_WIDTH-21 -: 8])
-              ||(taps3[i * DATA_WIDTH-1 -: 10] == next_pixel_y && taps3[i * DATA_WIDTH-11 -: 10] == next_pixel_x && taps3[i * DATA_WIDTH-21 -: 8])
-              ||(taps4[i * DATA_WIDTH-1 -: 10] == next_pixel_y && taps4[i * DATA_WIDTH-11 -: 10] == next_pixel_x && taps4[i * DATA_WIDTH-21 -: 8])
-               )
-
-               search_counter <= 0;
-     end
+        //----------------------------------------------------------------------
+        // Tap Search: Reset search counter if pixel found in any ring buffer tap
+        //----------------------------------------------------------------------
+        else begin
+            for (i = 8; i > 0; i = i - 1'b1) begin
+                if ((w_taps1[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y && w_taps1[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x && w_taps1[i*DATA_WIDTH-21 -: 8]) ||
+                    (w_taps2[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y && w_taps2[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x && w_taps2[i*DATA_WIDTH-21 -: 8]) ||
+                    (w_taps3[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y && w_taps3[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x && w_taps3[i*DATA_WIDTH-21 -: 8]) ||
+                    (w_taps4[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y && w_taps4[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x && w_taps4[i*DATA_WIDTH-21 -: 8]))
+                    r_search_counter <= 0;
+            end
+        end
+    end
 end
 
-always @(posedge clk) begin
-   /* Read from one line buffer to the screen and prepare the next line */
+//==============================================================================
+// Always Block 2: Row Buffer Read/Write and Blur Kernel Processing
+//==============================================================================
+// This block handles:
+// - Row buffer read address generation
+// - 3x3 blur kernel shift register updates
+// - Blur kernel convolution calculation
+// - VGA pixel output
+// - Ring buffer to row buffer pixel transfer
+// - Row buffer line erasure
+//
+always @(posedge i_clk) begin
+    //--------------------------------------------------------------------------
+    // Row Buffer Read: Generate address for current pixel position
+    //--------------------------------------------------------------------------
+    // Address format: {line[2:0], x[9:0]} - 8 lines x 1024 pixels
+    r_rowbuff_rdaddr <= {w_current_y[2:0], w_current_x};
+    r_rowbuff_wren   <= 1'b1;
 
-   rowbuff_rdaddress <= {current_y[2:0], current_x};
-   rowbuff_wren <= 1'b1;
+    //--------------------------------------------------------------------------
+    // 3x3 Blur Kernel Shift Register Update
+    //--------------------------------------------------------------------------
+    // Shift pixel values through the 3x3 matrix:
+    //   p11 <- p12 <- p13 <- line1_out (oldest line)
+    //   p21 <- p22 <- p23 <- line2_out
+    //   p31 <- p32 <- p33 <- line3_out <- rowbuffer (newest line)
+    //
+    r_p11 <= r_p12; r_p12 <= r_p13; r_p13 <= w_line1_out;
+    r_p21 <= r_p22; r_p22 <= r_p23; r_p23 <= w_line2_out;
+    r_p31 <= r_p32; r_p32 <= r_p33; r_p33 <= w_line3_out;
 
-   /* Shift the 3x3 register values (connected to the lfsr line buffers). We use these to apply a blur kernel since without it the graphics are too sharp for a CRT output */
-   p11 <= p12; p12 <= p13; p13 <= p13_w;
-   p21 <= p22; p22 <= p23; p23 <= p23_w;
-   p31 <= p32; p32 <= p33; p33 <= p33_w;
+    //--------------------------------------------------------------------------
+    // Blur Kernel Convolution
+    //--------------------------------------------------------------------------
+    // Apply 3x3 averaging blur when center pixel below threshold.
+    // Uses divide-by-8 (shift right 3) instead of divide-by-9 for efficiency.
+    // Corner pixels (p11, p33) weighted at 0.5 to prevent overflow.
+    //
+    if (r_p22 < BRIGHTNESS) begin
+        r_pixel_out <= ({8'b0, r_p11[7:1]} + r_p12 + r_p13 +
+                        r_p21 + r_p22 + r_p23 +
+                        r_p31 + r_p32 + r_p33[7:1]) >> 3;
+        r_p21 <= r_pixel_out;           // Feedback for smoother decay
+    end else begin
+        r_pixel_out <= r_p22;           // No blur for bright pixels
+    end
 
-   /* Simple averaging blur kernel, but instead with 9, we divide by 8. Since this applies only to phosphor trail anyways, it will never overflow the max value for pixel_out register width */
-   if ( p22 < brightness)
-	begin
-		pixel_out <= ( {8'b0, p11[7:1]} + p12 + p13 + p21 + p22 + p23 + p31 + p32 + p33[7:1] ) >> 3;		/* Remove chance of overflow by taking two pixels with 0.5 coefficient */
-		p21 <= pixel_out;
-	end
-   else
-      pixel_out <= p22;
+    //--------------------------------------------------------------------------
+    // VGA Output: Convert intensity to RGB
+    //--------------------------------------------------------------------------
+    output_pixel(r_pixel_out);
 
-   output_pixel(pixel_out);
+    //--------------------------------------------------------------------------
+    // Row Buffer Write: Transfer pixels from ring buffer taps
+    //--------------------------------------------------------------------------
+    // Priority: Pixel write takes precedence over line erasure
+    // Search all 8 taps across all 4 ring buffers for pixels within
+    // 8 lines of current scanline position.
+    //
+    r_pixel_found = 1'b0;               // Default: no pixel found
 
-   // =========================================================================
-   // FIX: Odvojeni erase i pixel write - pixel write ima prioritet
-   // =========================================================================
-   // PROBLEM: Stari kod je imao erase u if, pixel write u else - erase je blokirao pixel write
-   // RJESENJE: Pixel write se uvijek pokusava, erase samo kad nema piksela za upisati
+    for (i = 8; i > 0; i = i - 1'b1) begin
+        // Check taps1
+        if (!r_pixel_found &&
+            w_current_y < w_taps1[i*DATA_WIDTH-1 -: 10] &&
+            w_taps1[i*DATA_WIDTH-1 -: 10] - w_current_y <= 3'd7 &&
+            w_taps1[i*DATA_WIDTH-21 -: 8] > 0) begin
 
-   // Prvo provjeri ima li piksela za upisati iz ring buffera
-   // Pixel write prioritet - trazi piksel koji treba upisati u rowbuffer
-   pixel_found = 1'b0;
+            r_rowbuff_wraddr <= {w_taps1[i*DATA_WIDTH-8 -: 3], w_taps1[i*DATA_WIDTH-11 -: 10]};
+            r_rowbuff_wdata  <= w_taps1[i*DATA_WIDTH-21 -: 8];
+            r_pixel_found = 1'b1;
+        end
+        // Check taps2
+        else if (!r_pixel_found &&
+                 w_current_y < w_taps2[i*DATA_WIDTH-1 -: 10] &&
+                 w_taps2[i*DATA_WIDTH-1 -: 10] - w_current_y <= 3'd7 &&
+                 w_taps2[i*DATA_WIDTH-21 -: 8] > 0) begin
 
-   for (i=8; i>0; i=i-1'b1) begin
-      if (!pixel_found && pdp1_y < taps1[i * DATA_WIDTH-1 -: 10] && taps1[i * DATA_WIDTH-1 -: 10] - pdp1_y <= 3'd7 && taps1[i * DATA_WIDTH - 21 -: 8] > 0) begin
-         rowbuff_wraddress <= {taps1[i * DATA_WIDTH - 8 -: 3], taps1[i * DATA_WIDTH - 11 -: 10]};
-         rowbuff_wdata <= taps1[i * DATA_WIDTH - 21 -: 8];
-         pixel_found = 1'b1;
-      end
-      else if (!pixel_found && pdp1_y < taps2[i * DATA_WIDTH-1 -: 10] && taps2[i * DATA_WIDTH-1 -: 10] - pdp1_y <= 3'd7 && taps2[i * DATA_WIDTH - 21 -: 8] > 0) begin
-         rowbuff_wraddress <= {taps2[i * DATA_WIDTH - 8 -: 3], taps2[i * DATA_WIDTH - 11 -: 10]};
-         rowbuff_wdata <= taps2[i * DATA_WIDTH - 21 -: 8];
-         pixel_found = 1'b1;
-      end
-      else if (!pixel_found && pdp1_y < taps3[i * DATA_WIDTH-1 -: 10] && taps3[i * DATA_WIDTH-1 -: 10] - pdp1_y <= 3'd7 && taps3[i * DATA_WIDTH - 21 -: 8] > 0) begin
-         rowbuff_wraddress <= {taps3[i * DATA_WIDTH - 8 -: 3], taps3[i * DATA_WIDTH - 11 -: 10]};
-         rowbuff_wdata <= taps3[i * DATA_WIDTH - 21 -: 8];
-         pixel_found = 1'b1;
-      end
-      else if (!pixel_found && pdp1_y < taps4[i * DATA_WIDTH-1 -: 10] && taps4[i * DATA_WIDTH-1 -: 10] - pdp1_y <= 3'd7 && taps4[i * DATA_WIDTH - 21 -: 8] > 0) begin
-         rowbuff_wraddress <= {taps4[i * DATA_WIDTH - 8 -: 3], taps4[i * DATA_WIDTH - 11 -: 10]};
-         rowbuff_wdata <= taps4[i * DATA_WIDTH - 21 -: 8];
-         pixel_found = 1'b1;
-      end
-   end
+            r_rowbuff_wraddr <= {w_taps2[i*DATA_WIDTH-8 -: 3], w_taps2[i*DATA_WIDTH-11 -: 10]};
+            r_rowbuff_wdata  <= w_taps2[i*DATA_WIDTH-21 -: 8];
+            r_pixel_found = 1'b1;
+        end
+        // Check taps3
+        else if (!r_pixel_found &&
+                 w_current_y < w_taps3[i*DATA_WIDTH-1 -: 10] &&
+                 w_taps3[i*DATA_WIDTH-1 -: 10] - w_current_y <= 3'd7 &&
+                 w_taps3[i*DATA_WIDTH-21 -: 8] > 0) begin
 
-   // Ako nije pronaden piksel, nastavi s erase-om (ne blokiraj pixel write)
-   if (!pixel_found && erase_counter < current_x) begin
-      rowbuff_wraddress <= {current_y[2:0], erase_counter};
-      rowbuff_wdata <= 0;
-      erase_counter <= erase_counter + 1'b1;
-   end
+            r_rowbuff_wraddr <= {w_taps3[i*DATA_WIDTH-8 -: 3], w_taps3[i*DATA_WIDTH-11 -: 10]};
+            r_rowbuff_wdata  <= w_taps3[i*DATA_WIDTH-21 -: 8];
+            r_pixel_found = 1'b1;
+        end
+        // Check taps4
+        else if (!r_pixel_found &&
+                 w_current_y < w_taps4[i*DATA_WIDTH-1 -: 10] &&
+                 w_taps4[i*DATA_WIDTH-1 -: 10] - w_current_y <= 3'd7 &&
+                 w_taps4[i*DATA_WIDTH-21 -: 8] > 0) begin
 
-   // Reset erase counter na kraju linije
-   // FIX: h_counter ide 0-799, nikad ne dođe do 800!
-   if (horizontal_counter == `h_line_timing - 1)
-      erase_counter <= 0;
+            r_rowbuff_wraddr <= {w_taps4[i*DATA_WIDTH-8 -: 3], w_taps4[i*DATA_WIDTH-11 -: 10]};
+            r_rowbuff_wdata  <= w_taps4[i*DATA_WIDTH-21 -: 8];
+            r_pixel_found = 1'b1;
+        end
+    end
 
+    //--------------------------------------------------------------------------
+    // Row Buffer Erase: Clear old pixels when no new pixels to write
+    //--------------------------------------------------------------------------
+    if (!r_pixel_found && r_erase_counter < w_current_x) begin
+        r_rowbuff_wraddr <= {w_current_y[2:0], r_erase_counter};
+        r_rowbuff_wdata  <= 8'd0;
+        r_erase_counter  <= r_erase_counter + 1'b1;
+    end
+
+    //--------------------------------------------------------------------------
+    // Reset erase counter at end of line
+    //--------------------------------------------------------------------------
+    if (i_h_counter == `h_line_timing - 1)
+        r_erase_counter <= 10'd0;
 end
 
 
-always @(posedge clk) begin
-   inside_visible_area <= (horizontal_counter >= `h_visible_offset + `h_center_offset && horizontal_counter < `h_visible_offset_end + `h_center_offset);
+//==============================================================================
+// Always Block 3: Timing Control and Pixel Valid Edge Detection
+//==============================================================================
+// This block handles:
+// - Visible area flag generation
+// - Pass counter for phosphor decay timing
+// - CDC synchronization of pixel valid signal
+// - Falling edge detection for pixel strobe
+//
+always @(posedge i_clk) begin
+    //--------------------------------------------------------------------------
+    // Visible Area Flag
+    //--------------------------------------------------------------------------
+    r_inside_visible <= (i_h_counter >= `h_visible_offset + `h_center_offset &&
+                         i_h_counter <  `h_visible_offset_end + `h_center_offset);
 
-   // FIX: h_counter ide 0-799, nikad ne dođe do 800!
-   if (horizontal_counter == `h_line_timing - 1)
-      pass_counter <= pass_counter + 1'b1;                     /* Counts the number of vertical refresh passes, used to slow down pixel dimming (do one for every n passes) */
+    //--------------------------------------------------------------------------
+    // Pass Counter: Increments at end of each scanline
+    //--------------------------------------------------------------------------
+    // Used to slow down phosphor decay (decay applied every 8 passes)
+    if (i_h_counter == `h_line_timing - 1)
+        r_pass_counter <= r_pass_counter + 1'b1;
 
-   prev_prev_wren_i <= prev_wren_i;                            /* Falling edge detect on a write enable signal, with additional clock to allow the signal to stabilize */
-   prev_wren_i <= pixel_available;
-   /* FIX: Falling edge detection - piksel je spreman kad signal PADA */
-   wren <= prev_prev_wren_i & ~prev_wren_i;
+    //--------------------------------------------------------------------------
+    // CDC Synchronization for Pixel Valid Signal
+    //--------------------------------------------------------------------------
+    // Two-stage synchronizer to handle asynchronous pixel_valid from PDP-1
+    // ASYNC_REG attribute ensures proper placement for metastability handling
+    r_pixel_valid_sync <= r_pixel_valid_meta;
+    r_pixel_valid_meta <= i_pixel_valid;
 
+    //--------------------------------------------------------------------------
+    // Falling Edge Detection: Generate strobe when pixel data is ready
+    //--------------------------------------------------------------------------
+    // Pixel is captured on falling edge of pixel_valid signal
+    r_pixel_strobe <= r_pixel_valid_sync & ~r_pixel_valid_meta;
 end
-
 
 endmodule
+
+`default_nettype wire
