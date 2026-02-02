@@ -661,6 +661,11 @@ module top_pdp1
     localparam SINE_CENTER_X = 10'd512;  // Center X for vertical sine position (becomes ~buffer_Y)
     localparam SINE_AMPLITUDE = 8'd100;  // Amplitude in pixels
 
+    // SINE2 parameters: higher on screen, slower, stronger phosphor
+    // Author: Jelena Kovacevic, REGOC team
+    // Date: 2026-02-02
+    localparam SINE2_CENTER_X = 10'd612;  // 100 pixels higher (higher X = lower on screen after inversion)
+
     // Intermediate calculation registers for pipelining
     reg signed [9:0] r_sine_offset;  // Signed offset from center
 
@@ -704,6 +709,62 @@ module top_pdp1
     end
 
     // =========================================================================
+    // SINE2: Second sine wave - higher position, slower, stronger phosphor
+    // Author: Jelena Kovacevic, REGOC team
+    // Date: 2026-02-02
+    // Uses same pixel pipeline as spaceship DPY instructions
+    // =========================================================================
+    reg [9:0]  r_sine2_t;           // Time/phase counter
+    reg [9:0]  r_sine2_x;           // Calculated X coordinate
+    reg [9:0]  r_sine2_y;           // Calculated Y coordinate
+    reg [7:0]  r_sine2_phase;       // Phase for sine lookup
+    reg signed [9:0] r_sine2_offset;  // Signed offset from center
+    reg [1:0]  r_sine2_slowdown;    // Counter for 4x slower update
+
+    // Multiplexer state: alternates between sine1 and sine2
+    reg        r_sine_select;       // 0 = sine1, 1 = sine2
+
+    always @(posedge clk_cpu) begin
+        if (~rst_cpu_n) begin
+            r_sine2_t        <= 10'd0;
+            r_sine2_x        <= SINE2_CENTER_X;
+            r_sine2_y        <= 10'd0;
+            r_sine2_phase    <= 8'd0;
+            r_sine2_offset   <= 10'sd0;
+            r_sine2_slowdown <= 2'd0;
+            r_sine_select    <= 1'b0;
+        end else if (w_cpu_pixel_shift) begin
+            // Toggle between sine1 and sine2 each pixel_shift
+            r_sine_select <= ~r_sine_select;
+
+            // Sine2 updates every 4th pixel_shift (slower)
+            r_sine2_slowdown <= r_sine2_slowdown + 1'b1;
+            if (r_sine2_slowdown == 2'd3) begin
+                // Advance time counter (wraps at 1024)
+                r_sine2_t <= r_sine2_t + 1'b1;
+
+                // r_sine2_y = SWEEP: horizontal position on screen
+                r_sine2_y <= r_sine2_t[9:0];
+
+                // Phase advances 2x (slower oscillation than sine1 which uses 4x)
+                r_sine2_phase <= r_sine2_phase + 8'd2;
+
+                // Calculate signed offset
+                r_sine2_offset <= $signed({2'b0, r_sine_lut[r_sine2_phase]}) - 10'sd128;
+
+                // r_sine2_x = CENTER + offset: vertical position
+                r_sine2_x <= SINE2_CENTER_X + r_sine2_offset[9:0];
+            end
+        end
+    end
+
+    // Multiplexed sine coordinates (alternates sine1/sine2)
+    wire [9:0] w_sine_mux_x = r_sine_select ? r_sine2_x : r_sine_x;
+    wire [9:0] w_sine_mux_y = r_sine_select ? r_sine2_y : r_sine_y;
+    // Sine2 has stronger phosphor: 3'b110, sine1 keeps 3'd7
+    wire [2:0] w_sine_mux_brightness = r_sine_select ? 3'b110 : 3'd7;
+
+    // =========================================================================
     // CDC: MULTI-BIT PIXEL DATA (clk_cpu -> clk_pixel)
     // =========================================================================
     // PROBLEM: 23 bits (10+10+3) transferred across CDC without handshake.
@@ -732,9 +793,10 @@ module top_pdp1
     reg        r_pixel_hold_valid;
 
     // Select between CPU coordinates and sine test pattern
-    wire [9:0] w_selected_pixel_x = w_sine_test_mode ? r_sine_x : w_cpu_pixel_x;
-    wire [9:0] w_selected_pixel_y = w_sine_test_mode ? r_sine_y : w_cpu_pixel_y;
-    wire [2:0] w_selected_brightness = w_sine_test_mode ? 3'd7 : w_cpu_pixel_brightness;
+    // Uses multiplexed sine (sine1/sine2 alternating) when in test mode
+    wire [9:0] w_selected_pixel_x = w_sine_test_mode ? w_sine_mux_x : w_cpu_pixel_x;
+    wire [9:0] w_selected_pixel_y = w_sine_test_mode ? w_sine_mux_y : w_cpu_pixel_y;
+    wire [2:0] w_selected_brightness = w_sine_test_mode ? w_sine_mux_brightness : w_cpu_pixel_brightness;
 
     always @(posedge clk_cpu) begin
         if (~rst_cpu_n) begin
