@@ -174,6 +174,70 @@ wire [16:0] division_remainder_w;
 wire [33:0] multiply_input;
 wire [16:0] denominator;
 
+// ============================================================================
+// Combinational logic for arithmetic operations (Verilog good practice)
+// Extracted from execute_instruction to avoid blocking assignments in always @(posedge clk)
+// ============================================================================
+
+// --- i_add combinational logic ---
+wire        w_add_different_signs = AC[17] ^ DI[17];
+wire [18:0] w_add_sum = AC + DI;                           // 19-bit to capture carry
+wire        w_add_carry = w_add_sum[18];
+wire [17:0] w_add_ac_raw = w_add_sum[17:0] + w_add_carry;  // End-around carry
+wire [17:0] w_add_ac = (w_add_ac_raw == 18'h3ffff) ? 18'b0 : w_add_ac_raw;  // fix_zero
+wire        w_add_ov = (w_add_different_signs == 0) && (DI[17] != w_add_ac[17]);
+
+// --- i_sub combinational logic ---
+wire        w_sub_different_signs = AC[17] ^ DI[17];
+wire [18:0] w_sub_sum = AC + (~DI);                        // 19-bit to capture carry
+wire        w_sub_carry = w_sub_sum[18];
+wire [17:0] w_sub_ac_raw = w_sub_sum[17:0] + (!w_sub_carry);  // End-around borrow
+wire [17:0] w_sub_ac = (w_sub_ac_raw == 18'h3ffff) ? 18'b0 : w_sub_ac_raw;  // fix_zero
+wire        w_sub_ov = w_sub_different_signs && (DI[17] == w_sub_ac[17]);
+
+// --- mus (multiply step) combinational logic ---
+wire [18:0] w_mus_sum = AC + DI;                           // 19-bit to capture carry
+wire        w_mus_carry = w_mus_sum[18];
+wire [17:0] w_mus_ac_raw = w_mus_sum[17:0] + w_mus_carry;  // End-around carry
+wire [17:0] w_mus_ac_added = (w_mus_ac_raw == 18'h3ffff) ? 18'b0 : w_mus_ac_raw;  // fix_zero
+wire [17:0] w_mus_ac_result = IO[0] ? w_mus_ac_added : AC;  // Add only if IO[0] set
+wire [17:0] w_mus_io_result = {w_mus_ac_result[0], IO[17:1]};  // Shift right, bring AC[0]
+wire [17:0] w_mus_ac_final = w_mus_ac_result >> 1;          // Shift AC right
+
+// --- dis (divide step) combinational logic ---
+wire [35:0] w_dis_shift = {AC[16:0], IO, AC[17] ^ 1'b1};   // 36-bit shift
+wire [17:0] w_dis_ac_shifted = w_dis_shift[35:18];
+wire [17:0] w_dis_io_shifted = w_dis_shift[17:0];
+wire [18:0] w_dis_sum = w_dis_io_shifted[0] ? (w_dis_ac_shifted + (~DI)) : (w_dis_ac_shifted + DI + 1'b1);
+wire        w_dis_carry = w_dis_sum[18];
+wire [17:0] w_dis_ac_raw = w_dis_sum[17:0] + (w_dis_carry ^ w_dis_io_shifted[0]);
+wire [17:0] w_dis_ac = (w_dis_ac_raw == 18'h3ffff) ? 18'b0 : w_dis_ac_raw;  // fix_zero
+
+// --- mul (hardware multiply) combinational logic ---
+wire        w_mul_different_signs = AC[17] ^ DI[17];
+
+// --- div (hardware divide) combinational logic ---
+wire        w_div_different_signs = AC[17] ^ DI[17];
+
+// --- i_skp (skip) combinational logic ---
+// Note: This depends on IR (instruction), but IR is stable during execute phase
+// Using MEM_BUFF for operand since that's what's passed to execute_instruction
+wire w_skip_flag = (
+      (IR[6]   && AC == 0)                                           // Skip on ZERO Accumulator      (sza)
+   || (IR[7]   && AC[17] == 0)                                       // Skip on Plus Accumulator      (spa)
+   || (IR[8]   && AC[17] == 1)                                       // Skip on Minus Accumulator     (sma)
+   || (IR[9]   && OV == 0)                                           // Skip on ZERO Overflow         (szo)
+   || (IR[10]  && IO[17] == 0)                                       // Skip on Plus In-Out Register  (spi)
+   || (|IR[2:0] && ~&IR[2:0] && PF[IR[2:0]] == 0)                    // Skip on ZERO Program Flag     (szf)
+   || (IR[2:0] == 3'b111 && PF == 0)                                 // Skip on ZERO Program Flag all (szf)
+   || (|IR[5:3] && ~&IR[5:3] && sense_switches[6 - IR[5:3]] == 0)   // Skip on ZERO Switch addr 1-6  (szs)
+   || (IR[5:3] == 3'b111 && sense_switches == 0)                     // Skip on ZERO Switch  addr 7   (szs)
+   );
+
+// --- i_shift combinational logic ---
+// num_shift = popcount of DI[8:0] (number of high bits in encoded count field)
+wire [3:0] w_num_shift = DI[8] + DI[7] + DI[6] + DI[5] + DI[4] + DI[3] + DI[2] + DI[1] + DI[0];
+
 ///////////////////  MODULES  /////////////////////
 
 pdp1_cpu_alu_div divider(
@@ -271,26 +335,18 @@ begin
 
       i_add:                                                      /* add Y,         40,         10,         Add C(Y) to C(AC                 */
       begin
-         DIFFERENT_SIGNS = AC[17] ^ DI[17];
-
-         {CARRY, AC} = AC + DI;
-         AC = fix_zero(AC + CARRY);
-
-         /* If signs were equal before the addition and now they are not, signal overflow */
-         if (DIFFERENT_SIGNS == 0 && (DI[17] != AC[17]))
-            OV = 1;
+         // FIX: Using combinational wire logic (w_add_*) instead of blocking assignments
+         AC <= w_add_ac;
+         if (w_add_ov)
+            OV <= 1'b1;
       end
 
       i_sub:                                                      /* sub Y          42          10          Subtract C(Y) from C(AC)         */
       begin
-         DIFFERENT_SIGNS = AC[17] ^ DI[17];
-
-         {CARRY, AC} = AC + (~DI);
-         AC = fix_zero(AC + !CARRY);
-
-         /* If signs were opposite before the subtraction and now they are not, signal overflow */
-         if (DIFFERENT_SIGNS && (DI[17] == AC[17]))
-            OV = 1;
+         // FIX: Using combinational wire logic (w_sub_*) instead of blocking assignments
+         AC <= w_sub_ac;
+         if (w_sub_ov)
+            OV <= 1'b1;
       end
 
       i_idx,                                                      /* idx Y          44          10          Index (add one) C(Y) leave in Y & AC */
@@ -308,25 +364,21 @@ begin
 
       if (hw_mul_enabled)                                         /* mul Y          54      max 25          Multiply, hardware multiply enabled                       */
       begin
-         DIFFERENT_SIGNS = AC[17] ^ DI[17];
-
+         // FIX: Using wire w_mul_different_signs instead of blocking assignment
+         // w_mul_different_signs = AC[17] ^ DI[17] (defined in wire section)
          /* Negative times negative is positive, also fix zero for a 34-bit wide result */
-         if (DIFFERENT_SIGNS && (&multiply_result))
+         if (w_mul_different_signs && (&multiply_result))
             {AC, IO} <= 36'h0;
          else
-            {AC, IO} <= {DIFFERENT_SIGNS, DIFFERENT_SIGNS ? ~multiply_result : multiply_result, DIFFERENT_SIGNS};
+            {AC, IO} <= {w_mul_different_signs, w_mul_different_signs ? ~multiply_result : multiply_result, w_mul_different_signs};
 
       end
 
       else                                                        /* mus Y          54          10          Multiply step, hardware multiply disabled                 */
       begin
-         if (IO[0]) begin
-            {CARRY, AC} = AC + DI;
-            AC = fix_zero(AC + CARRY);
-         end
-
-         IO = { AC[0], IO[17:1] };
-         AC = AC >> 1;
+         // FIX: Using combinational wire logic (w_mus_*) instead of blocking assignments
+         AC <= w_mus_ac_final;
+         IO <= w_mus_io_result;
       end
 
 
@@ -335,7 +387,7 @@ begin
 
       if (hw_mul_enabled)                                         /* div Y          56      max 40          Divide, hardware division enabled                         */
       begin
-         DIFFERENT_SIGNS = AC[17] ^ DI[17];
+         // FIX: Using wire w_div_different_signs instead of blocking assignment (defined in wire section)
 
          if (abs_nosign(AC) < abs_nosign(DI))   /* Only if not overflow */
          begin
@@ -360,9 +412,9 @@ begin
       else
       /* dis instruction, hardware divide disabled */
       begin                                                       /* dis Y          56          10          Divide, hardware division disabled                        */
-         {AC, IO} = { AC[16:0], IO, AC[17] ^ 1'b1};
-         {CARRY, AC} = (IO[0] ? AC + (~DI) : AC + DI + 1'b1);
-         AC = fix_zero(AC + (CARRY ^ IO[0]));
+         // FIX: Using combinational wire logic (w_dis_*) instead of blocking assignments
+         AC <= w_dis_ac;
+         IO <= w_dis_io_shifted;
       end
 
 
@@ -449,25 +501,12 @@ begin
       */
       i_skp:
       begin
-         SKIP_FLAG = (
-               (instruction[6]   && AC == 0)                                    /* Skip on ZERO Accumulator      (sza) */
-            || (instruction[7]   && AC[17] == 0)                                /* Skip on Plus Accumulator      (spa) */
-            || (instruction[8]   && AC[17] == 1)                                /* Skip on Minus Accumulator     (sma) */
-            || (instruction[9]   && OV == 0)                                    /* Skip on ZERO Overflow         (szo) */
-            || (instruction[10]  && IO[17] == 0)                                /* Skip on Plus In-Out Register  (spi) */
-
-            || (|instruction[2:0] && ~&instruction[2:0] && PF[instruction[2:0]] == 0)         /* Skip on ZERO Program Flag     (szf) */
-            || (instruction[2:0] == 3'b111 && PF == 0)                          /* Skip on ZERO Program Flag all (szf) */
-
-            || (|instruction[5:3] && ~&instruction[5:3] && sense_switches[6 - instruction[5:3]] == 0)  /* Skip on ZERO Switch addr 1-6   (szs) */
-            || (instruction[5:3] == 3'b111 && sense_switches == 0)                          /* Skip on ZERO Switch  addr 7   (szs) */
-            );
-
-         if (instruction[12] ^ SKIP_FLAG) /* If 6-th bit (DEC notation) is 1 and skip flag 0, or vice-versa */
+         // FIX: Using combinational wire w_skip_flag instead of blocking assignment
+         if (instruction[12] ^ w_skip_flag) /* If 6-th bit (DEC notation) is 1 and skip flag 0, or vice-versa */
             PC <= (PREV_IR[17:13] == i_xct) ? PREV_IR[11:0] + 1'b1 : PC + 1'b1;  /* Edge-case, if previous opcode was XCT, PC is the corresponding y + 1 */
 
          if (operand[9])
-            OV <= 0;
+            OV <= 1'b0;
 
       end
 
@@ -485,176 +524,177 @@ begin
          /* num_shift is the number of high bits in instruction word bits 9-17 (DEC notation) - encoded count */
          /* Maximum shift count is 9 (all bits set in encoded count field) */
          /* Yosys cannot synthesize variable-count for loops, so we use barrel shifter approach */
-         num_shift = DI[8] + DI[7] + DI[6] + DI[5] + DI[4] + DI[3] + DI[2] + DI[1] + DI[0];
+         // FIX: Using wire w_num_shift instead of blocking assignment (defined in wire section)
 
          /* Unrolled shift implementation - process each possible shift count */
+         /* FIX: All blocking assignments (=) converted to non-blocking (<=) */
          case (operand[17:9] & 9'o777)
 
          9'o661:  /* Rotate Accumulator Left (ral) */
-            case (num_shift)
-               4'd1: AC = {AC[16:0], AC[17]};
-               4'd2: AC = {AC[15:0], AC[17:16]};
-               4'd3: AC = {AC[14:0], AC[17:15]};
-               4'd4: AC = {AC[13:0], AC[17:14]};
-               4'd5: AC = {AC[12:0], AC[17:13]};
-               4'd6: AC = {AC[11:0], AC[17:12]};
-               4'd7: AC = {AC[10:0], AC[17:11]};
-               4'd8: AC = {AC[9:0], AC[17:10]};
-               4'd9: AC = {AC[8:0], AC[17:9]};
+            case (w_num_shift)
+               4'd1: AC <= {AC[16:0], AC[17]};
+               4'd2: AC <= {AC[15:0], AC[17:16]};
+               4'd3: AC <= {AC[14:0], AC[17:15]};
+               4'd4: AC <= {AC[13:0], AC[17:14]};
+               4'd5: AC <= {AC[12:0], AC[17:13]};
+               4'd6: AC <= {AC[11:0], AC[17:12]};
+               4'd7: AC <= {AC[10:0], AC[17:11]};
+               4'd8: AC <= {AC[9:0], AC[17:10]};
+               4'd9: AC <= {AC[8:0], AC[17:9]};
                default: ; /* No shift for 0 */
             endcase
 
          9'o662:  /* Rotate IO Left (ril) */
-            case (num_shift)
-               4'd1: IO = {IO[16:0], IO[17]};
-               4'd2: IO = {IO[15:0], IO[17:16]};
-               4'd3: IO = {IO[14:0], IO[17:15]};
-               4'd4: IO = {IO[13:0], IO[17:14]};
-               4'd5: IO = {IO[12:0], IO[17:13]};
-               4'd6: IO = {IO[11:0], IO[17:12]};
-               4'd7: IO = {IO[10:0], IO[17:11]};
-               4'd8: IO = {IO[9:0], IO[17:10]};
-               4'd9: IO = {IO[8:0], IO[17:9]};
+            case (w_num_shift)
+               4'd1: IO <= {IO[16:0], IO[17]};
+               4'd2: IO <= {IO[15:0], IO[17:16]};
+               4'd3: IO <= {IO[14:0], IO[17:15]};
+               4'd4: IO <= {IO[13:0], IO[17:14]};
+               4'd5: IO <= {IO[12:0], IO[17:13]};
+               4'd6: IO <= {IO[11:0], IO[17:12]};
+               4'd7: IO <= {IO[10:0], IO[17:11]};
+               4'd8: IO <= {IO[9:0], IO[17:10]};
+               4'd9: IO <= {IO[8:0], IO[17:9]};
                default: ;
             endcase
 
          9'o663:  /* Rotate AC and IO Left (rcl) - 36-bit rotate */
-            case (num_shift)
-               4'd1: {AC, IO} = {AC[16:0], IO, AC[17]};
-               4'd2: {AC, IO} = {AC[15:0], IO, AC[17:16]};
-               4'd3: {AC, IO} = {AC[14:0], IO, AC[17:15]};
-               4'd4: {AC, IO} = {AC[13:0], IO, AC[17:14]};
-               4'd5: {AC, IO} = {AC[12:0], IO, AC[17:13]};
-               4'd6: {AC, IO} = {AC[11:0], IO, AC[17:12]};
-               4'd7: {AC, IO} = {AC[10:0], IO, AC[17:11]};
-               4'd8: {AC, IO} = {AC[9:0], IO, AC[17:10]};
-               4'd9: {AC, IO} = {AC[8:0], IO, AC[17:9]};
+            case (w_num_shift)
+               4'd1: {AC, IO} <= {AC[16:0], IO, AC[17]};
+               4'd2: {AC, IO} <= {AC[15:0], IO, AC[17:16]};
+               4'd3: {AC, IO} <= {AC[14:0], IO, AC[17:15]};
+               4'd4: {AC, IO} <= {AC[13:0], IO, AC[17:14]};
+               4'd5: {AC, IO} <= {AC[12:0], IO, AC[17:13]};
+               4'd6: {AC, IO} <= {AC[11:0], IO, AC[17:12]};
+               4'd7: {AC, IO} <= {AC[10:0], IO, AC[17:11]};
+               4'd8: {AC, IO} <= {AC[9:0], IO, AC[17:10]};
+               4'd9: {AC, IO} <= {AC[8:0], IO, AC[17:9]};
                default: ;
             endcase
 
          9'o665:  /* Shift Accumulator Left (sal) - arithmetic, sign preserved */
-            case (num_shift)
-               4'd1: AC = {AC[17], AC[15:0], 1'b0};
-               4'd2: AC = {AC[17], AC[14:0], 2'b0};
-               4'd3: AC = {AC[17], AC[13:0], 3'b0};
-               4'd4: AC = {AC[17], AC[12:0], 4'b0};
-               4'd5: AC = {AC[17], AC[11:0], 5'b0};
-               4'd6: AC = {AC[17], AC[10:0], 6'b0};
-               4'd7: AC = {AC[17], AC[9:0], 7'b0};
-               4'd8: AC = {AC[17], AC[8:0], 8'b0};
-               4'd9: AC = {AC[17], AC[7:0], 9'b0};
+            case (w_num_shift)
+               4'd1: AC <= {AC[17], AC[15:0], 1'b0};
+               4'd2: AC <= {AC[17], AC[14:0], 2'b0};
+               4'd3: AC <= {AC[17], AC[13:0], 3'b0};
+               4'd4: AC <= {AC[17], AC[12:0], 4'b0};
+               4'd5: AC <= {AC[17], AC[11:0], 5'b0};
+               4'd6: AC <= {AC[17], AC[10:0], 6'b0};
+               4'd7: AC <= {AC[17], AC[9:0], 7'b0};
+               4'd8: AC <= {AC[17], AC[8:0], 8'b0};
+               4'd9: AC <= {AC[17], AC[7:0], 9'b0};
                default: ;
             endcase
 
          9'o666:  /* Shift IO Left (sil) - arithmetic */
-            case (num_shift)
-               4'd1: IO = {IO[17], IO[15:0], 1'b0};
-               4'd2: IO = {IO[17], IO[14:0], 2'b0};
-               4'd3: IO = {IO[17], IO[13:0], 3'b0};
-               4'd4: IO = {IO[17], IO[12:0], 4'b0};
-               4'd5: IO = {IO[17], IO[11:0], 5'b0};
-               4'd6: IO = {IO[17], IO[10:0], 6'b0};
-               4'd7: IO = {IO[17], IO[9:0], 7'b0};
-               4'd8: IO = {IO[17], IO[8:0], 8'b0};
-               4'd9: IO = {IO[17], IO[7:0], 9'b0};
+            case (w_num_shift)
+               4'd1: IO <= {IO[17], IO[15:0], 1'b0};
+               4'd2: IO <= {IO[17], IO[14:0], 2'b0};
+               4'd3: IO <= {IO[17], IO[13:0], 3'b0};
+               4'd4: IO <= {IO[17], IO[12:0], 4'b0};
+               4'd5: IO <= {IO[17], IO[11:0], 5'b0};
+               4'd6: IO <= {IO[17], IO[10:0], 6'b0};
+               4'd7: IO <= {IO[17], IO[9:0], 7'b0};
+               4'd8: IO <= {IO[17], IO[8:0], 8'b0};
+               4'd9: IO <= {IO[17], IO[7:0], 9'b0};
                default: ;
             endcase
 
          9'o667:  /* Shift AC and IO Left (scl) - 36-bit arithmetic */
-            case (num_shift)
-               4'd1: {AC, IO} = {AC[17], AC[15:0], IO[17:0], 1'b0};
-               4'd2: {AC, IO} = {AC[17], AC[14:0], IO[17:0], 2'b0};
-               4'd3: {AC, IO} = {AC[17], AC[13:0], IO[17:0], 3'b0};
-               4'd4: {AC, IO} = {AC[17], AC[12:0], IO[17:0], 4'b0};
-               4'd5: {AC, IO} = {AC[17], AC[11:0], IO[17:0], 5'b0};
-               4'd6: {AC, IO} = {AC[17], AC[10:0], IO[17:0], 6'b0};
-               4'd7: {AC, IO} = {AC[17], AC[9:0], IO[17:0], 7'b0};
-               4'd8: {AC, IO} = {AC[17], AC[8:0], IO[17:0], 8'b0};
-               4'd9: {AC, IO} = {AC[17], AC[7:0], IO[17:0], 9'b0};
+            case (w_num_shift)
+               4'd1: {AC, IO} <= {AC[17], AC[15:0], IO[17:0], 1'b0};
+               4'd2: {AC, IO} <= {AC[17], AC[14:0], IO[17:0], 2'b0};
+               4'd3: {AC, IO} <= {AC[17], AC[13:0], IO[17:0], 3'b0};
+               4'd4: {AC, IO} <= {AC[17], AC[12:0], IO[17:0], 4'b0};
+               4'd5: {AC, IO} <= {AC[17], AC[11:0], IO[17:0], 5'b0};
+               4'd6: {AC, IO} <= {AC[17], AC[10:0], IO[17:0], 6'b0};
+               4'd7: {AC, IO} <= {AC[17], AC[9:0], IO[17:0], 7'b0};
+               4'd8: {AC, IO} <= {AC[17], AC[8:0], IO[17:0], 8'b0};
+               4'd9: {AC, IO} <= {AC[17], AC[7:0], IO[17:0], 9'b0};
                default: ;
             endcase
 
          9'o671:  /* Rotate Accumulator Right (rar) */
-            case (num_shift)
-               4'd1: AC = {AC[0], AC[17:1]};
-               4'd2: AC = {AC[1:0], AC[17:2]};
-               4'd3: AC = {AC[2:0], AC[17:3]};
-               4'd4: AC = {AC[3:0], AC[17:4]};
-               4'd5: AC = {AC[4:0], AC[17:5]};
-               4'd6: AC = {AC[5:0], AC[17:6]};
-               4'd7: AC = {AC[6:0], AC[17:7]};
-               4'd8: AC = {AC[7:0], AC[17:8]};
-               4'd9: AC = {AC[8:0], AC[17:9]};
+            case (w_num_shift)
+               4'd1: AC <= {AC[0], AC[17:1]};
+               4'd2: AC <= {AC[1:0], AC[17:2]};
+               4'd3: AC <= {AC[2:0], AC[17:3]};
+               4'd4: AC <= {AC[3:0], AC[17:4]};
+               4'd5: AC <= {AC[4:0], AC[17:5]};
+               4'd6: AC <= {AC[5:0], AC[17:6]};
+               4'd7: AC <= {AC[6:0], AC[17:7]};
+               4'd8: AC <= {AC[7:0], AC[17:8]};
+               4'd9: AC <= {AC[8:0], AC[17:9]};
                default: ;
             endcase
 
          9'o672:  /* Rotate IO Right (rir) */
-            case (num_shift)
-               4'd1: IO = {IO[0], IO[17:1]};
-               4'd2: IO = {IO[1:0], IO[17:2]};
-               4'd3: IO = {IO[2:0], IO[17:3]};
-               4'd4: IO = {IO[3:0], IO[17:4]};
-               4'd5: IO = {IO[4:0], IO[17:5]};
-               4'd6: IO = {IO[5:0], IO[17:6]};
-               4'd7: IO = {IO[6:0], IO[17:7]};
-               4'd8: IO = {IO[7:0], IO[17:8]};
-               4'd9: IO = {IO[8:0], IO[17:9]};
+            case (w_num_shift)
+               4'd1: IO <= {IO[0], IO[17:1]};
+               4'd2: IO <= {IO[1:0], IO[17:2]};
+               4'd3: IO <= {IO[2:0], IO[17:3]};
+               4'd4: IO <= {IO[3:0], IO[17:4]};
+               4'd5: IO <= {IO[4:0], IO[17:5]};
+               4'd6: IO <= {IO[5:0], IO[17:6]};
+               4'd7: IO <= {IO[6:0], IO[17:7]};
+               4'd8: IO <= {IO[7:0], IO[17:8]};
+               4'd9: IO <= {IO[8:0], IO[17:9]};
                default: ;
             endcase
 
          9'o673:  /* Rotate AC and IO Right (rcr) - 36-bit rotate */
-            case (num_shift)
-               4'd1: {AC, IO} = {IO[0], AC, IO[17:1]};
-               4'd2: {AC, IO} = {IO[1:0], AC, IO[17:2]};
-               4'd3: {AC, IO} = {IO[2:0], AC, IO[17:3]};
-               4'd4: {AC, IO} = {IO[3:0], AC, IO[17:4]};
-               4'd5: {AC, IO} = {IO[4:0], AC, IO[17:5]};
-               4'd6: {AC, IO} = {IO[5:0], AC, IO[17:6]};
-               4'd7: {AC, IO} = {IO[6:0], AC, IO[17:7]};
-               4'd8: {AC, IO} = {IO[7:0], AC, IO[17:8]};
-               4'd9: {AC, IO} = {IO[8:0], AC, IO[17:9]};
+            case (w_num_shift)
+               4'd1: {AC, IO} <= {IO[0], AC, IO[17:1]};
+               4'd2: {AC, IO} <= {IO[1:0], AC, IO[17:2]};
+               4'd3: {AC, IO} <= {IO[2:0], AC, IO[17:3]};
+               4'd4: {AC, IO} <= {IO[3:0], AC, IO[17:4]};
+               4'd5: {AC, IO} <= {IO[4:0], AC, IO[17:5]};
+               4'd6: {AC, IO} <= {IO[5:0], AC, IO[17:6]};
+               4'd7: {AC, IO} <= {IO[6:0], AC, IO[17:7]};
+               4'd8: {AC, IO} <= {IO[7:0], AC, IO[17:8]};
+               4'd9: {AC, IO} <= {IO[8:0], AC, IO[17:9]};
                default: ;
             endcase
 
          9'o675:  /* Shift Accumulator Right (sar) - arithmetic */
-            case (num_shift)
-               4'd1: AC = {AC[17], AC[17:1]};
-               4'd2: AC = {{2{AC[17]}}, AC[17:2]};
-               4'd3: AC = {{3{AC[17]}}, AC[17:3]};
-               4'd4: AC = {{4{AC[17]}}, AC[17:4]};
-               4'd5: AC = {{5{AC[17]}}, AC[17:5]};
-               4'd6: AC = {{6{AC[17]}}, AC[17:6]};
-               4'd7: AC = {{7{AC[17]}}, AC[17:7]};
-               4'd8: AC = {{8{AC[17]}}, AC[17:8]};
-               4'd9: AC = {{9{AC[17]}}, AC[17:9]};
+            case (w_num_shift)
+               4'd1: AC <= {AC[17], AC[17:1]};
+               4'd2: AC <= {{2{AC[17]}}, AC[17:2]};
+               4'd3: AC <= {{3{AC[17]}}, AC[17:3]};
+               4'd4: AC <= {{4{AC[17]}}, AC[17:4]};
+               4'd5: AC <= {{5{AC[17]}}, AC[17:5]};
+               4'd6: AC <= {{6{AC[17]}}, AC[17:6]};
+               4'd7: AC <= {{7{AC[17]}}, AC[17:7]};
+               4'd8: AC <= {{8{AC[17]}}, AC[17:8]};
+               4'd9: AC <= {{9{AC[17]}}, AC[17:9]};
                default: ;
             endcase
 
          9'o676:  /* Shift IO Right (sir) - arithmetic */
-            case (num_shift)
-               4'd1: IO = {IO[17], IO[17:1]};
-               4'd2: IO = {{2{IO[17]}}, IO[17:2]};
-               4'd3: IO = {{3{IO[17]}}, IO[17:3]};
-               4'd4: IO = {{4{IO[17]}}, IO[17:4]};
-               4'd5: IO = {{5{IO[17]}}, IO[17:5]};
-               4'd6: IO = {{6{IO[17]}}, IO[17:6]};
-               4'd7: IO = {{7{IO[17]}}, IO[17:7]};
-               4'd8: IO = {{8{IO[17]}}, IO[17:8]};
-               4'd9: IO = {{9{IO[17]}}, IO[17:9]};
+            case (w_num_shift)
+               4'd1: IO <= {IO[17], IO[17:1]};
+               4'd2: IO <= {{2{IO[17]}}, IO[17:2]};
+               4'd3: IO <= {{3{IO[17]}}, IO[17:3]};
+               4'd4: IO <= {{4{IO[17]}}, IO[17:4]};
+               4'd5: IO <= {{5{IO[17]}}, IO[17:5]};
+               4'd6: IO <= {{6{IO[17]}}, IO[17:6]};
+               4'd7: IO <= {{7{IO[17]}}, IO[17:7]};
+               4'd8: IO <= {{8{IO[17]}}, IO[17:8]};
+               4'd9: IO <= {{9{IO[17]}}, IO[17:9]};
                default: ;
             endcase
 
          9'o677:  /* Shift AC and IO Right (scr) - 36-bit arithmetic */
-            case (num_shift)
-               4'd1: {AC, IO} = {AC[17], AC, IO[17:1]};
-               4'd2: {AC, IO} = {{2{AC[17]}}, AC, IO[17:2]};
-               4'd3: {AC, IO} = {{3{AC[17]}}, AC, IO[17:3]};
-               4'd4: {AC, IO} = {{4{AC[17]}}, AC, IO[17:4]};
-               4'd5: {AC, IO} = {{5{AC[17]}}, AC, IO[17:5]};
-               4'd6: {AC, IO} = {{6{AC[17]}}, AC, IO[17:6]};
-               4'd7: {AC, IO} = {{7{AC[17]}}, AC, IO[17:7]};
-               4'd8: {AC, IO} = {{8{AC[17]}}, AC, IO[17:8]};
-               4'd9: {AC, IO} = {{9{AC[17]}}, AC, IO[17:9]};
+            case (w_num_shift)
+               4'd1: {AC, IO} <= {AC[17], AC, IO[17:1]};
+               4'd2: {AC, IO} <= {{2{AC[17]}}, AC, IO[17:2]};
+               4'd3: {AC, IO} <= {{3{AC[17]}}, AC, IO[17:3]};
+               4'd4: {AC, IO} <= {{4{AC[17]}}, AC, IO[17:4]};
+               4'd5: {AC, IO} <= {{5{AC[17]}}, AC, IO[17:5]};
+               4'd6: {AC, IO} <= {{6{AC[17]}}, AC, IO[17:6]};
+               4'd7: {AC, IO} <= {{7{AC[17]}}, AC, IO[17:7]};
+               4'd8: {AC, IO} <= {{8{AC[17]}}, AC, IO[17:8]};
+               4'd9: {AC, IO} <= {{9{AC[17]}}, AC, IO[17:9]};
                default: ;
             endcase
 
@@ -698,11 +738,12 @@ begin
 
          /* PF select, 1-7. 1-6 sets/clears individual flags, 7 does them all.
             PF[0] exists simply to avoid handling it as a special case, it is not used  */
+         // FIX: blocking -> non-blocking assignments for PF
 
          if (operand[2:0] == 3'd7)                             /* Set and clear program flag (clf / stf) 5 usec */
-            PF = operand[3] ? 6'b111111 : 6'b000000 ;          /* Address 07 clears / sets all program flags */
+            PF <= operand[3] ? 6'b111111 : 6'b000000 ;         /* Address 07 clears / sets all program flags */
          else
-            PF[operand[2:0]] = operand[3];
+            PF[operand[2:0]] <= operand[3];
 
       end
 
@@ -772,7 +813,7 @@ always @(posedge clk) begin
 
    /* Typewriter positive edge transition sets these registers, i.e. on every char received */
    if (~old_typewriter_strobe_in && typewriter_strobe_in) begin
-      PF[1] = 1'b1;
+      PF[1] <= 1'b1;  // FIX: blocking -> non-blocking (Verilog good practice)
       IOSTA[3] <= 1'b1;
       typewriter_buffer <= typewriter_char_in;
    end
