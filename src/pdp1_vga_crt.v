@@ -689,10 +689,10 @@ always @(posedge i_clk) begin
     r_pixel_found = 1'b0;               // Default: no pixel found
 
     for (i = 8; i > 0; i = i - 1'b1) begin
-        // Check taps1
+        // Check taps1 - use w_pdp1_y (with CRT offset) for PDP-1 coordinate comparison
         if (!r_pixel_found &&
-            w_current_y < w_taps1[i*DATA_WIDTH-1 -: 10] &&
-            w_taps1[i*DATA_WIDTH-1 -: 10] - w_current_y <= 3'd7 &&
+            w_pdp1_y < w_taps1[i*DATA_WIDTH-1 -: 10] &&
+            w_taps1[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
             w_taps1[i*DATA_WIDTH-21 -: 8] > 0) begin
 
             r_rowbuff_wraddr <= {w_taps1[i*DATA_WIDTH-8 -: 3], w_taps1[i*DATA_WIDTH-11 -: 10]};
@@ -701,8 +701,8 @@ always @(posedge i_clk) begin
         end
         // Check taps2
         else if (!r_pixel_found &&
-                 w_current_y < w_taps2[i*DATA_WIDTH-1 -: 10] &&
-                 w_taps2[i*DATA_WIDTH-1 -: 10] - w_current_y <= 3'd7 &&
+                 w_pdp1_y < w_taps2[i*DATA_WIDTH-1 -: 10] &&
+                 w_taps2[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
                  w_taps2[i*DATA_WIDTH-21 -: 8] > 0) begin
 
             r_rowbuff_wraddr <= {w_taps2[i*DATA_WIDTH-8 -: 3], w_taps2[i*DATA_WIDTH-11 -: 10]};
@@ -711,8 +711,8 @@ always @(posedge i_clk) begin
         end
         // Check taps3
         else if (!r_pixel_found &&
-                 w_current_y < w_taps3[i*DATA_WIDTH-1 -: 10] &&
-                 w_taps3[i*DATA_WIDTH-1 -: 10] - w_current_y <= 3'd7 &&
+                 w_pdp1_y < w_taps3[i*DATA_WIDTH-1 -: 10] &&
+                 w_taps3[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
                  w_taps3[i*DATA_WIDTH-21 -: 8] > 0) begin
 
             r_rowbuff_wraddr <= {w_taps3[i*DATA_WIDTH-8 -: 3], w_taps3[i*DATA_WIDTH-11 -: 10]};
@@ -721,8 +721,8 @@ always @(posedge i_clk) begin
         end
         // Check taps4
         else if (!r_pixel_found &&
-                 w_current_y < w_taps4[i*DATA_WIDTH-1 -: 10] &&
-                 w_taps4[i*DATA_WIDTH-1 -: 10] - w_current_y <= 3'd7 &&
+                 w_pdp1_y < w_taps4[i*DATA_WIDTH-1 -: 10] &&
+                 w_taps4[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
                  w_taps4[i*DATA_WIDTH-21 -: 8] > 0) begin
 
             r_rowbuff_wraddr <= {w_taps4[i*DATA_WIDTH-8 -: 3], w_taps4[i*DATA_WIDTH-11 -: 10]};
