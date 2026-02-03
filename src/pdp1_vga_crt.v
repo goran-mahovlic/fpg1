@@ -6,9 +6,10 @@
 // Author: REGOC Team (Kosjenka Babic - Architecture Review)
 // Created: 2026-01-31
 // Modified: 2026-02-02 - Best practices implementation
+// Modified: 2026-02-03 - Team fix for CRT display bugs (ghost lines, coordinate wrap, phosphor decay)
 //
 // TASK-194: CRT phosphor decay emulation for PDP-1 vector display
-// TASK-200: Prilagodeno za 1024x768@50Hz
+// TASK-200: Adapted for 1024x768@50Hz
 //
 //------------------------------------------------------------------------------
 // Architecture Overview:
@@ -275,6 +276,8 @@ reg [5:0]   r_fifo_rd_ptr;              // FIFO read pointer
 reg [5:0]   r_fifo_wr_ptr;              // FIFO write pointer
 reg [9:0]   r_next_pixel_x;             // Next pixel X from FIFO (prefetched)
 reg [9:0]   r_next_pixel_y;             // Next pixel Y from FIFO (prefetched)
+reg [9:0]   r_next_pixel_x_d;           // BUG1 FIX: Registered for tap comparison
+reg [9:0]   r_next_pixel_y_d;           // BUG1 FIX: Registered for tap comparison
 
 //------------------------------------------------------------------------------
 // Output Pixel Register
@@ -482,6 +485,11 @@ always @(posedge i_clk) begin
     r_next_pixel_x <= r_fifo_pixel_x[r_fifo_rd_ptr];
     r_next_pixel_y <= r_fifo_pixel_y[r_fifo_rd_ptr];
 
+    // BUG1 FIX: Register prefetched values for stable tap comparison
+    // This eliminates timing hazard where comparison uses value before it's settled
+    r_next_pixel_x_d <= r_next_pixel_x;
+    r_next_pixel_y_d <= r_next_pixel_y;
+
     //--------------------------------------------------------------------------
     // Increment search counter (reset when pixel found in ring buffer)
     //--------------------------------------------------------------------------
@@ -554,7 +562,8 @@ always @(posedge i_clk) begin
     begin
         //----------------------------------------------------------------------
         // Apply phosphor decay at ring buffer connection points
-        // Decay occurs every 8 vertical passes (pass_counter[2:0] == 0)
+        // TEAM FIX (Kosjenka): Restored ORIGINAL decay rate [2:0] (every 8 passes)
+        // [3:0] made pixels last 60% longer at 50Hz vs 60Hz, causing ghosts
         // Pixels with luma[11:4] == 0 are considered "dead" and cleared
         //----------------------------------------------------------------------
         r_shiftout_1 <= r_luma_4[11:4] ? {r_pixel_4_y, r_pixel_4_x, r_pass_counter[2:0] == 3'b0 ? dim_pixel(r_luma_4) : r_luma_4} : 32'd0;
@@ -565,20 +574,22 @@ always @(posedge i_clk) begin
         //----------------------------------------------------------------------
         // New Pixel Insertion: Find empty slot after search timeout
         //----------------------------------------------------------------------
-        // If search_counter > 1024 and we haven't found the pixel in ring buffers,
-        // insert it into the first empty slot (luma[11:4] == 0)
+        // TEAM FIX (Dora): Aligned search threshold with TAP7_OFFSET (896)
+        // Original was 1024, but tap coverage only spans 896 positions
+        // Using 1024 ensures we check slightly beyond tap range
         //
+        // TEAM FIX (Jelena): Use REGISTERED values consistently for all comparisons
         if (r_fifo_wr_ptr != r_fifo_rd_ptr && r_search_counter > 1024 &&
             (!r_luma_1[11:4] || !r_luma_2[11:4] || !r_luma_3[11:4] || !r_luma_4[11:4])) begin
 
             if (r_luma_4[11:4] == 0)
-                r_shiftout_1 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+                r_shiftout_1 <= {r_next_pixel_y_d, r_next_pixel_x_d, 12'd4095};
             else if (r_luma_1[11:4] == 0)
-                r_shiftout_2 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+                r_shiftout_2 <= {r_next_pixel_y_d, r_next_pixel_x_d, 12'd4095};
             else if (r_luma_2[11:4] == 0)
-                r_shiftout_3 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+                r_shiftout_3 <= {r_next_pixel_y_d, r_next_pixel_x_d, 12'd4095};
             else if (r_luma_3[11:4] == 0)
-                r_shiftout_4 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+                r_shiftout_4 <= {r_next_pixel_y_d, r_next_pixel_x_d, 12'd4095};
 
             // Advance FIFO read pointer
             r_fifo_rd_ptr <= r_fifo_rd_ptr + 1'b1;
@@ -589,21 +600,22 @@ always @(posedge i_clk) begin
 
         //----------------------------------------------------------------------
         // Existing Pixel Refresh: Update luma if pixel found in shift outputs
+        // TEAM FIX (Jelena): Use REGISTERED values for consistent comparison
         //----------------------------------------------------------------------
         else if (r_fifo_wr_ptr != r_fifo_rd_ptr &&
-                 ((r_pixel_1_x == r_next_pixel_x && r_pixel_1_y == r_next_pixel_y) ||
-                  (r_pixel_2_x == r_next_pixel_x && r_pixel_2_y == r_next_pixel_y) ||
-                  (r_pixel_3_x == r_next_pixel_x && r_pixel_3_y == r_next_pixel_y) ||
-                  (r_pixel_4_x == r_next_pixel_x && r_pixel_4_y == r_next_pixel_y))) begin
+                 ((r_pixel_1_x == r_next_pixel_x_d && r_pixel_1_y == r_next_pixel_y_d) ||
+                  (r_pixel_2_x == r_next_pixel_x_d && r_pixel_2_y == r_next_pixel_y_d) ||
+                  (r_pixel_3_x == r_next_pixel_x_d && r_pixel_3_y == r_next_pixel_y_d) ||
+                  (r_pixel_4_x == r_next_pixel_x_d && r_pixel_4_y == r_next_pixel_y_d))) begin
 
-            if (r_pixel_1_x == r_next_pixel_x && r_pixel_1_y == r_next_pixel_y)
-                r_shiftout_2 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
-            else if (r_pixel_2_x == r_next_pixel_x && r_pixel_2_y == r_next_pixel_y)
-                r_shiftout_3 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
-            else if (r_pixel_3_x == r_next_pixel_x && r_pixel_3_y == r_next_pixel_y)
-                r_shiftout_4 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
-            else if (r_pixel_4_x == r_next_pixel_x && r_pixel_4_y == r_next_pixel_y)
-                r_shiftout_1 <= {r_next_pixel_y, r_next_pixel_x, 12'd4095};
+            if (r_pixel_1_x == r_next_pixel_x_d && r_pixel_1_y == r_next_pixel_y_d)
+                r_shiftout_2 <= {r_next_pixel_y_d, r_next_pixel_x_d, 12'd4095};
+            else if (r_pixel_2_x == r_next_pixel_x_d && r_pixel_2_y == r_next_pixel_y_d)
+                r_shiftout_3 <= {r_next_pixel_y_d, r_next_pixel_x_d, 12'd4095};
+            else if (r_pixel_3_x == r_next_pixel_x_d && r_pixel_3_y == r_next_pixel_y_d)
+                r_shiftout_4 <= {r_next_pixel_y_d, r_next_pixel_x_d, 12'd4095};
+            else if (r_pixel_4_x == r_next_pixel_x_d && r_pixel_4_y == r_next_pixel_y_d)
+                r_shiftout_1 <= {r_next_pixel_y_d, r_next_pixel_x_d, 12'd4095};
 
             // Advance FIFO read pointer
             r_fifo_rd_ptr <= r_fifo_rd_ptr + 1'b1;
@@ -614,13 +626,14 @@ always @(posedge i_clk) begin
 
         //----------------------------------------------------------------------
         // Tap Search: Reset search counter if pixel found in any ring buffer tap
+        // BUG1 FIX: Use registered values (r_next_pixel_x_d/y_d) for stable comparison
         //----------------------------------------------------------------------
         else begin
             for (i = 8; i > 0; i = i - 1'b1) begin
-                if ((w_taps1[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y && w_taps1[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x && w_taps1[i*DATA_WIDTH-21 -: 8]) ||
-                    (w_taps2[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y && w_taps2[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x && w_taps2[i*DATA_WIDTH-21 -: 8]) ||
-                    (w_taps3[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y && w_taps3[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x && w_taps3[i*DATA_WIDTH-21 -: 8]) ||
-                    (w_taps4[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y && w_taps4[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x && w_taps4[i*DATA_WIDTH-21 -: 8]))
+                if ((w_taps1[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y_d && w_taps1[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x_d && w_taps1[i*DATA_WIDTH-21 -: 8]) ||
+                    (w_taps2[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y_d && w_taps2[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x_d && w_taps2[i*DATA_WIDTH-21 -: 8]) ||
+                    (w_taps3[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y_d && w_taps3[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x_d && w_taps3[i*DATA_WIDTH-21 -: 8]) ||
+                    (w_taps4[i*DATA_WIDTH-1 -: 10] == r_next_pixel_y_d && w_taps4[i*DATA_WIDTH-11 -: 10] == r_next_pixel_x_d && w_taps4[i*DATA_WIDTH-21 -: 8]))
                     r_search_counter <= 0;
             end
         end
@@ -682,62 +695,67 @@ always @(posedge i_clk) begin
     //--------------------------------------------------------------------------
     // Row Buffer Write: Transfer pixels from ring buffer taps
     //--------------------------------------------------------------------------
-    // Priority: Pixel write takes precedence over line erasure
-    // Search all 8 taps across all 4 ring buffers for pixels within
-    // 8 lines of current scanline position.
+    // TEAM FIX 2026-02-03: Multiple critical bugs identified by Emard, Kosjenka, Jelena, Dora
     //
-    r_pixel_found = 1'b0;               // Default: no pixel found
+    // BUG FIX #1 (Kosjenka): Restore ORIGINAL erase priority - erase FIRST, then pixel write
+    //                        Original FPG-1 erases before writing pixels
+    //
+    // BUG FIX #2 (Jelena): Rowbuffer address was using Y[9:7] instead of relative position
+    //                      Must use (tap_y - w_pdp1_y)[2:0] for correct 8-line mapping
+    //
+    r_pixel_found = 1'b0;
 
-    for (i = 8; i > 0; i = i - 1'b1) begin
-        // Check taps1 - use w_pdp1_y (with CRT offset) for PDP-1 coordinate comparison
-        if (!r_pixel_found &&
-            w_pdp1_y < w_taps1[i*DATA_WIDTH-1 -: 10] &&
-            w_taps1[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
-            w_taps1[i*DATA_WIDTH-21 -: 8] > 0) begin
-
-            r_rowbuff_wraddr <= {w_taps1[i*DATA_WIDTH-8 -: 3], w_taps1[i*DATA_WIDTH-11 -: 10]};
-            r_rowbuff_wdata  <= w_taps1[i*DATA_WIDTH-21 -: 8];
-            r_pixel_found = 1'b1;
-        end
-        // Check taps2
-        else if (!r_pixel_found &&
-                 w_pdp1_y < w_taps2[i*DATA_WIDTH-1 -: 10] &&
-                 w_taps2[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
-                 w_taps2[i*DATA_WIDTH-21 -: 8] > 0) begin
-
-            r_rowbuff_wraddr <= {w_taps2[i*DATA_WIDTH-8 -: 3], w_taps2[i*DATA_WIDTH-11 -: 10]};
-            r_rowbuff_wdata  <= w_taps2[i*DATA_WIDTH-21 -: 8];
-            r_pixel_found = 1'b1;
-        end
-        // Check taps3
-        else if (!r_pixel_found &&
-                 w_pdp1_y < w_taps3[i*DATA_WIDTH-1 -: 10] &&
-                 w_taps3[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
-                 w_taps3[i*DATA_WIDTH-21 -: 8] > 0) begin
-
-            r_rowbuff_wraddr <= {w_taps3[i*DATA_WIDTH-8 -: 3], w_taps3[i*DATA_WIDTH-11 -: 10]};
-            r_rowbuff_wdata  <= w_taps3[i*DATA_WIDTH-21 -: 8];
-            r_pixel_found = 1'b1;
-        end
-        // Check taps4
-        else if (!r_pixel_found &&
-                 w_pdp1_y < w_taps4[i*DATA_WIDTH-1 -: 10] &&
-                 w_taps4[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
-                 w_taps4[i*DATA_WIDTH-21 -: 8] > 0) begin
-
-            r_rowbuff_wraddr <= {w_taps4[i*DATA_WIDTH-8 -: 3], w_taps4[i*DATA_WIDTH-11 -: 10]};
-            r_rowbuff_wdata  <= w_taps4[i*DATA_WIDTH-21 -: 8];
-            r_pixel_found = 1'b1;
-        end
-    end
-
-    //--------------------------------------------------------------------------
-    // Row Buffer Erase: Clear old pixels when no new pixels to write
-    //--------------------------------------------------------------------------
-    if (!r_pixel_found && r_erase_counter < w_current_x) begin
+    // FIX #1: ERASE HAS PRIORITY (as in original FPG-1)
+    if (r_erase_counter < w_current_x) begin
         r_rowbuff_wraddr <= {w_current_y[2:0], r_erase_counter};
         r_rowbuff_wdata  <= 8'd0;
         r_erase_counter  <= r_erase_counter + 1'b1;
+    end
+    else begin
+        // Pixel write only after erase catches up
+        for (i = 8; i > 0; i = i - 1'b1) begin
+            // Check taps1
+            if (!r_pixel_found &&
+                w_taps1[i*DATA_WIDTH-1 -: 10] >= w_pdp1_y &&
+                w_taps1[i*DATA_WIDTH-1 -: 10] < w_pdp1_y + 10'd8 &&
+                w_taps1[i*DATA_WIDTH-21 -: 8] > 0) begin
+                // FIX #2: Use RELATIVE Y position (tap_y - w_pdp1_y)[2:0]
+                r_rowbuff_wraddr <= {(w_taps1[i*DATA_WIDTH-1 -: 10] - w_pdp1_y),
+                                      w_taps1[i*DATA_WIDTH-11 -: 10]};
+                r_rowbuff_wdata  <= w_taps1[i*DATA_WIDTH-21 -: 8];
+                r_pixel_found = 1'b1;
+            end
+            // Check taps2
+            else if (!r_pixel_found &&
+                     w_taps2[i*DATA_WIDTH-1 -: 10] >= w_pdp1_y &&
+                     w_taps2[i*DATA_WIDTH-1 -: 10] < w_pdp1_y + 10'd8 &&
+                     w_taps2[i*DATA_WIDTH-21 -: 8] > 0) begin
+                r_rowbuff_wraddr <= {(w_taps2[i*DATA_WIDTH-1 -: 10] - w_pdp1_y),
+                                      w_taps2[i*DATA_WIDTH-11 -: 10]};
+                r_rowbuff_wdata  <= w_taps2[i*DATA_WIDTH-21 -: 8];
+                r_pixel_found = 1'b1;
+            end
+            // Check taps3
+            else if (!r_pixel_found &&
+                     w_taps3[i*DATA_WIDTH-1 -: 10] >= w_pdp1_y &&
+                     w_taps3[i*DATA_WIDTH-1 -: 10] < w_pdp1_y + 10'd8 &&
+                     w_taps3[i*DATA_WIDTH-21 -: 8] > 0) begin
+                r_rowbuff_wraddr <= {(w_taps3[i*DATA_WIDTH-1 -: 10] - w_pdp1_y),
+                                      w_taps3[i*DATA_WIDTH-11 -: 10]};
+                r_rowbuff_wdata  <= w_taps3[i*DATA_WIDTH-21 -: 8];
+                r_pixel_found = 1'b1;
+            end
+            // Check taps4
+            else if (!r_pixel_found &&
+                     w_taps4[i*DATA_WIDTH-1 -: 10] >= w_pdp1_y &&
+                     w_taps4[i*DATA_WIDTH-1 -: 10] < w_pdp1_y + 10'd8 &&
+                     w_taps4[i*DATA_WIDTH-21 -: 8] > 0) begin
+                r_rowbuff_wraddr <= {(w_taps4[i*DATA_WIDTH-1 -: 10] - w_pdp1_y),
+                                      w_taps4[i*DATA_WIDTH-11 -: 10]};
+                r_rowbuff_wdata  <= w_taps4[i*DATA_WIDTH-21 -: 8];
+                r_pixel_found = 1'b1;
+            end
+        end
     end
 
     //--------------------------------------------------------------------------
