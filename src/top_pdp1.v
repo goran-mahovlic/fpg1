@@ -427,7 +427,7 @@ module top_pdp1
 
     // Test word and address switches (active-high)
     wire [17:0] w_test_word    = 18'b0;
-    wire [17:0] w_test_address = 18'o100;  // Start address: octal 100 (Snowflake entry)
+    wire [17:0] w_test_address = 18'o4;    // Start address: octal 4 (Spacewar 4.1 entry point)
 
     // =========================================================================
     // CDC: DIP SWITCH SYNCHRONIZATION (External -> clk_cpu domain)
@@ -531,7 +531,7 @@ module top_pdp1
         .tape_rcv_word          (18'b0),
 
         // Start address
-        .start_address          (12'o100),          // Snowflake entry point
+        .start_address          (12'o4),            // Spacewar 4.1 entry point
 
         // Configuration
         .hw_mul_enabled         (1'b1),             // Enable hardware multiply/divide

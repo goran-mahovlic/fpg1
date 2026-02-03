@@ -286,6 +286,7 @@ reg [15:0]  r_pixel_out;                // Blurred pixel intensity for output
 //------------------------------------------------------------------------------
 (* ASYNC_REG = "TRUE" *) reg r_pixel_valid_meta;    // Metastability stage
 (* ASYNC_REG = "TRUE" *) reg r_pixel_valid_sync;    // Synchronized stage
+reg         r_pixel_valid_sync_d;       // Delayed sync for proper edge detection
 reg         r_pixel_strobe;             // Detected falling edge (pixel ready)
 
 //------------------------------------------------------------------------------
@@ -775,14 +776,17 @@ always @(posedge i_clk) begin
     //--------------------------------------------------------------------------
     // Two-stage synchronizer to handle asynchronous pixel_valid from PDP-1
     // ASYNC_REG attribute ensures proper placement for metastability handling
-    r_pixel_valid_sync <= r_pixel_valid_meta;
     r_pixel_valid_meta <= i_pixel_valid;
+    r_pixel_valid_sync <= r_pixel_valid_meta;
 
     //--------------------------------------------------------------------------
     // Falling Edge Detection: Generate strobe when pixel data is ready
     //--------------------------------------------------------------------------
-    // Pixel is captured on falling edge of pixel_valid signal
-    r_pixel_strobe <= r_pixel_valid_sync & ~r_pixel_valid_meta;
+    // CDC FIX: Use delayed sync signal for edge detection, NOT metastable!
+    // Old (WRONG): r_pixel_valid_sync & ~r_pixel_valid_meta (compares with metastable)
+    // New (CORRECT): r_pixel_valid_sync & ~r_pixel_valid_sync_d (both are stable)
+    r_pixel_valid_sync_d <= r_pixel_valid_sync;
+    r_pixel_strobe <= r_pixel_valid_sync & ~r_pixel_valid_sync_d;
 end
 
 endmodule
