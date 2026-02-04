@@ -695,25 +695,13 @@ always @(posedge i_clk) begin
     //--------------------------------------------------------------------------
     // Row Buffer Write: Transfer pixels from ring buffer taps
     //--------------------------------------------------------------------------
-    // TEAM FIX 2026-02-03: Multiple critical bugs identified by Emard, Kosjenka, Jelena, Dora
-    //
-    // BUG FIX #1 (Kosjenka): Restore ORIGINAL erase priority - erase FIRST, then pixel write
-    //                        Original FPG-1 erases before writing pixels
-    //
-    // BUG FIX #2 (Jelena): Rowbuffer address was using Y[9:7] instead of relative position
-    //                      Must use (tap_y - w_pdp1_y)[2:0] for correct 8-line mapping
+    // FIX 2026-02-04 (Emard): Pixel write has priority over erase
+    // Previous fix incorrectly gave erase priority, blocking pixel writes
     //
     r_pixel_found = 1'b0;
 
-    // FIX #1: ERASE HAS PRIORITY (as in original FPG-1)
-    if (r_erase_counter < w_current_x) begin
-        r_rowbuff_wraddr <= {w_current_y[2:0], r_erase_counter};
-        r_rowbuff_wdata  <= 8'd0;
-        r_erase_counter  <= r_erase_counter + 1'b1;
-    end
-    else begin
-        // Pixel write only after erase catches up
-        for (i = 8; i > 0; i = i - 1'b1) begin
+    // PIXEL WRITE HAS PRIORITY - check taps first
+    for (i = 8; i > 0; i = i - 1'b1) begin
             // Check taps1
             if (!r_pixel_found &&
                 w_taps1[i*DATA_WIDTH-1 -: 10] >= w_pdp1_y &&
@@ -755,7 +743,13 @@ always @(posedge i_clk) begin
                 r_rowbuff_wdata  <= w_taps4[i*DATA_WIDTH-21 -: 8];
                 r_pixel_found = 1'b1;
             end
-        end
+    end
+
+    // Erase ONLY if no pixel was written (pixel write has priority)
+    if (!r_pixel_found && r_erase_counter < w_current_x) begin
+        r_rowbuff_wraddr <= {w_current_y[2:0], r_erase_counter};
+        r_rowbuff_wdata  <= 8'd0;
+        r_erase_counter  <= r_erase_counter + 1'b1;
     end
 
     //--------------------------------------------------------------------------
