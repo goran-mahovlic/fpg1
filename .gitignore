@@ -18,7 +18,7 @@ Thumbs.db
 *.tmp
 *.bak
 fpg1/
-fpg1_partial_emard/
+# fpg1_partial_emard/ - NEEDED for build (fake_differential.v)
 # Internal reports
 TASK-*.md
 
