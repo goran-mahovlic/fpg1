@@ -434,13 +434,13 @@ begin
          display_crt:
          begin
             pixel_shift_out <= 1'b1;
-            pixel_brightness <= instruction[8:6];  // FIX: Brightness iz IOT instrukcije (bits 8:6), NE iz IO registra
-            // FIX: Koordinate IDENTIČNO originalu - puni 10-bit (0-1023)
-            // Skaliranje za 512x512 display se radi u CRT modulu
-            // PDP-1 generira 10-bit signed (-512 do +511)
-            // Original: IO[17:8] + 512 = 0-1023 za 1024x1024 display
-            pixel_x_latched <= IO[17:8] + 10'd512;  // 0-1023 (kao original)
-            pixel_y_latched <= AC[17:8] + 10'd512;  // 0-1023 (kao original)
+            pixel_brightness <= instruction[8:6];  // FIX: Brightness from IOT instruction (bits 8:6), NOT from IO register - REGOC team
+            // FIX: Coordinates IDENTICAL to original - full 10-bit (0-1023)
+            // Scaling for 512x512 display is done in CRT module
+            // PDP-1 generates 10-bit signed (-512 to +511)
+            // Original: IO[17:8] + 512 = 0-1023 for 1024x1024 display
+            pixel_x_latched <= IO[17:8] + 10'd512;  // 0-1023 (as original)
+            pixel_y_latched <= AC[17:8] + 10'd512;  // 0-1023 (as original)
             // TASK-PIXEL-DEBUG: Increment pixel counter on each pixel output
             debug_pixel_count <= debug_pixel_count + 1'b1;
          end
@@ -863,6 +863,9 @@ always @(posedge clk) begin
 
                      cpu_state <= (MEM_BUFF[12] == 1'b1) ? read_data_bus - 2'd2: cpu_state + 1'b1;
                   end
+               // Non-memory instructions: continue to next state
+               // Added by Jelena Kovacevic for HDL best practices compliance
+               default: ;  // No action needed, cpu_state increments normally
             endcase
 
          execute:
@@ -899,6 +902,9 @@ always @(posedge clk) begin
             case (IR[17:13])
                i_dac, i_dap, i_dip, i_dio, i_dzm, i_idx, i_cal, i_jda, i_isp:
                   WRITE_ENABLE <= 1'b1;
+               // Non-memory-write instructions: no action needed
+               // Added by Jelena Kovacevic for HDL best practices compliance
+               default: ;
             endcase
 
          cleanup:
@@ -912,6 +918,11 @@ always @(posedge clk) begin
                // Debug: Count instructions executed
                debug_instr_count <= debug_instr_count + 1'b1;
             end
+
+         // Safe state recovery: return to initial_state if FSM reaches undefined state
+         // Added by Jelena Kovacevic for HDL best practices compliance
+         default:
+            cpu_state <= initial_state;
       endcase
    end
 end

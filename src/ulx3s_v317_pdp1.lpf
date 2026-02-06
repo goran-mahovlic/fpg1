@@ -1,9 +1,10 @@
 # =============================================================================
 # ULX3S v3.1.7 Constraint File for PDP-1 Emulator
 # =============================================================================
-# TASK-196: Pin Assignment za ULX3S v3.1.7
-# Autorica: Kosjenka Vukovic, REGOC tim
-# Datum: 2026-01-31
+# TASK-196: Pin Assignment for ULX3S v3.1.7
+# Author: Kosjenka Vukovic, REGOC team
+# Date: 2026-01-31
+# HDL Best Practices Audit: Kosjenka/REGOC team
 #
 # HARDWARE: ULX3S v3.1.7 (LFE5U-85F-6BG381C)
 # Reference: https://github.com/emard/ulx3s
@@ -167,15 +168,15 @@ FREQUENCY PORT "clk_25mhz" 25 MHZ;
 # =============================================================================
 # ULX3S v3.1 ESP32 SPI Pin Constraints for OSD
 # =============================================================================
-# TASK-208: ESP32 SPI Pin Assignment za OSD integraciju
-# Autorica: Kosjenka Vukovic, REGOC tim
-# Datum: 2026-01-31
+# TASK-208: ESP32 SPI Pin Assignment for OSD integration
+# Author: Kosjenka Vukovic, REGOC team
+# Date: 2026-01-31
 #
 # HARDWARE: ULX3S v3.1.x (LFE5U-85F-6BG381C)
 # Reference: https://github.com/emard/ulx3s
 #
-# ESP32 SPI komunikacija za OSD (On-Screen Display)
-# Koristi GPIO pinove na GP/GN11-13 konektoru
+# ESP32 SPI communication for OSD (On-Screen Display)
+# Uses GPIO pins on GP/GN11-13 connector
 # =============================================================================
 
 # =============================================================================

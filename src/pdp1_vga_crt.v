@@ -95,9 +95,10 @@
 
 module pdp1_vga_crt (
     //--------------------------------------------------------------------------
-    // Clock
+    // Clock and Reset
     //--------------------------------------------------------------------------
     input wire              i_clk,                  // Pixel clock (51 MHz for 1024x768@50Hz)
+    input wire              i_rst_n,                // Active-low synchronous reset - Jelena
 
     //--------------------------------------------------------------------------
     // VGA Timing Inputs
@@ -260,7 +261,7 @@ reg [11:0]  r_luma_1, r_luma_2, r_luma_3, r_luma_4;
 //------------------------------------------------------------------------------
 // Timing and Control Registers
 //------------------------------------------------------------------------------
-reg [31:0]  r_pass_counter = 32'd1;     // Vertical refresh cycle counter
+reg [31:0]  r_pass_counter;              // Vertical refresh cycle counter - reset added by Jelena
 reg [9:0]   r_erase_counter;            // Row buffer erase position
 reg         r_pixel_found;              // Flag: pixel found for rowbuffer write
 
@@ -770,35 +771,47 @@ end
 // - Falling edge detection for pixel strobe
 //
 always @(posedge i_clk) begin
-    //--------------------------------------------------------------------------
-    // Visible Area Flag
-    //--------------------------------------------------------------------------
-    r_inside_visible <= (i_h_counter >= `h_visible_offset + `h_center_offset &&
-                         i_h_counter <  `h_visible_offset_end + `h_center_offset);
+    if (!i_rst_n) begin
+        //----------------------------------------------------------------------
+        // Reset logic added by Jelena for proper r_pass_counter initialization
+        //----------------------------------------------------------------------
+        r_inside_visible     <= 1'b0;
+        r_pass_counter       <= 32'd1;
+        r_pixel_valid_meta   <= 1'b0;
+        r_pixel_valid_sync   <= 1'b0;
+        r_pixel_valid_sync_d <= 1'b0;
+        r_pixel_strobe       <= 1'b0;
+    end else begin
+        //----------------------------------------------------------------------
+        // Visible Area Flag
+        //----------------------------------------------------------------------
+        r_inside_visible <= (i_h_counter >= `h_visible_offset + `h_center_offset &&
+                             i_h_counter <  `h_visible_offset_end + `h_center_offset);
 
-    //--------------------------------------------------------------------------
-    // Pass Counter: Increments at end of each scanline
-    //--------------------------------------------------------------------------
-    // Used to slow down phosphor decay (decay applied every 8 passes)
-    if (i_h_counter == `h_line_timing - 1)
-        r_pass_counter <= r_pass_counter + 1'b1;
+        //----------------------------------------------------------------------
+        // Pass Counter: Increments at end of each scanline
+        //----------------------------------------------------------------------
+        // Used to slow down phosphor decay (decay applied every 8 passes)
+        if (i_h_counter == `h_line_timing - 1)
+            r_pass_counter <= r_pass_counter + 1'b1;
 
-    //--------------------------------------------------------------------------
-    // CDC Synchronization for Pixel Valid Signal
-    //--------------------------------------------------------------------------
-    // Two-stage synchronizer to handle asynchronous pixel_valid from PDP-1
-    // ASYNC_REG attribute ensures proper placement for metastability handling
-    r_pixel_valid_meta <= i_pixel_valid;
-    r_pixel_valid_sync <= r_pixel_valid_meta;
+        //----------------------------------------------------------------------
+        // CDC Synchronization for Pixel Valid Signal
+        //----------------------------------------------------------------------
+        // Two-stage synchronizer to handle asynchronous pixel_valid from PDP-1
+        // ASYNC_REG attribute ensures proper placement for metastability handling
+        r_pixel_valid_meta <= i_pixel_valid;
+        r_pixel_valid_sync <= r_pixel_valid_meta;
 
-    //--------------------------------------------------------------------------
-    // Falling Edge Detection: Generate strobe when pixel data is ready
-    //--------------------------------------------------------------------------
-    // CDC FIX: Use delayed sync signal for edge detection, NOT metastable!
-    // Old (WRONG): r_pixel_valid_sync & ~r_pixel_valid_meta (compares with metastable)
-    // New (CORRECT): r_pixel_valid_sync & ~r_pixel_valid_sync_d (both are stable)
-    r_pixel_valid_sync_d <= r_pixel_valid_sync;
-    r_pixel_strobe <= r_pixel_valid_sync & ~r_pixel_valid_sync_d;
+        //----------------------------------------------------------------------
+        // Falling Edge Detection: Generate strobe when pixel data is ready
+        //----------------------------------------------------------------------
+        // CDC FIX: Use delayed sync signal for edge detection, NOT metastable!
+        // Old (WRONG): r_pixel_valid_sync & ~r_pixel_valid_meta (compares with metastable)
+        // New (CORRECT): r_pixel_valid_sync & ~r_pixel_valid_sync_d (both are stable)
+        r_pixel_valid_sync_d <= r_pixel_valid_sync;
+        r_pixel_strobe <= r_pixel_valid_sync & ~r_pixel_valid_sync_d;
+    end
 end
 
 endmodule

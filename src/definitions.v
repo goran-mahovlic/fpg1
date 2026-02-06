@@ -1,14 +1,14 @@
-/* 1024 x 768 @ 50 Hz constants (TASK-XXX: upgrade rezolucije, Jelena Horvat)   */
+/* 1024 x 768 @ 50 Hz constants (TASK-XXX: resolution upgrade, Jelena Horvat)   */
 /* Pixel clock: 51 MHz, Frame rate: 51M / (1264*808) = 49.93 Hz                 */
 /*                                                                               */
-/* Timing izracun za 1024x768@50Hz:                                             */
+/* Timing calculation for 1024x768@50Hz:                                        */
 /* H total = 1024 + 24 (front) + 136 (sync) + 80 (back) = 1264                  */
 /* V total = 768 + 3 (front) + 6 (sync) + 31 (back) = 808                       */
 /* Frame rate = 51,000,000 / (1264 * 808) = 49.93 Hz                            */
 /*                                                                               */
-/* NAPOMENA: Koristimo 50Hz umjesto 60Hz jer:                                   */
-/* - 60Hz: 65 MHz pixel = 325 MHz shift (marginalno za ECP5)                    */
-/* - 50Hz: 51 MHz pixel = 255 MHz shift (sigurno < 400 MHz limit)               */
+/* NOTE: Using 50Hz instead of 60Hz because:                                    */
+/* - 60Hz: 65 MHz pixel = 325 MHz shift (marginal for ECP5)                     */
+/* - 50Hz: 51 MHz pixel = 255 MHz shift (safely < 400 MHz limit)                */
 
 `define   h_front_porch          11'd24
 `define   h_back_porch           11'd80
@@ -23,16 +23,16 @@
 `define   v_line_timing          11'd808       /* 768 + 3 + 6 + 31 = 808 */
 
 `define   h_visible_offset       11'd240       /* h_sync + h_back + h_front = 136 + 80 + 24 = 240 */
-`define   h_center_offset        11'd0         /* Bez centriranja - koristi puni 1024x1024 PDP-1 display */
+`define   h_center_offset        11'd0         /* No centering - uses full 1024x1024 PDP-1 display */
 `define   h_visible_offset_end   11'd1264      /* h_visible_offset + 1024 = 240 + 1024 = 1264 */
 
 `define   v_visible_offset       11'd40        /* v_front + v_sync + v_back = 3 + 6 + 31 = 40 */
 `define   v_visible_offset_end   11'd808       /* v_visible_offset + v_visible = 40 + 768 = 808 */
 
-/* CRT vertical offset - pomice PDP-1 sliku dolje za N linija */
-/* PDP-1 ima 1024x1024 koordinatni sustav, VGA prikazuje 768 linija */
-/* Offset 128 pomice vidljivo podrucje s 0-767 na 128-895 */
-`define   v_crt_offset           10'd128       /* Vertikalni pomak slike u PDP-1 koordinatama */
+/* CRT vertical offset - moves PDP-1 image down by N lines */
+/* PDP-1 has 1024x1024 coordinate system, VGA displays 768 lines */
+/* Offset 128 moves visible area from 0-767 to 128-895 */
+`define   v_crt_offset           10'd128       /* Vertical image offset in PDP-1 coordinates */
 
 
 /* Joystick, defined in core configuration string as 

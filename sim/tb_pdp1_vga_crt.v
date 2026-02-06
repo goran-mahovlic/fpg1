@@ -76,27 +76,27 @@ module tb_pdp1_vga_crt;
     wire        observed_wren;
 
     // Pristup internim signalima DUT-a za debug
-    assign observed_wraddress = uut.rowbuff_wraddress;
-    assign observed_rdaddress = uut.rowbuff_rdaddress;
-    assign observed_wdata     = uut.rowbuff_wdata;
-    assign observed_wren      = uut.rowbuff_wren;
+    assign observed_wraddress = uut.r_rowbuff_wraddr;
+    assign observed_rdaddress = uut.r_rowbuff_rdaddr;
+    assign observed_wdata     = uut.r_rowbuff_wdata;
+    assign observed_wren      = uut.r_rowbuff_wren;
 
     //==========================================================================
     // DUT INSTANCIJA
     //==========================================================================
 
     pdp1_vga_crt uut (
-        .clk(clk),
-        .horizontal_counter(h_counter),
-        .vertical_counter(v_counter),
-        .red_out(red_out),
-        .green_out(green_out),
-        .blue_out(blue_out),
-        .pixel_x_i(pixel_x_i),
-        .pixel_y_i(pixel_y_i),
-        .pixel_brightness(pixel_brightness),
-        .variable_brightness(variable_brightness),
-        .pixel_available(pixel_available)
+        .i_clk(clk),
+        .i_h_counter(h_counter),
+        .i_v_counter(v_counter),
+        .o_red(red_out),
+        .o_green(green_out),
+        .o_blue(blue_out),
+        .i_pixel_x(pixel_x_i),
+        .i_pixel_y(pixel_y_i),
+        .i_pixel_brightness(pixel_brightness),
+        .i_variable_brightness(variable_brightness),
+        .i_pixel_valid(pixel_available)
     );
 
     //==========================================================================
@@ -229,9 +229,9 @@ module tb_pdp1_vga_crt;
     //==========================================================================
 
     // Pratimo interne FIFO pointere
-    wire [5:0] fifo_read_ptr  = uut.buffer_read_ptr;
-    wire [5:0] fifo_write_ptr = uut.buffer_write_ptr;
-    wire [31:0] search_cnt    = uut.search_counter;
+    wire [5:0] fifo_read_ptr  = uut.r_fifo_rd_ptr;
+    wire [5:0] fifo_write_ptr = uut.r_fifo_wr_ptr;
+    wire [31:0] search_cnt    = uut.r_search_counter;
 
     reg [5:0] prev_fifo_read_ptr;
     reg [5:0] prev_fifo_write_ptr;
@@ -257,10 +257,10 @@ module tb_pdp1_vga_crt;
     // SHIFTOUT PRACENJE (ring buffer medjuveze)
     //==========================================================================
 
-    wire [31:0] so1 = uut.shiftout_1;
-    wire [31:0] so2 = uut.shiftout_2;
-    wire [31:0] so3 = uut.shiftout_3;
-    wire [31:0] so4 = uut.shiftout_4;
+    wire [31:0] so1 = uut.r_shiftout_1;
+    wire [31:0] so2 = uut.r_shiftout_2;
+    wire [31:0] so3 = uut.r_shiftout_3;
+    wire [31:0] so4 = uut.r_shiftout_4;
 
     // Dekodiranje: {pixel_y[9:0], pixel_x[9:0], luma[11:0]}
     wire [9:0] so1_y = so1[31:22];

@@ -2,8 +2,9 @@
 // TMDS Encoder - Verilog Implementation
 // =============================================================================
 // Based on DVI 1.0 specification and Mike Field's VHDL implementation
-// Ported to Verilog by: Jelena Horvat, REGOC tim
-// Datum: 2026-01-31
+// Ported to Verilog by: Jelena Horvat, REGOC team
+// Date: 2026-01-31
+// HDL Best Practices Audit: Kosjenka/REGOC team
 //
 // 8 bits color, 2 control bits, 1 blanking bit in
 // 10 bits TMDS encoded data out

@@ -1,31 +1,31 @@
 // =============================================================================
 // Clock Generator Wrapper using Emard's ecp5pll
 // =============================================================================
-// TASK-124: PLL konfiguracija za ULX3S HDMI output
-// TASK-200: Smanjena rezolucija na 640x480@60Hz (timing fix)
-// TASK-XXX: Upgrade na 1024x768@50Hz (Jelena Horvat)
-// Generirao: Kosjenka Vukovic, REGOC tim
-// Datum: 2026-02-01
+// TASK-124: PLL configuration for ULX3S HDMI output
+// TASK-200: Reduced resolution to 640x480@60Hz (timing fix)
+// TASK-XXX: Upgrade to 1024x768@50Hz (Jelena Horvat)
+// Author: Kosjenka Vukovic, REGOC team
+// Date: 2026-02-01
 //
-// Koristi Emardov ecp5pll modul za automatski izracun PLL parametara.
-// Izvor: https://github.com/emard/ulx3s-misc/blob/master/examples/ecp5pll/hdl/sv/ecp5pll.sv
+// Uses Emard's ecp5pll module for automatic PLL parameter calculation.
+// Source: https://github.com/emard/ulx3s-misc/blob/master/examples/ecp5pll/hdl/sv/ecp5pll.sv
 //
-// SPECIFIKACIJE (TASK-XXX - Nova konfiguracija 1024x768@50Hz):
-// - Ulazni clock: 25 MHz (ULX3S onboard oscillator)
-// - out0 (clko):  255 MHz HDMI shift clock (5x pixel za DDR TMDS)
+// SPECIFICATIONS (TASK-XXX - New configuration 1024x768@50Hz):
+// - Input clock: 25 MHz (ULX3S onboard oscillator)
+// - out0 (clko):  255 MHz HDMI shift clock (5x pixel for DDR TMDS)
 // - out1 (clks1): 51 MHz pixel clock (1024x768 @ 50Hz)
-// - out2 (clks2): 51 MHz CPU clock (PLL ne moze tocno 50 MHz iz VCO 510 MHz)
+// - out2 (clks2): 51 MHz CPU clock (PLL cannot produce exactly 50 MHz from VCO 510 MHz)
 //
-// TIMING PARAMETRI (1024x768 @ 50Hz):
-// - H total: 1264 pixela (1024 visible + 240 blanking)
-// - V total: 808 linija (768 visible + 40 blanking)
+// TIMING PARAMETERS (1024x768 @ 50Hz):
+// - H total: 1264 pixels (1024 visible + 240 blanking)
+// - V total: 808 lines (768 visible + 40 blanking)
 // - Frame rate: 51M / (1264*808) = 49.93 Hz
 //
-// ZASTO 50Hz UMJESTO 60Hz?
-// - 60Hz zahtijeva 65 MHz pixel = 325 MHz shift clock (marginalno za ECP5)
-// - 50Hz koristi 51 MHz pixel = 255 MHz shift clock (sigurno unutar 400 MHz limita)
-// - ECP5-85F max frekvencija: ~550 MHz za speed grade -6
-// - Safe limit za shift clock: ~400 MHz
+// WHY 50Hz INSTEAD OF 60Hz?
+// - 60Hz requires 65 MHz pixel = 325 MHz shift clock (marginal for ECP5)
+// - 50Hz uses 51 MHz pixel = 255 MHz shift clock (safely within 400 MHz limit)
+// - ECP5-85F max frequency: ~550 MHz for speed grade -6
+// - Safe limit for shift clock: ~400 MHz
 // =============================================================================
 
 module clk_25_shift_pixel_cpu
@@ -44,7 +44,7 @@ module clk_25_shift_pixel_cpu
         .in_hz      (25000000),     // 25 MHz input
         .out0_hz    (255000000),    // 255 MHz shift clock (HDMI DDR, 5x pixel)
         .out1_hz    (51000000),     // 51 MHz pixel clock (1024x768@50Hz)
-        .out2_hz    (51000000),     // 51 MHz CPU clock (isto kao pixel, PLL kompatibilno)
+        .out2_hz    (51000000),     // 51 MHz CPU clock (same as pixel, PLL compatible)
         .out3_hz    (0)             // unused
     )
     pll_inst

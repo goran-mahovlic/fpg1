@@ -16,13 +16,14 @@
 // Clock Domains:
 //   - clk_shift  : 125 MHz  - HDMI DDR serializer (5x pixel clock)
 //   - clk_pixel  :  51 MHz  - VGA timing (1024x768@50Hz)
-//   - clk_cpu    : 6.25 MHz - PDP-1 CPU emulation
+//   - clk_cpu    :  51 MHz  - PDP-1 CPU emulation base clock
 //
 // Reset Strategy:
 //   - Asynchronous assert, synchronous deassert per clock domain
 //   - rst_pixel_n: Synchronized to clk_pixel domain
 //   - rst_cpu_n:   Synchronized to clk_cpu domain
-//   - Reset source: btn[0] active-low, gated by pll_locked
+//   - Reset source: btn[6] active-low, gated by pll_locked
+//   - NOTE: btn[0] freed for P1 Fire (was causing reset-on-fire bug)
 //
 // CDC Crossings:
 //   1. CPU -> Pixel: Pixel coordinates (23 bits) via HOLD registers + sync
@@ -37,6 +38,7 @@
 //   - ulx3s_input.v            : Button debounce, joystick mapping
 //   - pdp1_cpu.v               : PDP-1 CPU core
 //   - pdp1_main_ram.v          : 4K x 18-bit main memory
+//   - test_sinus.v             : Sine wave test pattern generator (SW[2])
 //   - vga2dvid.v               : VGA to DVI/HDMI conversion
 //   - fake_differential.v      : ECP5 DDR output primitives
 //
@@ -70,6 +72,11 @@ module top_pdp1
     input  wire [6:0]  btn,            // BTN[6:0] active-low on PCB
 
     // ==== DIP Switches ====
+    // DIP SWITCH MAPPING (ACTIVE-HIGH):
+    //   SW[0] = P2 mode modifier (hold for Player 2 controls)
+    //   SW[1] = Serial debug enable (ON=enabled, OFF=disabled) <<< FOR DEBUG!
+    //   SW[2] = Sine test pattern (ON=sine wave, OFF=CPU display)
+    //   SW[3] = Test pattern output (ON=color bars, OFF=CRT)
     input  wire [3:0]  sw,             // SW[3:0] active-high
 
     // ==== LED Indicators ====
@@ -142,24 +149,21 @@ module top_pdp1
     // Clock tree:
     //   clk_25mhz (input) -> PLL -> clk_shift (125 MHz, HDMI serializer)
     //                           -> clk_pixel (51 MHz, VGA timing)
-    //                           -> clk_cpu (6.25 MHz, PDP-1 emulation) << GORAN 51 MHz
+    //                           -> clk_cpu (51 MHz, PDP-1 emulation base clock)
     // -------------------------------------------------------------------------
-    wire clk_shift;     // 125 MHz HDMI shift clock (5x pixel for DDR)
-    wire clk_pixel;     // 51 MHz pixel clock (1024x768@50Hz timing)
-    wire clk_cpu;       // 6.25 MHz CPU base clock << GORAN 51 MHz
+    // Clock signals - FIX: removed duplicate wire declarations - Kosjenka/REGOC team
     wire w_pll_locked;  // PLL lock indicator (active-high)
 
-    // clock generator
-    wire clk_locked;
+    // Clock generator
     wire [1:0] clocks;
-    wire clk_shift = clocks[0];
-    wire clk_pixel = clocks[1]; // << GORAN 51 MHz
-    wire clk_cpu = clk_pixel;
+    wire clk_shift = clocks[0];   // 125 MHz HDMI shift clock (5x pixel for DDR)
+    wire clk_pixel = clocks[1];   // 51 MHz pixel clock (1024x768@50Hz timing)
+    wire clk_cpu   = clk_pixel;   // 51 MHz CPU base clock (same as pixel clock)
     ecp5pll
     #(
         .in_hz(25*1000000),
         .out0_hz(255*1000000),
-        .out1_hz(51*1000000)   // << GORAN 51 MHz
+        .out1_hz(51*1000000)   // 51 MHz pixel/CPU clock
     )
     ecp5pll_inst
     (
@@ -173,9 +177,10 @@ module top_pdp1
     // =========================================================================
     // Reset strategy: Asynchronous assert, synchronous deassert.
     // Each clock domain has its own synchronized reset signal.
-    // Reset source: btn[0] (active-low) AND pll_locked
+    // Reset source: btn[6] (active-low) AND pll_locked
+    // NOTE: btn[6] is F2 button on ULX3S - dedicated reset, freeing btn[0] for P1 Fire
     // -------------------------------------------------------------------------
-    wire w_clk_cpu_slow;    // 1.79 MHz PDP-1 clock (unused, legacy interface)
+    wire w_clk_cpu_slow;    // 1.82 MHz PDP-1 clock (51 MHz / 28, legacy interface)
     wire w_clk_cpu_en;      // Clock enable pulse
     wire rst_pixel_n;       // Synchronized reset for pixel domain (active-low)
     wire rst_cpu_n;         // Synchronized reset for CPU domain (active-low)
@@ -195,7 +200,8 @@ module top_pdp1
         .clk_pixel      (clk_pixel),
         .clk_cpu_fast   (clk_cpu),
         .pll_locked     (w_pll_locked),
-        .rst_n          (btn[0]),           // BTN[0] active-low = reset
+        .rst_n          (btn[6]),           // BTN[6] (F2) active-low = dedicated reset
+                                            // FIX: btn[0] freed for P1 Fire (Jelena, 2026-02-06)
 
         .clk_cpu        (w_clk_cpu_slow),
         .clk_cpu_en     (w_clk_cpu_en),
@@ -230,7 +236,7 @@ module top_pdp1
     ) u_input (
         .i_clk            (clk_pixel),
         .i_rst_n          (rst_pixel_n),
-        .i_btn_n          (btn),              // Active-low from board    // << GORAN  BTN 6:0 ??? RESET da li mora ovdje - pogotovo jer ga već koristimo kao btn[0]?
+        .i_btn_n          (btn),              // Active-low from board (BTN[6:0], btn[6] is reset, btn[0] is P1 Fire)
         .i_sw             (sw),
         .o_joystick_emu   (w_joystick_emu),
         .o_led_feedback   (w_led_input_feedback),
@@ -437,7 +443,7 @@ module top_pdp1
 
     // Test word and address switches (active-high)
     wire [17:0] w_test_word    = 18'b0;
-    wire [17:0] w_test_address = 18'o4;    // Start address: octal 4 (Spacewar 4.1 entry point)
+    wire [17:0] w_test_address = 18'o500;   // Start address: octal 500 (Minskytron entry point)
 
     // =========================================================================
     // CDC: DIP SWITCH SYNCHRONIZATION (External -> clk_cpu domain)
@@ -478,8 +484,9 @@ module top_pdp1
     //
     // NOTE: SW[1] controls ONLY serial debug (via w_single_player signal),
     //       NOT starfield. This separation fixes the explosion visibility bug.
+    // FIX: Jelena - sense_switches[1] was passing SW[1] instead of hardcoded 1'b1
     // -------------------------------------------------------------------------
-    wire [5:0] w_sense_switches = {r_btn_sync, r_sw_sync[3:0]};
+    wire [5:0] w_sense_switches = {r_btn_sync, r_sw_sync[3:2], 1'b1, r_sw_sync[0]};
 
     // =========================================================================
     // PDP-1 MAIN RAM (4096 x 18-bit, clk_cpu domain)
@@ -541,7 +548,7 @@ module top_pdp1
         .tape_rcv_word          (18'b0),
 
         // Start address
-        .start_address          (12'o4),            // Spacewar 4.1 entry point
+        .start_address          (12'o500),          // Minskytron entry point
 
         // Configuration
         .hw_mul_enabled         (1'b1),             // Enable hardware multiply/divide
@@ -565,215 +572,35 @@ module top_pdp1
         .debug_pixel_brightness (w_cpu_debug_pixel_brightness)
     );
 
-    // << GORAN   SINUS - treba posložiti odvojeno kao modul da se može uključiti ili isključiti ovako top file izgleda dosta natrpano!!!
     // =========================================================================
     // SINE TEST PATTERN GENERATOR (SW[2] = 1 activates test mode)
     // =========================================================================
+    // Refactored to separate module: test_sinus.v (Kosjenka Vukovic, 2026-02-06)
     // When SW[2]=1, replace CPU pixel coordinates with sine wave pattern.
     // Uses CPU DPY timing (pixel_shift) to maintain proper pipeline flow.
-    // Sine wave sweeps horizontally with vertical displacement from sine LUT.
     //
-    // Author: Jelena Horvat, REGOC team
-    // Date: 2026-02-02
+    // Original implementation: Jelena Horvat, REGOC team (2026-02-02)
     // =========================================================================
 
     // Test mode flag from synchronized DIP switch (clk_cpu domain)
     wire w_sine_test_mode = r_sw_sync[2];
 
-    // Sine LUT: 256 entries, values 0-255 (128 = zero crossing)
-    // Same format as test_animation.v for consistency
-    reg [7:0] r_sine_lut [0:255];
+    // Sine test pattern outputs
+    wire [9:0] w_sine_mux_x;
+    wire [9:0] w_sine_mux_y;
+    wire [2:0] w_sine_mux_brightness;
+    wire       w_sine_valid;
 
-    // Initialize sine lookup table
-    initial begin
-        // Quadrant 0: 0-63 (0 to pi/2)
-        r_sine_lut[  0] = 8'd128; r_sine_lut[  1] = 8'd131; r_sine_lut[  2] = 8'd134; r_sine_lut[  3] = 8'd137;
-        r_sine_lut[  4] = 8'd140; r_sine_lut[  5] = 8'd143; r_sine_lut[  6] = 8'd146; r_sine_lut[  7] = 8'd149;
-        r_sine_lut[  8] = 8'd152; r_sine_lut[  9] = 8'd156; r_sine_lut[ 10] = 8'd159; r_sine_lut[ 11] = 8'd162;
-        r_sine_lut[ 12] = 8'd165; r_sine_lut[ 13] = 8'd168; r_sine_lut[ 14] = 8'd171; r_sine_lut[ 15] = 8'd174;
-        r_sine_lut[ 16] = 8'd177; r_sine_lut[ 17] = 8'd179; r_sine_lut[ 18] = 8'd182; r_sine_lut[ 19] = 8'd185;
-        r_sine_lut[ 20] = 8'd188; r_sine_lut[ 21] = 8'd191; r_sine_lut[ 22] = 8'd193; r_sine_lut[ 23] = 8'd196;
-        r_sine_lut[ 24] = 8'd199; r_sine_lut[ 25] = 8'd201; r_sine_lut[ 26] = 8'd204; r_sine_lut[ 27] = 8'd206;
-        r_sine_lut[ 28] = 8'd209; r_sine_lut[ 29] = 8'd211; r_sine_lut[ 30] = 8'd213; r_sine_lut[ 31] = 8'd216;
-        r_sine_lut[ 32] = 8'd218; r_sine_lut[ 33] = 8'd220; r_sine_lut[ 34] = 8'd222; r_sine_lut[ 35] = 8'd224;
-        r_sine_lut[ 36] = 8'd226; r_sine_lut[ 37] = 8'd228; r_sine_lut[ 38] = 8'd230; r_sine_lut[ 39] = 8'd232;
-        r_sine_lut[ 40] = 8'd234; r_sine_lut[ 41] = 8'd235; r_sine_lut[ 42] = 8'd237; r_sine_lut[ 43] = 8'd238;
-        r_sine_lut[ 44] = 8'd240; r_sine_lut[ 45] = 8'd241; r_sine_lut[ 46] = 8'd243; r_sine_lut[ 47] = 8'd244;
-        r_sine_lut[ 48] = 8'd245; r_sine_lut[ 49] = 8'd246; r_sine_lut[ 50] = 8'd247; r_sine_lut[ 51] = 8'd248;
-        r_sine_lut[ 52] = 8'd249; r_sine_lut[ 53] = 8'd250; r_sine_lut[ 54] = 8'd251; r_sine_lut[ 55] = 8'd252;
-        r_sine_lut[ 56] = 8'd252; r_sine_lut[ 57] = 8'd253; r_sine_lut[ 58] = 8'd253; r_sine_lut[ 59] = 8'd254;
-        r_sine_lut[ 60] = 8'd254; r_sine_lut[ 61] = 8'd254; r_sine_lut[ 62] = 8'd255; r_sine_lut[ 63] = 8'd255;
-        // Quadrant 1: 64-127 (pi/2 to pi)
-        r_sine_lut[ 64] = 8'd255; r_sine_lut[ 65] = 8'd255; r_sine_lut[ 66] = 8'd255; r_sine_lut[ 67] = 8'd254;
-        r_sine_lut[ 68] = 8'd254; r_sine_lut[ 69] = 8'd254; r_sine_lut[ 70] = 8'd253; r_sine_lut[ 71] = 8'd253;
-        r_sine_lut[ 72] = 8'd252; r_sine_lut[ 73] = 8'd252; r_sine_lut[ 74] = 8'd251; r_sine_lut[ 75] = 8'd250;
-        r_sine_lut[ 76] = 8'd249; r_sine_lut[ 77] = 8'd248; r_sine_lut[ 78] = 8'd247; r_sine_lut[ 79] = 8'd246;
-        r_sine_lut[ 80] = 8'd245; r_sine_lut[ 81] = 8'd244; r_sine_lut[ 82] = 8'd243; r_sine_lut[ 83] = 8'd241;
-        r_sine_lut[ 84] = 8'd240; r_sine_lut[ 85] = 8'd238; r_sine_lut[ 86] = 8'd237; r_sine_lut[ 87] = 8'd235;
-        r_sine_lut[ 88] = 8'd234; r_sine_lut[ 89] = 8'd232; r_sine_lut[ 90] = 8'd230; r_sine_lut[ 91] = 8'd228;
-        r_sine_lut[ 92] = 8'd226; r_sine_lut[ 93] = 8'd224; r_sine_lut[ 94] = 8'd222; r_sine_lut[ 95] = 8'd220;
-        r_sine_lut[ 96] = 8'd218; r_sine_lut[ 97] = 8'd216; r_sine_lut[ 98] = 8'd213; r_sine_lut[ 99] = 8'd211;
-        r_sine_lut[100] = 8'd209; r_sine_lut[101] = 8'd206; r_sine_lut[102] = 8'd204; r_sine_lut[103] = 8'd201;
-        r_sine_lut[104] = 8'd199; r_sine_lut[105] = 8'd196; r_sine_lut[106] = 8'd193; r_sine_lut[107] = 8'd191;
-        r_sine_lut[108] = 8'd188; r_sine_lut[109] = 8'd185; r_sine_lut[110] = 8'd182; r_sine_lut[111] = 8'd179;
-        r_sine_lut[112] = 8'd177; r_sine_lut[113] = 8'd174; r_sine_lut[114] = 8'd171; r_sine_lut[115] = 8'd168;
-        r_sine_lut[116] = 8'd165; r_sine_lut[117] = 8'd162; r_sine_lut[118] = 8'd159; r_sine_lut[119] = 8'd156;
-        r_sine_lut[120] = 8'd152; r_sine_lut[121] = 8'd149; r_sine_lut[122] = 8'd146; r_sine_lut[123] = 8'd143;
-        r_sine_lut[124] = 8'd140; r_sine_lut[125] = 8'd137; r_sine_lut[126] = 8'd134; r_sine_lut[127] = 8'd131;
-        // Quadrant 2: 128-191 (pi to 3*pi/2)
-        r_sine_lut[128] = 8'd128; r_sine_lut[129] = 8'd125; r_sine_lut[130] = 8'd122; r_sine_lut[131] = 8'd119;
-        r_sine_lut[132] = 8'd116; r_sine_lut[133] = 8'd113; r_sine_lut[134] = 8'd110; r_sine_lut[135] = 8'd107;
-        r_sine_lut[136] = 8'd104; r_sine_lut[137] = 8'd100; r_sine_lut[138] = 8'd97;  r_sine_lut[139] = 8'd94;
-        r_sine_lut[140] = 8'd91;  r_sine_lut[141] = 8'd88;  r_sine_lut[142] = 8'd85;  r_sine_lut[143] = 8'd82;
-        r_sine_lut[144] = 8'd79;  r_sine_lut[145] = 8'd77;  r_sine_lut[146] = 8'd74;  r_sine_lut[147] = 8'd71;
-        r_sine_lut[148] = 8'd68;  r_sine_lut[149] = 8'd65;  r_sine_lut[150] = 8'd63;  r_sine_lut[151] = 8'd60;
-        r_sine_lut[152] = 8'd57;  r_sine_lut[153] = 8'd55;  r_sine_lut[154] = 8'd52;  r_sine_lut[155] = 8'd50;
-        r_sine_lut[156] = 8'd47;  r_sine_lut[157] = 8'd45;  r_sine_lut[158] = 8'd43;  r_sine_lut[159] = 8'd40;
-        r_sine_lut[160] = 8'd38;  r_sine_lut[161] = 8'd36;  r_sine_lut[162] = 8'd34;  r_sine_lut[163] = 8'd32;
-        r_sine_lut[164] = 8'd30;  r_sine_lut[165] = 8'd28;  r_sine_lut[166] = 8'd26;  r_sine_lut[167] = 8'd24;
-        r_sine_lut[168] = 8'd22;  r_sine_lut[169] = 8'd21;  r_sine_lut[170] = 8'd19;  r_sine_lut[171] = 8'd18;
-        r_sine_lut[172] = 8'd16;  r_sine_lut[173] = 8'd15;  r_sine_lut[174] = 8'd13;  r_sine_lut[175] = 8'd12;
-        r_sine_lut[176] = 8'd11;  r_sine_lut[177] = 8'd10;  r_sine_lut[178] = 8'd9;   r_sine_lut[179] = 8'd8;
-        r_sine_lut[180] = 8'd7;   r_sine_lut[181] = 8'd6;   r_sine_lut[182] = 8'd5;   r_sine_lut[183] = 8'd4;
-        r_sine_lut[184] = 8'd4;   r_sine_lut[185] = 8'd3;   r_sine_lut[186] = 8'd3;   r_sine_lut[187] = 8'd2;
-        r_sine_lut[188] = 8'd2;   r_sine_lut[189] = 8'd2;   r_sine_lut[190] = 8'd1;   r_sine_lut[191] = 8'd1;
-        // Quadrant 3: 192-255 (3*pi/2 to 2*pi)
-        r_sine_lut[192] = 8'd1;   r_sine_lut[193] = 8'd1;   r_sine_lut[194] = 8'd1;   r_sine_lut[195] = 8'd2;
-        r_sine_lut[196] = 8'd2;   r_sine_lut[197] = 8'd2;   r_sine_lut[198] = 8'd3;   r_sine_lut[199] = 8'd3;
-        r_sine_lut[200] = 8'd4;   r_sine_lut[201] = 8'd4;   r_sine_lut[202] = 8'd5;   r_sine_lut[203] = 8'd6;
-        r_sine_lut[204] = 8'd7;   r_sine_lut[205] = 8'd8;   r_sine_lut[206] = 8'd9;   r_sine_lut[207] = 8'd10;
-        r_sine_lut[208] = 8'd11;  r_sine_lut[209] = 8'd12;  r_sine_lut[210] = 8'd13;  r_sine_lut[211] = 8'd15;
-        r_sine_lut[212] = 8'd16;  r_sine_lut[213] = 8'd18;  r_sine_lut[214] = 8'd19;  r_sine_lut[215] = 8'd21;
-        r_sine_lut[216] = 8'd22;  r_sine_lut[217] = 8'd24;  r_sine_lut[218] = 8'd26;  r_sine_lut[219] = 8'd28;
-        r_sine_lut[220] = 8'd30;  r_sine_lut[221] = 8'd32;  r_sine_lut[222] = 8'd34;  r_sine_lut[223] = 8'd36;
-        r_sine_lut[224] = 8'd38;  r_sine_lut[225] = 8'd40;  r_sine_lut[226] = 8'd43;  r_sine_lut[227] = 8'd45;
-        r_sine_lut[228] = 8'd47;  r_sine_lut[229] = 8'd50;  r_sine_lut[230] = 8'd52;  r_sine_lut[231] = 8'd55;
-        r_sine_lut[232] = 8'd57;  r_sine_lut[233] = 8'd60;  r_sine_lut[234] = 8'd63;  r_sine_lut[235] = 8'd65;
-        r_sine_lut[236] = 8'd68;  r_sine_lut[237] = 8'd71;  r_sine_lut[238] = 8'd74;  r_sine_lut[239] = 8'd77;
-        r_sine_lut[240] = 8'd79;  r_sine_lut[241] = 8'd82;  r_sine_lut[242] = 8'd85;  r_sine_lut[243] = 8'd88;
-        r_sine_lut[244] = 8'd91;  r_sine_lut[245] = 8'd94;  r_sine_lut[246] = 8'd97;  r_sine_lut[247] = 8'd100;
-        r_sine_lut[248] = 8'd104; r_sine_lut[249] = 8'd107; r_sine_lut[250] = 8'd110; r_sine_lut[251] = 8'd113;
-        r_sine_lut[252] = 8'd116; r_sine_lut[253] = 8'd119; r_sine_lut[254] = 8'd122; r_sine_lut[255] = 8'd125;
-    end
-
-    // Sine test pattern state (clk_cpu domain)
-    // X sweeps 0-511 (10 bits), Y = 256 + sine_offset
-    reg [9:0]  r_sine_t;           // Time/phase counter (X coordinate)
-    reg [9:0]  r_sine_x;           // Calculated X coordinate
-    reg [9:0]  r_sine_y;           // Calculated Y coordinate
-    reg [7:0]  r_sine_phase;       // Phase for sine lookup (wraps at 256)
-
-    // Sine wave parameters
-    // NOTE: In PDP-1 mode, CRT does coordinate swap: {buffer_Y, buffer_X} = {~i_pixel_x, i_pixel_y}
-    // So our sine_x becomes vertical (buffer_Y) and sine_y becomes horizontal (buffer_X)
-    // To get a HORIZONTAL sine wave on screen, we must:
-    //   - Put SWEEP in sine_y (becomes horizontal buffer_X)
-    //   - Put SINE OFFSET in sine_x (becomes vertical buffer_Y after inversion)
-    localparam SINE_CENTER_X = 10'd512;  // Center X for vertical sine position (becomes ~buffer_Y)
-    localparam SINE_AMPLITUDE = 8'd100;  // Amplitude in pixels
-
-    // SINE2 parameters: higher on screen, slower, stronger phosphor
-    // Author: Jelena Kovacevic, REGOC team
-    // Date: 2026-02-02
-    localparam SINE2_CENTER_X = 10'd612;  // 100 pixels higher (higher X = lower on screen after inversion)
-
-    // Intermediate calculation registers for pipelining
-    reg signed [9:0] r_sine_offset;  // Signed offset from center
-
-    // Update sine coordinates on each CPU pixel_shift
-    // NOTE: Always update even when not in test mode to avoid glitches on mode switch
-    //
-    // COORDINATE SWAP FIX (Jelena Horvat, 2026-02-02):
-    // PDP-1 CRT transformation: {buffer_Y, buffer_X} = {~pixel_x, pixel_y}
-    // This means:
-    //   - pixel_x -> inverted -> vertical position on screen (buffer_Y)
-    //   - pixel_y -> unchanged -> horizontal position on screen (buffer_X)
-    //
-    // For HORIZONTAL sine wave:
-    //   - r_sine_y = SWEEP (0->1023) -> becomes buffer_X (horizontal sweep on screen)
-    //   - r_sine_x = CENTER + offset -> becomes ~buffer_Y (vertical sine displacement)
-    always @(posedge clk_cpu) begin
-        if (~rst_cpu_n) begin
-            r_sine_t      <= 10'd0;
-            r_sine_x      <= SINE_CENTER_X;
-            r_sine_y      <= 10'd0;
-            r_sine_phase  <= 8'd0;
-            r_sine_offset <= 10'sd0;
-        end else if (w_cpu_pixel_shift) begin
-            // Advance time counter (wraps at 1024)
-            r_sine_t <= r_sine_t + 1'b1;
-
-            // r_sine_y = SWEEP: becomes horizontal position on screen (buffer_X)
-            r_sine_y <= r_sine_t[9:0];
-
-            // Phase advances 4x faster than sweep for visible oscillation
-            r_sine_phase <= r_sine_phase + 8'd4;
-
-            // Calculate signed offset: (sine_lut - 128)
-            // sine_lut is 0-255, subtract 128 to get -128 to +127 range
-            r_sine_offset <= $signed({2'b0, r_sine_lut[r_sine_phase]}) - 10'sd128;
-
-            // r_sine_x = CENTER + offset: becomes vertical position on screen (~buffer_Y)
-            // Since CRT inverts X, higher values here = lower on screen
-            r_sine_x <= SINE_CENTER_X + r_sine_offset[9:0];
-        end
-    end
-
-    // =========================================================================
-    // SINE2: Second sine wave - higher position, slower, stronger phosphor
-    // Author: Jelena Kovacevic, REGOC team
-    // Date: 2026-02-02
-    // Uses same pixel pipeline as spaceship DPY instructions
-    // =========================================================================
-    reg [9:0]  r_sine2_t;           // Time/phase counter
-    reg [9:0]  r_sine2_x;           // Calculated X coordinate
-    reg [9:0]  r_sine2_y;           // Calculated Y coordinate
-    reg [7:0]  r_sine2_phase;       // Phase for sine lookup
-    reg signed [9:0] r_sine2_offset;  // Signed offset from center
-    reg [1:0]  r_sine2_slowdown;    // Counter for 4x slower update
-
-    // Multiplexer state: alternates between sine1 and sine2
-    reg        r_sine_select;       // 0 = sine1, 1 = sine2
-
-    always @(posedge clk_cpu) begin
-        if (~rst_cpu_n) begin
-            r_sine2_t        <= 10'd0;
-            r_sine2_x        <= SINE2_CENTER_X;
-            r_sine2_y        <= 10'd0;
-            r_sine2_phase    <= 8'd0;
-            r_sine2_offset   <= 10'sd0;
-            r_sine2_slowdown <= 2'd0;
-            r_sine_select    <= 1'b0;
-        end else if (w_cpu_pixel_shift) begin
-            // Toggle between sine1 and sine2 each pixel_shift
-            r_sine_select <= ~r_sine_select;
-
-            // Sine2 updates every 4th pixel_shift (slower)
-            r_sine2_slowdown <= r_sine2_slowdown + 1'b1;
-            if (r_sine2_slowdown == 2'd3) begin
-                // Advance time counter (wraps at 1024)
-                r_sine2_t <= r_sine2_t + 1'b1;
-
-                // r_sine2_y = SWEEP: horizontal position on screen
-                r_sine2_y <= r_sine2_t[9:0];
-
-                // Phase advances 2x (slower oscillation than sine1 which uses 4x)
-                r_sine2_phase <= r_sine2_phase + 8'd2;
-
-                // Calculate signed offset
-                r_sine2_offset <= $signed({2'b0, r_sine_lut[r_sine2_phase]}) - 10'sd128;
-
-                // r_sine2_x = CENTER + offset: vertical position
-                r_sine2_x <= SINE2_CENTER_X + r_sine2_offset[9:0];
-            end
-        end
-    end
-
-    // Multiplexed sine coordinates (alternates sine1/sine2)
-    wire [9:0] w_sine_mux_x = r_sine_select ? r_sine2_x : r_sine_x;
-    wire [9:0] w_sine_mux_y = r_sine_select ? r_sine2_y : r_sine_y;
-    // Sine2 has stronger phosphor: 3'b110, sine1 keeps 3'd7
-    wire [2:0] w_sine_mux_brightness = r_sine_select ? 3'b110 : 3'd7;
+    test_sinus u_test_sinus (
+        .i_clk          (clk_cpu),
+        .i_rst_n        (rst_cpu_n),
+        .i_enable       (w_sine_test_mode),
+        .i_pixel_shift  (w_cpu_pixel_shift),
+        .o_x            (w_sine_mux_x),
+        .o_y            (w_sine_mux_y),
+        .o_brightness   (w_sine_mux_brightness),
+        .o_valid        (w_sine_valid)
+    );
 
     // =========================================================================
     // CDC: MULTI-BIT PIXEL DATA (clk_cpu -> clk_pixel)
@@ -910,6 +737,7 @@ module top_pdp1
     pdp1_vga_crt u_crt_display
     (
         .i_clk              (clk_pixel),
+        .i_rst_n            (rst_pixel_n),          // Reset added by Jelena for r_pass_counter
 
         .i_h_counter        (r_h_counter),
         .i_v_counter        (r_v_counter),
@@ -1203,7 +1031,9 @@ module top_pdp1
     // =========================================================================
 `ifdef TEST_ANIMATION
     // Serial debug for TEST_ANIMATION mode - uses animation signals
-    serial_debug u_serial_debug (
+    serial_debug #(
+        .CLK_FREQ(C_PIXEL_CLK_FREQ)
+    ) u_serial_debug (
         .i_clk                (clk_pixel),
         .i_rst_n              (rst_pixel_n),
         .i_enable             (w_single_player),  // SW[1] synchronized signal
@@ -1237,9 +1067,9 @@ module top_pdp1
     );
 `else
 
-    // << GORAN  Serial debug isto kao sinus animacija mora imati enable disable i ne natrpano sve u top!!!!
     // =========================================================================
     // CPU MODE: Serial Debug Output
+    // TODO: Refactor into separate module with enable/disable control
     // =========================================================================
     // Frame tick generator for CPU mode
     reg        r_cpu_frame_tick;
@@ -1266,7 +1096,9 @@ module top_pdp1
     //   2) Signals are sampled on frame_tick which is rare (~50Hz)
     //   3) Adding CDC would add latency without real benefit
     // -------------------------------------------------------------------------
-    serial_debug u_serial_debug_cpu (
+    serial_debug #(
+        .CLK_FREQ(C_PIXEL_CLK_FREQ)
+    ) u_serial_debug_cpu (
         .i_clk                (clk_pixel),
         .i_rst_n              (rst_pixel_n),
         .i_enable             (w_single_player),  // SW[1] synchronized signal

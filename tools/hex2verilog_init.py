@@ -26,9 +26,12 @@ def convert_hex_to_verilog(input_file, output_file):
     total_words = len(lines)
     non_zero_count = 0
 
+    # Get source filename for comment
+    source_name = os.path.basename(input_file)
+
     # Build output
     output_lines = []
-    output_lines.append("// Auto-generated from spacewar.hex")
+    output_lines.append(f"// Auto-generated from {source_name}")
     output_lines.append("// DO NOT EDIT MANUALLY - regenerate with hex2verilog_init.py")
     output_lines.append(f"// Total words: {total_words}")
     output_lines.append("//")
@@ -72,24 +75,19 @@ def convert_hex_to_verilog(input_file, output_file):
     return non_zero_count
 
 def main():
-    # Default paths relative to port_fpg1
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_dir = os.path.dirname(script_dir)
+    import argparse
 
-    input_file = os.path.join(project_dir, "src/rom/spacewar.hex")
-    output_file = os.path.join(project_dir, "src/rom/spacewar_init.vh")
+    parser = argparse.ArgumentParser(description='Convert HEX file to Verilog initial block')
+    parser.add_argument('input_file', help='Input HEX file')
+    parser.add_argument('-o', '--output', required=True, help='Output Verilog file')
 
-    # Allow override via command line
-    if len(sys.argv) >= 2:
-        input_file = sys.argv[1]
-    if len(sys.argv) >= 3:
-        output_file = sys.argv[2]
+    args = parser.parse_args()
 
-    if not os.path.exists(input_file):
-        print(f"Error: Input file not found: {input_file}")
+    if not os.path.exists(args.input_file):
+        print(f"Error: Input file not found: {args.input_file}")
         sys.exit(1)
 
-    convert_hex_to_verilog(input_file, output_file)
+    convert_hex_to_verilog(args.input_file, args.output)
 
 if __name__ == "__main__":
     main()

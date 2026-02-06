@@ -1,7 +1,7 @@
 // =============================================================================
 // Serial Debug Module: UART TX for Debug Output
 // =============================================================================
-// TASK-DEBUG: Debug infrastruktura za crni ekran problem
+// TASK-DEBUG: Debug infrastructure for black screen problem - Kosjenka/REGOC team
 // Author: Debug Team, REGOC
 // Date: 2026-01-31
 // Updated: 2026-02-02 (Best practices applied)
@@ -150,7 +150,9 @@ endmodule
 // Module: serial_debug
 // Description: Debug wrapper that formats and sends diagnostic data via UART
 // =============================================================================
-module serial_debug (
+module serial_debug #(
+    parameter CLK_FREQ = 51_000_000  // Clock frequency in Hz (default: 51 MHz)
+) (
     // Clock and Reset
     input  wire        i_clk,               // System clock (51 MHz)
     input  wire        i_rst_n,             // Active-low synchronous reset
@@ -203,7 +205,7 @@ module serial_debug (
     wire       w_tx_busy;   // UART busy flag
 
     uart_tx #(
-        .CLK_FREQ (51000000),  // 51 MHz pixel clock (1024x768@50Hz PLL)
+        .CLK_FREQ (CLK_FREQ),  // Use module parameter
         .BAUD     (115200)     // Standard baud rate
     ) u_uart_tx (
         .i_clk    (i_clk),

@@ -2,66 +2,66 @@
 // Clock Domain Manager
 // =============================================================================
 // TASK-118: PLL/Clock Adaptation
-// Autorica: Kosjenka Vukovic, REGOC tim
-// Datum: 2026-01-31
+// Author: Kosjenka Vukovic, REGOC team
+// Date: 2026-01-31
 //
-// FUNKCIONALNOST:
-// 1. CPU clock prescaler: 50 MHz -> 1.785714 MHz (originalni PDP-1 timing)
-// 2. Clock Domain Crossing (CDC) izmedju CPU i Video domena
-// 3. Reset sequencing s PLL lock cekanjem
+// FUNCTIONALITY:
+// 1. CPU clock prescaler: 51 MHz -> 1.82 MHz (original PDP-1 timing)
+// 2. Clock Domain Crossing (CDC) between CPU and Video domains
+// 3. Reset sequencing with PLL lock wait
 //
-// CLOCK DOMENE:
-// - clk_pixel (75 MHz)  : Video/HDMI domena
-// - clk_cpu_fast (50 MHz): CPU base clock
-// - clk_cpu (1.79 MHz)  : PDP-1 originalna frekvencija
+// CLOCK DOMAINS:
+// - clk_pixel (51 MHz)    : Video/HDMI domain (1024x768@50Hz)
+// - clk_cpu_fast (51 MHz) : CPU base clock
+// - clk_cpu (1.82 MHz)    : PDP-1 original frequency (51 MHz / 28)
 // =============================================================================
 
 module clock_domain (
     // PLL inputs
-    input  wire clk_pixel,      // 75 MHz pixel clock
-    input  wire clk_cpu_fast,   // 50 MHz CPU base clock
+    input  wire clk_pixel,      // 51 MHz pixel clock (1024x768@50Hz)
+    input  wire clk_cpu_fast,   // 51 MHz CPU base clock
     input  wire pll_locked,     // PLL lock signal
     input  wire rst_n,          // External async reset (active low)
 
     // Generated clocks
-    output wire clk_cpu,        // 1.79 MHz CPU clock
-    output reg  clk_cpu_en,     // Clock enable za sinhroni dizajn
+    output wire clk_cpu,        // 1.82 MHz CPU clock (51 MHz / 28)
+    output reg  clk_cpu_en,     // Clock enable for synchronous design
 
     // Synchronized resets (active low)
-    output reg  rst_pixel_n,    // Reset sinkroniziran na pixel clock
-    output reg  rst_cpu_n,      // Reset sinkroniziran na CPU clock
+    output reg  rst_pixel_n,    // Reset synchronized to pixel clock
+    output reg  rst_cpu_n,      // Reset synchronized to CPU clock
 
     // CDC interface: CPU -> Video
-    input  wire [11:0] cpu_fb_addr,     // Frame buffer adresa iz CPU
-    input  wire [11:0] cpu_fb_data,     // Frame buffer podaci iz CPU
-    input  wire        cpu_fb_we,       // Write enable iz CPU
-    output reg  [11:0] vid_fb_addr,     // Sinkronizirano na video domenu
-    output reg  [11:0] vid_fb_data,     // Sinkronizirano na video domenu
-    output reg         vid_fb_we,       // Sinkronizirano na video domenu
+    input  wire [11:0] cpu_fb_addr,     // Frame buffer address from CPU
+    input  wire [11:0] cpu_fb_data,     // Frame buffer data from CPU
+    input  wire        cpu_fb_we,       // Write enable from CPU
+    output reg  [11:0] vid_fb_addr,     // Synchronized to video domain
+    output reg  [11:0] vid_fb_data,     // Synchronized to video domain
+    output reg         vid_fb_we,       // Synchronized to video domain
 
     // CDC interface: Video -> CPU (vertical blank signal)
-    input  wire        vid_vblank,      // VBlank iz video kontrolera
-    output reg         cpu_vblank       // Sinkronizirano na CPU domenu
+    input  wire        vid_vblank,      // VBlank from video controller
+    output reg         cpu_vblank       // Synchronized to CPU domain
 );
 
     // =========================================================================
-    // PARAMETRI
+    // PARAMETERS
     // =========================================================================
 
-    // Prescaler: 50 MHz / 28 = 1.785714 MHz (blizu PDP-1 originalnih 1.79 MHz)
-    // PDP-1 je radio na 200 kHz do 1.79 MHz ovisno o verziji
+    // Prescaler: 51 MHz / 28 = 1.821428 MHz (close to original PDP-1 1.79 MHz)
+    // PDP-1 operated at 200 kHz to 1.79 MHz depending on version
     localparam PRESCALER_DIV = 28;
     localparam PRESCALER_BITS = 5;  // ceil(log2(28)) = 5
 
-    // Reset sequencing: cekaj 16 ciklusa nakon PLL lock
+    // Reset sequencing: wait 16 cycles after PLL lock
     localparam RESET_DELAY = 16;
     localparam RESET_DELAY_BITS = 5;
 
     // =========================================================================
     // CPU CLOCK PRESCALER
     // =========================================================================
-    // Generira 1.79 MHz clock iz 50 MHz
-    // Koristi clock enable pristup za bolju FPGA kompatibilnost
+    // Generates 1.82 MHz clock from 51 MHz (51 MHz / 28 = 1.821 MHz)
+    // Uses clock enable approach for better FPGA compatibility
 
     reg [PRESCALER_BITS-1:0] prescaler_cnt;
     reg clk_cpu_reg;
@@ -88,20 +88,20 @@ module clock_domain (
         end
     end
 
-    // BUFG bi bio koristen na stvarnom FPGA-u, ali za simulaciju direktno
+    // BUFG would be used on real FPGA, but for simulation use direct assignment
     assign clk_cpu = clk_cpu_reg;
 
     // =========================================================================
     // RESET SEQUENCING
     // =========================================================================
-    // Sekvenca:
-    // 1. Cekaj PLL lock
-    // 2. Cekaj RESET_DELAY ciklusa za stabilizaciju
-    // 3. Oslobodi reset sinkronizirano za svaku clock domenu
+    // Sequence:
+    // 1. Wait for PLL lock
+    // 2. Wait RESET_DELAY cycles for stabilization
+    // 3. Release reset synchronized to each clock domain
 
     // --- Pixel domain reset synchronizer ---
     reg [RESET_DELAY_BITS-1:0] pixel_rst_cnt;
-    reg [2:0] pixel_rst_sync;  // 3-stage synchronizer
+    (* ASYNC_REG = "TRUE" *) reg [2:0] pixel_rst_sync;  // 3-stage synchronizer
 
     always @(posedge clk_pixel or negedge rst_n) begin
         if (!rst_n) begin
@@ -109,19 +109,19 @@ module clock_domain (
             pixel_rst_cnt  <= 0;
             rst_pixel_n    <= 1'b0;
         end else begin
-            // Sinkroniziraj PLL lock signal
+            // Synchronize PLL lock signal
             pixel_rst_sync <= {pixel_rst_sync[1:0], pll_locked};
 
             if (!pixel_rst_sync[2]) begin
-                // PLL nije zakljucan - drzi reset
+                // PLL not locked - hold reset
                 pixel_rst_cnt <= 0;
                 rst_pixel_n   <= 1'b0;
             end else if (pixel_rst_cnt < RESET_DELAY - 1) begin
-                // Cekaj stabilizaciju
+                // Wait for stabilization
                 pixel_rst_cnt <= pixel_rst_cnt + 1'b1;
                 rst_pixel_n   <= 1'b0;
             end else begin
-                // Oslobodi reset
+                // Release reset
                 rst_pixel_n <= 1'b1;
             end
         end
@@ -129,7 +129,7 @@ module clock_domain (
 
     // --- CPU domain reset synchronizer ---
     reg [RESET_DELAY_BITS-1:0] cpu_rst_cnt;
-    reg [2:0] cpu_rst_sync;  // 3-stage synchronizer
+    (* ASYNC_REG = "TRUE" *) reg [2:0] cpu_rst_sync;  // 3-stage synchronizer
 
     always @(posedge clk_cpu_fast or negedge rst_n) begin
         if (!rst_n) begin
@@ -137,19 +137,19 @@ module clock_domain (
             cpu_rst_cnt  <= 0;
             rst_cpu_n    <= 1'b0;
         end else begin
-            // Sinkroniziraj PLL lock signal
+            // Synchronize PLL lock signal
             cpu_rst_sync <= {cpu_rst_sync[1:0], pll_locked};
 
             if (!cpu_rst_sync[2]) begin
-                // PLL nije zakljucan - drzi reset
+                // PLL not locked - hold reset
                 cpu_rst_cnt <= 0;
                 rst_cpu_n   <= 1'b0;
             end else if (cpu_rst_cnt < RESET_DELAY - 1) begin
-                // Cekaj stabilizaciju
+                // Wait for stabilization
                 cpu_rst_cnt <= cpu_rst_cnt + 1'b1;
                 rst_cpu_n   <= 1'b0;
             end else begin
-                // Oslobodi reset
+                // Release reset
                 rst_cpu_n <= 1'b1;
             end
         end
@@ -158,18 +158,19 @@ module clock_domain (
     // =========================================================================
     // CLOCK DOMAIN CROSSING: CPU -> VIDEO
     // =========================================================================
-    // Koristi 2-stage synchronizer za kontrolne signale
-    // i handshake protokol za podatke
+    // Uses 2-stage synchronizer for control signals
+    // and handshake protocol for data
     //
-    // Frame buffer pristup je relativno spor (CPU @ 1.79 MHz),
-    // pa jednostavan synchronizer radi dobro
+    // Frame buffer access is relatively slow (CPU @ 1.82 MHz),
+    // so simple synchronizer works well
 
-    // Stage 1: Registri u CPU domeni (vec su tu iz CPU-a)
-    // Stage 2 & 3: Synchronizer u video domeni
+    // Stage 1: Registers in CPU domain (already there from CPU)
+    // Stage 2 & 3: Synchronizer in video domain
 
-    reg [11:0] fb_addr_sync1, fb_addr_sync2;
-    reg [11:0] fb_data_sync1, fb_data_sync2;
-    reg        fb_we_sync1, fb_we_sync2, fb_we_sync3;
+    // CDC synchronizer registers with ASYNC_REG for proper placement - Kosjenka/REGOC team
+    (* ASYNC_REG = "TRUE" *) reg [11:0] fb_addr_sync1, fb_addr_sync2;
+    (* ASYNC_REG = "TRUE" *) reg [11:0] fb_data_sync1, fb_data_sync2;
+    (* ASYNC_REG = "TRUE" *) reg        fb_we_sync1, fb_we_sync2, fb_we_sync3;
 
     always @(posedge clk_pixel or negedge rst_pixel_n) begin
         if (!rst_pixel_n) begin
@@ -184,22 +185,22 @@ module clock_domain (
             vid_fb_data   <= 12'b0;
             vid_fb_we     <= 1'b0;
         end else begin
-            // 2-stage synchronizer za adresu i podatke
-            // (podaci su stabilni dok je we aktivan)
+            // 2-stage synchronizer for address and data
+            // (data is stable while we is active)
             fb_addr_sync1 <= cpu_fb_addr;
             fb_addr_sync2 <= fb_addr_sync1;
             fb_data_sync1 <= cpu_fb_data;
             fb_data_sync2 <= fb_data_sync1;
 
-            // 3-stage synchronizer za write enable (kontrolni signal)
+            // 3-stage synchronizer for write enable (control signal)
             fb_we_sync1 <= cpu_fb_we;
             fb_we_sync2 <= fb_we_sync1;
             fb_we_sync3 <= fb_we_sync2;
 
-            // Output registri
+            // Output registers
             vid_fb_addr <= fb_addr_sync2;
             vid_fb_data <= fb_data_sync2;
-            // Detektiraj rising edge za single-cycle write pulse
+            // Detect rising edge for single-cycle write pulse
             vid_fb_we   <= fb_we_sync2 & ~fb_we_sync3;
         end
     end
@@ -207,9 +208,10 @@ module clock_domain (
     // =========================================================================
     // CLOCK DOMAIN CROSSING: VIDEO -> CPU
     // =========================================================================
-    // VBlank signal za CPU (koristi se za frame sync)
+    // VBlank signal for CPU (used for frame sync)
 
-    reg vblank_sync1, vblank_sync2;
+    // CDC synchronizer for VBlank signal - ASYNC_REG added - Kosjenka/REGOC team
+    (* ASYNC_REG = "TRUE" *) reg vblank_sync1, vblank_sync2;
 
     always @(posedge clk_cpu_fast or negedge rst_cpu_n) begin
         if (!rst_cpu_n) begin

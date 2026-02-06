@@ -1,31 +1,32 @@
 // =============================================================================
 // Test Animation Module: "Orbital Spark" - Phosphor Decay Test
 // =============================================================================
-// Dizajn: Git
-// Implementacija: Jelena Horvat, REGOC tim
-// Datum: 2026-01-31
+// Design: Git
+// Implementation: Jelena Horvat, REGOC team
+// Date: 2026-01-31
+// HDL Best Practices Audit: Kosjenka/REGOC team
 //
-// OPIS:
-//   Svijetla tocka koja kruzi po elipticnoj orbiti oko centra ekrana.
-//   Phosphor decay u CRT modulu stvara "rep" iza tocke.
+// DESCRIPTION:
+//   Bright point that orbits in an elliptical path around the screen center.
+//   Phosphor decay in CRT module creates a "tail" behind the point.
 //
-// MATEMATIKA:
+// MATHEMATICS:
 //   X(t) = Cx + A * cos(theta)
 //   Y(t) = Cy + B * sin(theta)
 //
-//   Za CRT 512x512:
-//   - Cx = 256, Cy = 256 (centar)
-//   - A = 100 (polu-os X)
-//   - B = 80 (polu-os Y)
-//   - theta se povecava svakih 1024 clockova za kontinuiranu animaciju
+//   For CRT 512x512:
+//   - Cx = 256, Cy = 256 (center)
+//   - A = 100 (semi-axis X)
+//   - B = 80 (semi-axis Y)
+//   - theta increases every 1024 clocks for continuous animation
 //
 // INTERFACE:
-//   - Kompatibilan s pdp1_vga_crt.v pixel interface
+//   - Compatible with pdp1_vga_crt.v pixel interface
 //   - Output: pixel_x, pixel_y, pixel_brightness, pixel_valid
 //
-// NAPOMENA:
-//   Kontinuirano emitiranje piksela (ne ceka frame_tick).
-//   Pri 25MHz, svakih 1024 clockova = ~24414 pozicija/sec = glatko kretanje
+// NOTE:
+//   Continuous pixel emission (does not wait for frame_tick).
+//   At 25MHz, every 1024 clocks = ~24414 positions/sec = smooth motion
 //
 // TAGS: PHOSPHOR, ANIMATION, IMPLEMENTATION, VERILOG
 // =============================================================================
@@ -43,17 +44,17 @@ module test_animation (
 );
 
     // =========================================================================
-    // PARAMETERS - Ellipse Configuration (za PDP-1 512x512 koordinatni sustav)
+    // PARAMETERS - Ellipse Configuration (for PDP-1 512x512 coordinate system)
     // =========================================================================
-    // NAPOMENA: CRT modul mapira koordinate u PDP-1 prostor (0-511 x 0-511)
-    // koji se prikazuje centriran u 1024x768@50Hz VGA frameu.
-    // Centar treba biti 256,384 za pravilno centriranje:
-    // - X=256 je centar PDP-1 prostora (512/2)
-    // - Y=384 je centar VGA prostora (768/2)
-    localparam [9:0] CENTER_X = 10'd256;   // Centar X (PDP-1 512/2)
-    localparam [9:0] CENTER_Y = 10'd384;   // Centar Y (VGA 768/2)
-    localparam [7:0] SEMI_A   = 8'd100;    // Polu-os X (horizontal)
-    localparam [7:0] SEMI_B   = 8'd80;     // Polu-os Y (vertical)
+    // NOTE: CRT module maps coordinates to PDP-1 space (0-511 x 0-511)
+    // which is displayed centered in 1024x768@50Hz VGA frame.
+    // Center should be 256,384 for proper centering:
+    // - X=256 is center of PDP-1 space (512/2)
+    // - Y=384 is center of VGA space (768/2)
+    localparam [9:0] CENTER_X = 10'd256;   // Center X (PDP-1 512/2)
+    localparam [9:0] CENTER_Y = 10'd384;   // Center Y (VGA 768/2)
+    localparam [7:0] SEMI_A   = 8'd100;    // Semi-axis X (horizontal)
+    localparam [7:0] SEMI_B   = 8'd80;     // Semi-axis Y (vertical)
 
     // =========================================================================
     // SIN/COS LOOKUP TABLE
@@ -71,7 +72,7 @@ module test_animation (
     reg [7:0] sin_table [0:255];
     reg [7:0] cos_table [0:255];
 
-    // Inicijalizacija lookup tablica (generirano)
+    // Lookup table initialization (generated)
     initial begin
         // Quadrant 0: 0-63 (0 to pi/2)
         sin_table[  0] = 8'd128; cos_table[  0] = 8'd255;
@@ -341,12 +342,12 @@ module test_animation (
     // =========================================================================
     // ANGLE COUNTER & EMIT COUNTER
     // =========================================================================
-    // Kontinuirano emitiranje: svakih 1024 clockova nova pozicija
-    // Pri 25MHz: 25000000/1024 = ~24414 pozicija/sec
-    // 256 pozicija za puni krug = ~10.5 krugova/sec (brza animacija)
+    // Continuous emission: every 1024 clocks new position
+    // At 25MHz: 25000000/1024 = ~24414 positions/sec
+    // 256 positions for full circle = ~10.5 circles/sec (fast animation)
 
     reg [7:0] angle;
-    reg [15:0] emit_counter;  // Broji clockove izmedju emitiranja
+    reg [15:0] emit_counter;  // Counts clocks between emissions
 
     // Export angle for debug
     assign debug_angle = angle;
@@ -359,7 +360,7 @@ module test_animation (
     reg signed [16:0] x_offset, y_offset;
     reg [9:0] calc_x, calc_y;
 
-    // State machine za pipelined izracun koordinata
+    // State machine for pipelined coordinate calculation
     reg [2:0] state;
     localparam STATE_IDLE     = 3'd0;
     localparam STATE_LOOKUP   = 3'd1;
@@ -387,9 +388,9 @@ module test_animation (
 
             case (state)
                 STATE_IDLE: begin
-                    // Kontinuirano emitiranje: svakih 1024 clockova
+                    // Continuous emission: every 1024 clocks
                     if (emit_counter[9:0] == 10'd0) begin
-                        // Nova pozicija na orbiti
+                        // New position on orbit
                         angle <= angle + 1'b1;
                         state <= STATE_LOOKUP;
                     end
@@ -428,7 +429,7 @@ module test_animation (
                     pixel_brightness <= 3'd7;  // Maximum brightness
                     pixel_valid <= 1'b1;
 
-                    state <= STATE_IDLE;  // Odmah natrag u IDLE za sljedeci emit
+                    state <= STATE_IDLE;  // Return to IDLE for next emit
                 end
 
                 default: state <= STATE_IDLE;

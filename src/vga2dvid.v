@@ -2,8 +2,8 @@
 // VGA to DVID (DVI/HDMI) Converter - Verilog Implementation
 // =============================================================================
 // Based on Mike Field's VHDL implementation and Emard's unified SDR/DDR version
-// Ported to Verilog by: Jelena Horvat, REGOC tim
-// Datum: 2026-01-31
+// Ported to Verilog by: Jelena Horvat, REGOC team
+// Date: 2026-01-31
 //
 // Takes VGA input and converts to TMDS for DVI/HDMI output
 // Supports both SDR (10x pixel clock) and DDR (5x pixel clock) modes
