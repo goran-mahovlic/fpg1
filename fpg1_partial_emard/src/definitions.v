@@ -1,0 +1,1 @@
+definitions-1280x1024-50Hz.v

@@ -108,7 +108,7 @@ module top_pdp1
 
     // Local parameters (computed, do not override)
     localparam C_PIXEL_CLK_FREQ = 51_000_000;  // 51 MHz pixel clock
-    localparam C_CPU_CLK_FREQ   = 6_250_000;   // 6.25 MHz CPU clock
+    localparam C_CPU_CLK_FREQ   = 51_000_000;   // 6.25 MHz CPU clock
 
     // =========================================================================
     // ACTIVE-LOW -> ACTIVE-HIGH BUTTON CONVERSION
@@ -142,20 +142,30 @@ module top_pdp1
     // Clock tree:
     //   clk_25mhz (input) -> PLL -> clk_shift (125 MHz, HDMI serializer)
     //                           -> clk_pixel (51 MHz, VGA timing)
-    //                           -> clk_cpu (6.25 MHz, PDP-1 emulation)
+    //                           -> clk_cpu (6.25 MHz, PDP-1 emulation) << GORAN 51 MHz
     // -------------------------------------------------------------------------
     wire clk_shift;     // 125 MHz HDMI shift clock (5x pixel for DDR)
     wire clk_pixel;     // 51 MHz pixel clock (1024x768@50Hz timing)
-    wire clk_cpu;       // 6.25 MHz CPU base clock
+    wire clk_cpu;       // 6.25 MHz CPU base clock << GORAN 51 MHz
     wire w_pll_locked;  // PLL lock indicator (active-high)
 
-    clk_25_shift_pixel_cpu u_pll
+    // clock generator
+    wire clk_locked;
+    wire [1:0] clocks;
+    wire clk_shift = clocks[0];
+    wire clk_pixel = clocks[1]; // << GORAN 51 MHz
+    wire clk_cpu = clk_pixel;
+    ecp5pll
+    #(
+        .in_hz(25*1000000),
+        .out0_hz(255*1000000),
+        .out1_hz(51*1000000)   // << GORAN 51 MHz
+    )
+    ecp5pll_inst
     (
-        .clki   (clk_25mhz),
-        .clko   (clk_shift),
-        .clks1  (clk_pixel),
-        .clks2  (clk_cpu),
-        .locked (w_pll_locked)
+        .clk_i(clk_25mhz),
+        .clk_o(clocks),
+        .locked(w_pll_locked)
     );
 
     // =========================================================================
@@ -220,7 +230,7 @@ module top_pdp1
     ) u_input (
         .i_clk            (clk_pixel),
         .i_rst_n          (rst_pixel_n),
-        .i_btn_n          (btn),              // Active-low from board
+        .i_btn_n          (btn),              // Active-low from board    // << GORAN  BTN 6:0 ??? RESET da li mora ovdje - pogotovo jer ga već koristimo kao btn[0]?
         .i_sw             (sw),
         .o_joystick_emu   (w_joystick_emu),
         .o_led_feedback   (w_led_input_feedback),
@@ -555,6 +565,7 @@ module top_pdp1
         .debug_pixel_brightness (w_cpu_debug_pixel_brightness)
     );
 
+    // << GORAN   SINUS - treba posložiti odvojeno kao modul da se može uključiti ili isključiti ovako top file izgleda dosta natrpano!!!
     // =========================================================================
     // SINE TEST PATTERN GENERATOR (SW[2] = 1 activates test mode)
     // =========================================================================
@@ -1225,6 +1236,8 @@ module top_pdp1
         .o_uart_tx            (ftdi_rxd)
     );
 `else
+
+    // << GORAN  Serial debug isto kao sinus animacija mora imati enable disable i ne natrpano sve u top!!!!
     // =========================================================================
     // CPU MODE: Serial Debug Output
     // =========================================================================
