@@ -22,8 +22,8 @@
 //   - Asynchronous assert, synchronous deassert per clock domain
 //   - rst_pixel_n: Synchronized to clk_pixel domain
 //   - rst_cpu_n:   Synchronized to clk_cpu domain
-//   - Reset source: btn[6] active-low, gated by pll_locked
-//   - NOTE: btn[0] freed for P1 Fire (was causing reset-on-fire bug)
+//   - Reset source: ~btn[0] (PWR inverted) - reset when NOT pressed
+//   - NOTE: Changed from btn[6] to ~btn[0] for user convenience
 //
 // CDC Crossings:
 //   1. CPU -> Pixel: Pixel coordinates (23 bits) via HOLD registers + sync
@@ -177,8 +177,8 @@ module top_pdp1
     // =========================================================================
     // Reset strategy: Asynchronous assert, synchronous deassert.
     // Each clock domain has its own synchronized reset signal.
-    // Reset source: btn[6] (active-low) AND pll_locked
-    // NOTE: btn[6] is F2 button on ULX3S - dedicated reset, freeing btn[0] for P1 Fire
+    // Reset source: ~btn[0] (PWR inverted) AND pll_locked
+    // NOTE: btn[0] inverted - system reset when PWR button is NOT pressed
     // -------------------------------------------------------------------------
     wire w_clk_cpu_slow;    // 1.82 MHz PDP-1 clock (51 MHz / 28, legacy interface)
     wire w_clk_cpu_en;      // Clock enable pulse
@@ -200,8 +200,8 @@ module top_pdp1
         .clk_pixel      (clk_pixel),
         .clk_cpu_fast   (clk_cpu),
         .pll_locked     (w_pll_locked),
-        .rst_n          (btn[6]),           // BTN[6] (F2) active-low = dedicated reset
-                                            // FIX: btn[0] freed for P1 Fire (Jelena, 2026-02-06)
+        .rst_n          (btn[0]),           // BTN[0] (PWR) active-low = reset when pressed
+                                            // FIX: Removed ~ inversion - btn[0] already active-low (Jelena, 2026-02-06)
 
         .clk_cpu        (w_clk_cpu_slow),
         .clk_cpu_en     (w_clk_cpu_en),
@@ -361,6 +361,7 @@ module top_pdp1
     wire [15:0] w_cpu_debug_instr_count;  // Total instructions executed
     wire [15:0] w_cpu_debug_iot_count;    // IOT instructions executed
     wire        w_cpu_debug_running;       // CPU is running
+    wire [7:0]  w_cpu_debug_state;         // CPU state machine state
 
     // Pixel debug outputs (clk_cpu domain)
     wire [31:0] w_cpu_debug_pixel_count;      // Total pixels sent
@@ -417,13 +418,14 @@ module top_pdp1
 
     always @(posedge clk_cpu) begin
         if (~rst_cpu_n) begin
-            r_start_pulse_counter <= 8'd200;  // 200 cycles at startup
+            r_start_pulse_counter <= 8'd5;  // SHORT pulse - only 5 cycles!
         end else if (r_start_pulse_counter > 0) begin
             r_start_pulse_counter <= r_start_pulse_counter - 1'b1;
         end
     end
 
-    // Generate start pulse while counter > 0 (full 200 cycle duration)
+    // Generate start pulse while counter > 0 (short pulse only)
+    // CRITICAL: Long pulse blocks CPU state machine from executing!
     assign w_start_button_pulse = (r_start_pulse_counter > 0);
 
     wire [10:0] w_console_switches;
@@ -443,7 +445,7 @@ module top_pdp1
 
     // Test word and address switches (active-high)
     wire [17:0] w_test_word    = 18'b0;
-    wire [17:0] w_test_address = 18'o500;   // Start address: octal 500 (Minskytron entry point)
+    wire [17:0] w_test_address = 18'o4;     // Start address: octal 4 (Spacewar entry point)
 
     // =========================================================================
     // CDC: DIP SWITCH SYNCHRONIZATION (External -> clk_cpu domain)
@@ -548,7 +550,7 @@ module top_pdp1
         .tape_rcv_word          (18'b0),
 
         // Start address
-        .start_address          (12'o500),          // Minskytron entry point
+        .start_address          (12'o4),            // Spacewar entry point
 
         // Configuration
         .hw_mul_enabled         (1'b1),             // Enable hardware multiply/divide
@@ -564,6 +566,7 @@ module top_pdp1
         .debug_instr_count      (w_cpu_debug_instr_count),
         .debug_iot_count        (w_cpu_debug_iot_count),
         .debug_cpu_running      (w_cpu_debug_running),
+        .debug_cpu_state        (w_cpu_debug_state),
 
         // Pixel debug outputs
         .debug_pixel_count      (w_cpu_debug_pixel_count),
@@ -1010,19 +1013,15 @@ module top_pdp1
     end
 `endif
 
-    // Unified LED assignments for comprehensive debug
-    assign led[0] = r_led_divider[24];         // Heartbeat ~1.5Hz
-    assign led[1] = r_cpu_clk_seen;            // CPU clock activity
-    assign led[2] = r_pixel_valid_seen;        // Pixel valid detected
-`ifdef TEST_ANIMATION
-    assign led[3] = r_frame_tick_seen;         // Frame tick detected
-`else
-    assign led[3] = r_frame_tick_seen_cpu;     // Frame tick detected (CPU mode)
-`endif
-    assign led[4] = r_h_counter[9];            // H counter MSB
-    assign led[5] = r_v_counter[9];            // V counter MSB
-    assign led[6] = w_pll_locked;              // PLL locked
-    assign led[7] = rst_pixel_n;               // Reset released
+    // DEBUG: Show CPU state and reset status on LEDs
+    // LED[4:0] = CPU state low bits (0-31)
+    // LED[5] = CPU reset active (should be 0 during normal operation)
+    // LED[6] = cpu_running from CPU debug
+    // LED[7] = PLL locked
+    assign led[4:0] = w_cpu_debug_state[4:0];
+    assign led[5] = ~rst_cpu_n;  // 1 = reset active
+    assign led[6] = w_cpu_debug_running;
+    assign led[7] = w_pll_locked;
 
     // =========================================================================
     // DEBUG: SERIAL OUTPUT (UART TX)
@@ -1056,6 +1055,7 @@ module top_pdp1
         .i_cpu_instr_count    (16'd0),
         .i_cpu_iot_count      (16'd0),
         .i_cpu_running        (1'b0),
+        .i_cpu_state          (8'd0),
         // Pixel Debug (animation signals)
         .i_pixel_count        (32'd0),
         .i_pixel_debug_x      (w_anim_pixel_x),
@@ -1121,6 +1121,7 @@ module top_pdp1
         .i_cpu_instr_count    (w_cpu_debug_instr_count),
         .i_cpu_iot_count      (w_cpu_debug_iot_count),
         .i_cpu_running        (w_cpu_debug_running),
+        .i_cpu_state          (w_cpu_debug_state),
         // Pixel Debug
         .i_pixel_count        (w_cpu_debug_pixel_count),
         .i_pixel_debug_x      (w_cpu_debug_pixel_x),

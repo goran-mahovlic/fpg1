@@ -53,9 +53,10 @@ module clock_domain (
     localparam PRESCALER_DIV = 28;
     localparam PRESCALER_BITS = 5;  // ceil(log2(28)) = 5
 
-    // Reset sequencing: wait 16 cycles after PLL lock
-    localparam RESET_DELAY = 16;
-    localparam RESET_DELAY_BITS = 5;
+    // Reset sequencing: wait 128 cycles after PLL lock
+    // 128 cycles @ 51 MHz = 2.5 us - covers 4+ CPU clock cycles (548 ns each)
+    localparam RESET_DELAY = 128;
+    localparam RESET_DELAY_BITS = 8;  // ceil(log2(128)) = 7, use 8 for safety
 
     // =========================================================================
     // CPU CLOCK PRESCALER

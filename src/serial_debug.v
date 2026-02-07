@@ -11,7 +11,7 @@
 //   Sends ASCII string with debug data on each frame_tick.
 //
 // DEBUG OUTPUT FORMAT:
-//   Frame Message: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R\r\n"
+//   Frame Message: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www S:xx R\r\n"
 //     F  = Frame counter (hex, 4 digits)
 //     PC = CPU Program Counter (hex, 3 digits for 12-bit)
 //     I  = Instruction count (hex, 4 digits)
@@ -19,6 +19,7 @@
 //     V  = pixel_valid count per frame (decimal, 4 digits)
 //     X  = Pixel X coordinate (decimal, 3 digits)
 //     Y  = Pixel Y coordinate (decimal, 3 digits)
+//     S  = CPU state machine state (hex, 2 digits)
 //     R  = Running indicator (R=running, .=halted)
 //
 //   Pixel Message: "P:xxxxx X:xxx Y:xxx B:x R:xxxx\r\n"
@@ -184,6 +185,7 @@ module serial_debug #(
     input  wire [15:0] i_cpu_instr_count,   // CPU instructions executed
     input  wire [15:0] i_cpu_iot_count,     // CPU IOT (display) instructions
     input  wire        i_cpu_running,       // CPU running flag
+    input  wire [7:0]  i_cpu_state,         // CPU state machine state (8-bit)
 
     // Pixel Debug Inputs (per-pixel tracking)
     input  wire [31:0] i_pixel_count,       // Total pixel count from CPU
@@ -253,6 +255,7 @@ module serial_debug #(
     reg [15:0] r_latched_instr_count;
     reg [15:0] r_latched_iot_count;
     reg        r_latched_running;
+    reg [7:0]  r_latched_cpu_state;
 
     always @(posedge i_clk) begin
         if (!i_rst_n) begin
@@ -275,6 +278,7 @@ module serial_debug #(
             r_latched_instr_count <= 16'd0;
             r_latched_iot_count   <= 16'd0;
             r_latched_running     <= 1'b0;
+            r_latched_cpu_state   <= 8'd0;
         end else begin
             // Count events during frame
             if (i_pixel_avail_synced)
@@ -304,6 +308,7 @@ module serial_debug #(
                 r_latched_instr_count <= i_cpu_instr_count;
                 r_latched_iot_count   <= i_cpu_iot_count;
                 r_latched_running     <= i_cpu_running;
+                r_latched_cpu_state   <= i_cpu_state;
             end
         end
     end
@@ -332,9 +337,9 @@ module serial_debug #(
     // =========================================================================
     // Message Buffer and FSM State
     // =========================================================================
-    // Frame Message Length: 52 characters
+    // Frame Message Length: 57 characters (was 52, +5 for " S:xx")
     // Pixel Message Length: 32 characters (28 + CR/LF + padding)
-    localparam MSG_LEN       = 52;
+    localparam MSG_LEN       = 57;
     localparam PIXEL_MSG_LEN = 28;
 
     reg [7:0] r_msg_buffer [0:MSG_LEN-1];  // Message character buffer
@@ -498,7 +503,7 @@ module serial_debug #(
                     end
                     // Priority 2: Frame info message on rising edge
                     else if (i_frame_tick && !r_frame_tick_d) begin
-                        // Format: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www R\r\n"
+                        // Format: "F:xxxx PC:xxx I:xxxx D:xxxx V:vvvv X:zzz Y:www S:xx R\r\n"
                         r_msg_buffer[0]  <= "F";
                         r_msg_buffer[1]  <= ":";
                         r_msg_buffer[2]  <= hex_to_ascii(r_latched_frame[15:12]);
@@ -546,11 +551,16 @@ module serial_debug #(
                         r_msg_buffer[44] <= digit_to_ascii(w_y_tens);
                         r_msg_buffer[45] <= digit_to_ascii(w_y_units);
                         r_msg_buffer[46] <= " ";
-                        r_msg_buffer[47] <= r_latched_running ? "R" : ".";
-                        r_msg_buffer[48] <= " ";
-                        r_msg_buffer[49] <= 8'd13;  // CR
-                        r_msg_buffer[50] <= 8'd10;  // LF
-                        r_msg_buffer[51] <= 8'd0;   // Padding
+                        r_msg_buffer[47] <= "S";
+                        r_msg_buffer[48] <= ":";
+                        r_msg_buffer[49] <= hex_to_ascii(r_latched_cpu_state[7:4]);
+                        r_msg_buffer[50] <= hex_to_ascii(r_latched_cpu_state[3:0]);
+                        r_msg_buffer[51] <= " ";
+                        r_msg_buffer[52] <= r_latched_running ? "R" : ".";
+                        r_msg_buffer[53] <= " ";
+                        r_msg_buffer[54] <= 8'd13;  // CR
+                        r_msg_buffer[55] <= 8'd10;  // LF
+                        r_msg_buffer[56] <= 8'd0;   // Padding
 
                         r_msg_index         <= 6'd0;
                         r_sending_pixel_msg <= 1'b0;

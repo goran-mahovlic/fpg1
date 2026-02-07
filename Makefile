@@ -75,7 +75,9 @@ YOSYS_FLAGS  :=
 # ==== nextpnr options ====
 # --timing-allow-fail: continue despite timing errors (for debug)
 # --seed: for reproducible results
-NEXTPNR_FLAGS := --timing-allow-fail
+# --threads: use multiple CPU threads for faster P&R
+NEXTPNR_THREADS := $(shell nproc)
+NEXTPNR_FLAGS := --timing-allow-fail --threads $(NEXTPNR_THREADS)
 
 # ==== ecppack options ====
 # --compress: compress bitstream

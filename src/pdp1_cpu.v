@@ -67,6 +67,7 @@ module pdp1_cpu (
    output reg  [15:0] debug_instr_count,           /* Total instructions executed (wraps at 65535) */
    output reg  [15:0] debug_iot_count,             /* IOT instructions executed (display commands) */
    output wire        debug_cpu_running,           /* CPU is running (not halted) */
+   output wire [7:0]  debug_cpu_state,             /* Current CPU state machine state */
 
    /* Pixel debug outputs (TASK-PIXEL-DEBUG: per-pixel tracking for image reconstruction) */
    output reg  [31:0] debug_pixel_count,           /* Total pixels sent (32-bit counter) */
@@ -121,14 +122,17 @@ parameter
 
 
 //////////////////  REGISTERS  ////////////////////
+// NOTE: Verilog reg initialization (e.g., "reg x = 1'b1;") is NOT reliable on Yosys/ECP5!
+// These initializers work in simulation but on real hardware registers may start as 0 or random.
+// All critical state must be set in reset_cpu task. See FIX BUG 4 in reset_cpu.
 
 reg  [17:0]  IR, PREV_IR;              /* Instruction Register, previous instruction register */
 reg   [6:0]  PF = 7'b0;                /* Program Flags, 1-6 are used, flag 0 exists simply to avoid handling it as a special case */
-reg   [7:0]  cpu_state;                /* Implement CPU as a State Machine, specify state the CPU is currently in. Implemented as a sequencer */
+reg   [7:0]  cpu_state = 8'd0;         /* Implement CPU as a State Machine, specify state the CPU is currently in. Implemented as a sequencer */
 reg   [0:0]  halt = 1'b0;              /* if 1, then the cpu should not start the next cycle */
-reg   [0:0]  cpu_running = 1'b1;       /* run-ff If false, well ... cpu is not running! */
+reg   [0:0]  cpu_running = 1'b1;       /* run-ff If false, well ... cpu is not running! (SET IN reset_cpu!) */
 
-reg  [11:0]  waste_cycles;             /* When non-zero, this will be decremented instead of executing anything by the CPU. Used for exact timing of instructions */
+reg  [11:0]  waste_cycles = 12'd0;     /* When non-zero, this will be decremented instead of executing anything by the CPU. (SET IN reset_cpu!) */
 
 reg   [6:0]  IOSTA = 7'b0000100;       /* Stats of various IO devices, read by cks instruction (72 0033). Bit 2 is initially 1, otherwise it would never write anything out. */
 reg   [4:0]  i = 5'b0;                 /* Helper register */
@@ -271,11 +275,20 @@ begin
    // FIX BUG 2: Initialize latched pixel coordinates to center
    pixel_x_latched <= 10'd256;
    pixel_y_latched <= 10'd256;
+   // FIX BUG 3: Reset waste_cycles to prevent stuck CPU
+   waste_cycles <= 12'd0;
+   // FIX BUG 4: ECP5 doesn't honor Verilog reg initialization - must set cpu_running during reset!
+   // Without this, cpu_running may start as 0 on ECP5 and the state machine case block never executes.
+   cpu_running <= 1'b1;
+   // FIX BUG 7: Reset SKIP_REST_OF_INSTR - if it powers up as 1 on ECP5, the case block is skipped
+   // for all states except initial_state, causing the CPU to never execute instructions properly.
+   SKIP_REST_OF_INSTR <= 1'b0;
 end
 endtask
 
 // Debug output: CPU running status
 assign debug_cpu_running = cpu_running;
+assign debug_cpu_state = cpu_state;
 
 // Pixel debug outputs: expose latched coordinates and brightness
 assign debug_pixel_x = pixel_x_latched;
@@ -754,8 +767,15 @@ begin
             PC <= operand[11:0];
          end
 
-      default:
-         SKIP_REST_OF_INSTR <= 1'b1;
+      // FIX BUG 8: The default case was incorrectly setting SKIP_REST_OF_INSTR for ANY
+      // unhandled opcode. This caused all subsequent states to be skipped until reaching
+      // initial_state again. Since all valid PDP-1 opcodes ARE handled above, this default
+      // case should NEVER match. If it does match (invalid opcode), we should NOT set
+      // SKIP_REST_OF_INSTR because that would break the instruction cycle.
+      //
+      // For i_jmp and i_jsp, SKIP_REST_OF_INSTR is correctly set OUTSIDE this task
+      // at line 894 in the execute state handler.
+      default: ;  // Do nothing for invalid opcodes - let instruction cycle complete normally
 
    endcase
 end
@@ -797,11 +817,16 @@ always @(posedge clk) begin
    if (`continue_button || `start_button) // && SP_4
       cpu_running <= 1'b1;
 
+   // FIX BUG 5: When entering initial_state from state 3 (first instruction), ensure waste_cycles is 0
+   // This is critical because ECP5 doesn't honor Verilog reg initialization
+   if (cpu_state == initial_state - 1'b1)  // state 3 -> about to become state 4
+      waste_cycles <= 12'd0;
+
    /* If we are in single instruction mode, remain in initial_state until continue is pressed, then get stuck again in next initial_state */
    if (cpu_state == initial_state && `single_inst_switch)
       cpu_state <=  (~prev_continue_button && `continue_button) ? cpu_state + 1'b1 : initial_state ;
 
-   else if (cpu_state == initial_state && waste_cycles)                       /* If non-zero, it will keep decrementing until zero rather than execute anything. Used to fine-tune instruction duration */
+   else if (cpu_state == initial_state && |waste_cycles)                      /* FIX: Use reduction OR for reliable non-zero check. If non-zero, decrement instead of executing. */
       waste_cycles <= waste_cycles - 1'b1;
 
    else if (cpu_state == cleanup + 1'b1)                                      /* If skip rest of instruction flag active, this makes sure it overflows to initial state, not poweron state */
@@ -919,10 +944,23 @@ always @(posedge clk) begin
                debug_instr_count <= debug_instr_count + 1'b1;
             end
 
-         // Safe state recovery: return to initial_state if FSM reaches undefined state
-         // Added by Jelena Kovacevic for HDL best practices compliance
-         default:
-            cpu_state <= initial_state;
+         // FIX BUG 6: The default case was resetting cpu_state for ALL states not
+         // explicitly listed, including valid "transit" states 1-30, 32-50, etc.
+         // This caused the CPU to get stuck because the state counter couldn't
+         // advance through transit states.
+         //
+         // Transit states between explicit states are normal operation - the state
+         // counter just increments through them. Only truly invalid states (e.g.,
+         // after cleanup which is 254, before wrapping back to initial_state)
+         // should trigger recovery.
+         //
+         // REMOVED: The dangerous default case that broke the state machine.
+         // The state machine now relies on lines 816-826 for state advancement,
+         // which is the original intended behavior.
+         //
+         // Note: State 255 (cleanup+1) is handled explicitly in lines 822-823:
+         //       else if (cpu_state == cleanup + 1'b1) cpu_state <= initial_state;
+         default: ;  // Do nothing - state counter handles advancement
       endcase
    end
 end

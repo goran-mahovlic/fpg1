@@ -61,6 +61,8 @@ reg inside_visible_area;                                       /* Indicates if c
 reg is_cursor_over_hole,                                       /* Tracks where the holes and tears are for the perforated continuous paper should be drawn */
     is_dashed_line;
 
+reg [5:0] dummy_erase;                                          /* Counter for erasing last row */
+
 
 /////////////////  ASSIGNMENTS  ///////////////////
 
@@ -190,7 +192,6 @@ end
 
 /* horizontal and vertical pulse counters */
 always @(posedge clk) begin
-   reg [5:0] dummy_erase;
 
    /* Read from one line buffer to the screen and prepare the next line */
    if (current_x[3:0] == 4'b0000)
