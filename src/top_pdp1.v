@@ -147,29 +147,22 @@ module top_pdp1
     // CLOCK GENERATION (PLL) - 1024x768@50Hz Video Mode
     // =========================================================================
     // Clock tree:
-    //   clk_25mhz (input) -> PLL -> clk_shift (125 MHz, HDMI serializer)
+    //   clk_25mhz (input) -> PLL -> clk_shift (255 MHz, HDMI DDR serializer)
     //                           -> clk_pixel (51 MHz, VGA timing)
     //                           -> clk_cpu (51 MHz, PDP-1 emulation base clock)
     // -------------------------------------------------------------------------
-    // Clock signals - FIX: removed duplicate wire declarations - Kosjenka/REGOC team
+    wire clk_shift;     // 255 MHz HDMI shift clock (5x pixel for DDR)
+    wire clk_pixel;     // 51 MHz pixel clock (1024x768@50Hz timing)
+    wire clk_cpu;       // 51 MHz CPU base clock (same as pixel)
     wire w_pll_locked;  // PLL lock indicator (active-high)
 
-    // Clock generator
-    wire [1:0] clocks;
-    wire clk_shift = clocks[0];   // 125 MHz HDMI shift clock (5x pixel for DDR)
-    wire clk_pixel = clocks[1];   // 51 MHz pixel clock (1024x768@50Hz timing)
-    wire clk_cpu   = clk_pixel;   // 51 MHz CPU base clock (same as pixel clock)
-    ecp5pll
-    #(
-        .in_hz(25*1000000),
-        .out0_hz(255*1000000),
-        .out1_hz(51*1000000)   // 51 MHz pixel/CPU clock
-    )
-    ecp5pll_inst
+    clk_25_shift_pixel_cpu u_pll
     (
-        .clk_i(clk_25mhz),
-        .clk_o(clocks),
-        .locked(w_pll_locked)
+        .clki   (clk_25mhz),
+        .clko   (clk_shift),
+        .clks1  (clk_pixel),
+        .clks2  (clk_cpu),
+        .locked (w_pll_locked)
     );
 
     // =========================================================================
@@ -195,13 +188,16 @@ module top_pdp1
     wire        w_vid_vblank;
     wire        w_cpu_vblank;
 
+    // RESTORED: Direct btn[0] reset (as in working version f1cc163)
+    // Power-on reset generator removed - it was causing the black screen bug.
+    // clock_domain.v has its own internal reset synchronizer with 128 cycle delay.
+
     clock_domain u_clock_domain
     (
         .clk_pixel      (clk_pixel),
         .clk_cpu_fast   (clk_cpu),
         .pll_locked     (w_pll_locked),
-        .rst_n          (btn[0]),           // BTN[0] (PWR) active-low = reset when pressed
-                                            // FIX: Removed ~ inversion - btn[0] already active-low (Jelena, 2026-02-06)
+        .rst_n          (btn[0]),           // BTN[0] active-low = reset (direct, as in working version)
 
         .clk_cpu        (w_clk_cpu_slow),
         .clk_cpu_en     (w_clk_cpu_en),

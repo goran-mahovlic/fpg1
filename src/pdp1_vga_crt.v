@@ -167,26 +167,11 @@ endfunction
 // Tasks
 //==============================================================================
 
-// output_pixel: Convert intensity to RGB color
+// output_pixel: Inline pixel output conversion
 // High intensity (>=128): Blue-white phosphor glow
 // Low intensity (<128): Green phosphor glow
 // This simulates the color shift of P7 phosphor as it decays.
-task output_pixel;
-    input [7:0] intensity;
-    begin
-        // Default low-intensity output
-        o_red   <= r_inside_visible ? {5'b0, intensity[7:5]} : 8'b0;
-        o_green <= r_inside_visible ? intensity              : 8'b0;
-        o_blue  <= r_inside_visible ? intensity[7]           : 8'b0;
-
-        // High intensity override: shift toward blue-white
-        if (intensity >= 8'h80) begin
-            o_red   <= r_inside_visible ? intensity[7:6] : 8'b0;
-            o_green <= r_inside_visible ? intensity      : 8'b0;
-            o_blue  <= r_inside_visible ? intensity      : 8'b0;
-        end
-    end
-endtask
+// NOTE: This is now inline logic instead of a task to avoid scope issues with r_inside_visible
 
 
 //==============================================================================
@@ -691,7 +676,18 @@ always @(posedge i_clk) begin
     //--------------------------------------------------------------------------
     // VGA Output: Convert intensity to RGB
     //--------------------------------------------------------------------------
-    output_pixel(r_pixel_out);
+    // Inline pixel output conversion (was previously a task)
+    // Default low-intensity output
+    o_red   <= r_inside_visible ? {5'b0, r_pixel_out[7:5]} : 8'b0;
+    o_green <= r_inside_visible ? r_pixel_out              : 8'b0;
+    o_blue  <= r_inside_visible ? r_pixel_out[7]          : 8'b0;
+
+    // High intensity override: shift toward blue-white
+    if (r_pixel_out >= 8'h80) begin
+        o_red   <= r_inside_visible ? r_pixel_out[7:6] : 8'b0;
+        o_green <= r_inside_visible ? r_pixel_out      : 8'b0;
+        o_blue  <= r_inside_visible ? r_pixel_out      : 8'b0;
+    end
 
     //--------------------------------------------------------------------------
     // Row Buffer Write: Transfer pixels from ring buffer taps

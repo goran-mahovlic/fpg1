@@ -26,7 +26,7 @@ module pdp1_cpu (
    /* Outputs to console */
    output reg  [17:0] AC,                          /* Accumulator */
    output reg  [17:0] IO,                          /* Input Output register */
-   output reg  [11:0] PC,                          /* Program counter */
+   output reg  [11:0] PC = 12'd4,                   /* Program counter - default to start_address, ECP5 may not honor this */
    output wire [31:0] BUS_out,                     /* Multiplex various flags for console blinkenlights output */
 
    /* Input controllers */
@@ -149,6 +149,13 @@ reg [16:0] division_remainder;
 // FIX BUG 2: Latched pixel coordinates for CRT output
 reg [9:0] pixel_x_latched;
 reg [9:0] pixel_y_latched;
+
+// FIX BUG 15: One-shot PC forcing at startup
+// Use a simple one-shot: force PC once when counter transitions 99->100
+// This happens exactly once regardless of initial counter value (within 100 cycles of wrap)
+reg [7:0] r_startup_cnt = 8'd0;  // 8-bit counter (0-255)
+reg r_pc_forced = 1'b0;  // Set to 1 after PC is forced
+wire w_force_pc_now = (r_startup_cnt == 8'd100) && !r_pc_forced;  // One-shot trigger
 
 //////////////////  FUNCTIONS  ////////////////////
 
@@ -803,7 +810,40 @@ assign BUS_out[19:0] = { cpu_running && ~`power_switch, OV, IR[17:13], PF[6:1], 
 /////////////////  MAIN BLOCK  ////////////////////
 
 /* 50 MHz input clock = 20 ns period. Instructions last 5 or 10 uS (250 or 500 clocks), so we have time to spare. */
+/* FIX BUG 11: Sync reset with first-clock-cycle initialization */
+/* ECP5 DFFs have sync reset - async reset is converted to sync by Yosys */
 always @(posedge clk) begin
+   // CRITICAL: Check reset FIRST before any other logic
+   if (rst) begin
+      // Sync reset - inline code for reliable synthesis
+      PC           <= start_address;
+      AC           <= 18'b0;
+      IO           <= 18'b0;
+      MEM_BUFF     <= 18'b0;
+      MEM_ADDR     <= 12'b0;
+      IR           <= 18'b0;
+      IOSTA        <= 7'b0000100;
+      PF           <= 1'b0;
+      OV           <= 1'b0;
+      halt         <= 1'b0;
+      WRITE_ENABLE <= 1'b0;
+      cpu_state    <= poweron_state;
+      debug_instr_count <= 16'd0;
+      debug_iot_count   <= 16'd0;
+      debug_pixel_count <= 32'd0;
+      pixel_x_latched <= 10'd256;
+      pixel_y_latched <= 10'd256;
+      waste_cycles <= 12'd0;
+      cpu_running <= 1'b1;
+      SKIP_REST_OF_INSTR <= 1'b0;
+      r_pc_forced <= 1'b1;  // Proper reset happened, no need to force PC
+      r_startup_cnt <= 8'd200;  // Skip past trigger point
+   end
+   else begin
+
+   // FIX BUG 15: Startup counter - always increments, wraps at 255
+   r_startup_cnt <= r_startup_cnt + 1'b1;
+
    old_typewriter_strobe_in <= typewriter_strobe_in;                          /* Store old values for positive edge detection */
    prev_continue_button <= `continue_button;
 
@@ -845,10 +885,15 @@ always @(posedge clk) begin
 
    /* ************************************** */
 
-   if (rst)                                     /* If reset signal is high, hold the CPU in reset */
-      reset_cpu();
+   // FIX BUG 10: Force PC to start_address during power-on phase (states 0-3)
+   // This ensures PC is correctly initialized even if reset timing is problematic on ECP5.
+   // We check for states < initial_state (4) to cover the entire power-on sequence.
+   if (cpu_state < initial_state)
+      PC <= start_address;
 
-   else if (`start_button)                      /* Pressing start button puts address set by test address switches in program counter */
+   // FIX BUG 11: Sync reset removed - async reset is now at beginning of always block
+
+   if (`start_button)                      /* Pressing start button puts address set by test address switches in program counter */
       PC <= test_address[11:0];
 
    else if (~cpu_running && ~`power_switch) begin                 /* If CPU is stopped, enable reading and writing memory through console switches */
@@ -862,7 +907,9 @@ always @(posedge clk) begin
          MEM_ADDR <= test_address[11:0];
    end
 
-   else if (!SKIP_REST_OF_INSTR || cpu_state == initial_state) begin  /* Don't do any of this if SKIP_REST_OF_INSTR is set, except when we reach the next initial state */
+   // FIX BUG 9: Added cpu_state == poweron_state to condition to ensure PC initialization
+   // even if SKIP_REST_OF_INSTR is stuck high due to ECP5 not honoring reg initialization
+   else if (!SKIP_REST_OF_INSTR || cpu_state == initial_state || cpu_state == poweron_state) begin  /* Don't do any of this if SKIP_REST_OF_INSTR is set, except when we reach the next initial state or poweron */
       SKIP_REST_OF_INSTR <= 1'b0;                                       /* Set this to false by default, set to true when needed */
 
       case (cpu_state)
@@ -963,6 +1010,16 @@ always @(posedge clk) begin
          default: ;  // Do nothing - state counter handles advancement
       endcase
    end
+
+   // FIX BUG 15 (final): One-shot PC forcing
+   // When counter hits 100 and we haven't forced yet, force PC and mark as done
+   if (w_force_pc_now) begin
+      PC <= start_address;
+      cpu_state <= poweron_state;
+      r_pc_forced <= 1'b1;  // Prevent future forcing
+   end
+
+   end  // FIX BUG 11: closing else for async reset
 end
 
 endmodule

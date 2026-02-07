@@ -29,7 +29,7 @@ module clock_domain (
 
     // Synchronized resets (active low)
     output reg  rst_pixel_n,    // Reset synchronized to pixel clock
-    output reg  rst_cpu_n,      // Reset synchronized to CPU clock
+    output reg  rst_cpu_n = 1'b0,      // Reset synchronized to CPU clock (initialized to active reset)
 
     // CDC interface: CPU -> Video
     input  wire [11:0] cpu_fb_addr,     // Frame buffer address from CPU
@@ -101,8 +101,9 @@ module clock_domain (
     // 3. Release reset synchronized to each clock domain
 
     // --- Pixel domain reset synchronizer ---
-    reg [RESET_DELAY_BITS-1:0] pixel_rst_cnt;
-    (* ASYNC_REG = "TRUE" *) reg [2:0] pixel_rst_sync;  // 3-stage synchronizer
+    // FIX BUG 13: Initialize registers to ensure reset is active on power-up
+    reg [RESET_DELAY_BITS-1:0] pixel_rst_cnt = 0;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] pixel_rst_sync = 3'b000;  // 3-stage synchronizer
 
     always @(posedge clk_pixel or negedge rst_n) begin
         if (!rst_n) begin
@@ -129,8 +130,10 @@ module clock_domain (
     end
 
     // --- CPU domain reset synchronizer ---
-    reg [RESET_DELAY_BITS-1:0] cpu_rst_cnt;
-    (* ASYNC_REG = "TRUE" *) reg [2:0] cpu_rst_sync;  // 3-stage synchronizer
+    // FIX BUG 13: Initialize registers to ensure reset is active on power-up
+    // ECP5 may not honor Verilog initial values, but GSR should help
+    reg [RESET_DELAY_BITS-1:0] cpu_rst_cnt = 0;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] cpu_rst_sync = 3'b000;  // 3-stage synchronizer
 
     always @(posedge clk_cpu_fast or negedge rst_n) begin
         if (!rst_n) begin
