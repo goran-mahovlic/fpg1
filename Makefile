@@ -117,7 +117,7 @@ PDP1_V_FILES     := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
                     $(SRC_DIR)/serial_debug.v \
                     $(SRC_DIR)/vga2dvid.v \
                     $(SRC_DIR)/tmds_encoder.v \
-                    $(EMARD_VIDEO)/fake_differential.v
+                    $(SRC_DIR)/fake_differential.v
 
 # =============================================================================
 # PDP-1 TEST ANIMATION CONFIGURATION ("Orbital Spark")
