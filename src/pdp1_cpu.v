@@ -454,7 +454,7 @@ begin
          display_crt:
          begin
             pixel_shift_out <= 1'b1;
-            pixel_brightness <= instruction[8:6];  // FIX: Brightness from IOT instruction (bits 8:6), NOT from IO register - REGOC team
+            pixel_brightness <= DI[8:6];  // REVERT: Use DI directly as in original MiSTer (MEM_BUFF was wrong)
             // FIX: Coordinates IDENTICAL to original - full 10-bit (0-1023)
             // Scaling for 512x512 display is done in CRT module
             // PDP-1 generates 10-bit signed (-512 to +511)
@@ -797,10 +797,11 @@ assign multiply_input  = AC[17] ? { ~AC[16:0], ~IO[17:1] } : { AC[16:0], IO[17:1
 assign multiply_result = abs_nosign(AC) * abs_nosign(DI);
 
 // PDP-1 coordinates are signed 10-bit (-512 to +511), mapped to display coordinates
-// FIX BUG 2: Use latched coordinates instead of combinational
-// Coordinates are latched in display_crt case when pixel_shift_out is set
-assign pixel_x_out = pixel_x_latched;
-assign pixel_y_out = pixel_y_latched;
+// REVERT: Use COMBINATIONAL coordinates like original MiSTer!
+// Latched coordinates become stale by the time CRT detects falling edge (4-5 cycles later)
+// Combinational keeps coordinates valid as long as IO/AC registers hold the values
+assign pixel_x_out = IO[17:8] + 10'd512;
+assign pixel_y_out = AC[17:8] + 10'd512;
 
 assign typewriter_char_out = IO[5:0];
 

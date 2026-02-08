@@ -7,6 +7,11 @@
 // Created: 2026-01-31
 // Modified: 2026-02-02 - Best practices implementation
 // Modified: 2026-02-03 - Team fix for CRT display bugs (ghost lines, coordinate wrap, phosphor decay)
+// Modified: 2026-02-07 - Jelena: State machine refactor for r_pixel_found (Emard recommendation)
+// Modified: 2026-02-08 - Jelena: Fix window check bounds (strict > instead of >=) to match original MiSTer
+// Modified: 2026-02-08 - Jelena Horvat: CRITICAL FIX - Remove slow state machine, restore parallel for-loop
+//                        State machine was 10 cycles per write = only ~102 erases/line = ghost pixels!
+//                        Now using combinational tap matching with single-cycle write (MiSTer approach)
 //
 // TASK-194: CRT phosphor decay emulation for PDP-1 vector display
 // TASK-200: Adapted for 1024x768@50Hz
@@ -248,7 +253,7 @@ reg [11:0]  r_luma_1, r_luma_2, r_luma_3, r_luma_4;
 //------------------------------------------------------------------------------
 reg [31:0]  r_pass_counter;              // Vertical refresh cycle counter - reset added by Jelena
 reg [9:0]   r_erase_counter;            // Row buffer erase position
-reg         r_pixel_found;              // Flag: pixel found for rowbuffer write
+// State machine removed 2026-02-08 by Jelena Horvat - now using parallel for-loop
 
 reg [31:0]  r_search_counter;           // Cycles since last ring buffer tap match
 
@@ -275,7 +280,8 @@ reg [15:0]  r_pixel_out;                // Blurred pixel intensity for output
 //------------------------------------------------------------------------------
 (* ASYNC_REG = "TRUE" *) reg r_pixel_valid_meta;    // Metastability stage
 (* ASYNC_REG = "TRUE" *) reg r_pixel_valid_sync;    // Synchronized stage
-reg         r_pixel_valid_sync_d;       // Delayed sync for proper edge detection
+reg         r_pixel_valid_sync_d;       // Delayed sync for edge detection
+reg         r_pixel_valid_sync_dd;      // 2nd delay stage (matches original MiSTer)
 reg         r_pixel_strobe;             // Detected falling edge (pixel ready)
 
 //------------------------------------------------------------------------------
@@ -287,6 +293,22 @@ reg         r_inside_visible;           // Current position is in visible area
 // Loop Index (for generate-style loops in always blocks)
 //------------------------------------------------------------------------------
 integer i;
+
+//==============================================================================
+// Parallel Tap Matching Logic (Jelena Horvat - CRITICAL FIX 2026-02-08)
+//==============================================================================
+// REMOVED: 10-cycle state machine that was too slow (only ~102 erases/line)
+// RESTORED: Original MiSTer approach with parallel combinational tap matching
+//
+// The for-loop in the always block synthesizes to PARALLEL combinational logic.
+// All 8 taps across all 4 buffers are checked in a SINGLE clock cycle.
+// This allows rowbuffer writes EVERY cycle, enabling full-line erase.
+//
+// Key insight: Verilog for-loops in always blocks are UNROLLED at synthesis.
+// They create PARALLEL hardware, not sequential execution like software.
+//==============================================================================
+
+// Author: Jelena Horvat
 
 //==============================================================================
 // Debug Signal Assignments
@@ -398,7 +420,8 @@ line_shift_register u_line2 (
 
 line_shift_register u_line3 (
     .clock      (i_clk),
-    .shiftin    (w_rowbuff_rdata),
+    // FIX: Reset input to 0 at start of line to prevent wrap-around artifacts (matches original MiSTer)
+    .shiftin    (w_current_x > 0 ? w_rowbuff_rdata : 8'd0),
     .shiftout   (w_line3_out)
 );
 
@@ -505,8 +528,11 @@ always @(posedge i_clk) begin
 
 `ifdef TEST_ANIMATION
         // TEST_ANIMATION: Use coordinates directly without transformation
-        // BRIGHTNESS FIX: All except brightness=7 get 5x pixels
-        if (i_variable_brightness && i_pixel_brightness != 3'b111) begin
+        // BRIGHTNESS FIX: Only brightness 1-3 get 5x expansion (original MiSTer)
+        if (i_variable_brightness && i_pixel_brightness > 3'b0 && i_pixel_brightness < 3'b100) begin
+            // Brightness 0 (ships) = NO expansion (single bright pixel)
+            // Brightness 1-3 = 5x expansion ("+" pattern for medium brightness)
+            // Brightness 4-7 = NO expansion (dim stars, single pixel)
             {r_fifo_pixel_y[r_fifo_wr_ptr], r_fifo_pixel_x[r_fifo_wr_ptr]} <= {i_pixel_y, i_pixel_x};
             {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd1], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd1]} <= {i_pixel_y + 1'b1, i_pixel_x};
             {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd2], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd2]} <= {i_pixel_y, i_pixel_x + 1'b1};
@@ -523,8 +549,9 @@ always @(posedge i_clk) begin
         // 1) X inversion: ~i_pixel_x = 1023 - i_pixel_x (10-bit inversion)
         // 2) X/Y swap: inverted X goes to Y buffer, Y goes to X buffer
         //
-        // BRIGHTNESS FIX: All except brightness=7 (minimum) get 5x pixels
-        if (i_variable_brightness && i_pixel_brightness != 3'b111) begin
+        // BRIGHTNESS FIX: Only brightness 1-3 get 5x expansion (original MiSTer)
+        // Brightness 0 (ships) = NO expansion, 4-7 = NO expansion
+        if (i_variable_brightness && i_pixel_brightness > 3'b0 && i_pixel_brightness < 3'b100) begin
             {r_fifo_pixel_y[r_fifo_wr_ptr], r_fifo_pixel_x[r_fifo_wr_ptr]} <= {~i_pixel_x, i_pixel_y};
             {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd1], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd1]} <= {~i_pixel_x + 1'b1, i_pixel_y};
             {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd2], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd2]} <= {~i_pixel_x, i_pixel_y + 1'b1};
@@ -629,132 +656,153 @@ end
 //==============================================================================
 // Always Block 2: Row Buffer Read/Write and Blur Kernel Processing
 //==============================================================================
-// This block handles:
-// - Row buffer read address generation
-// - 3x3 blur kernel shift register updates
-// - Blur kernel convolution calculation
-// - VGA pixel output
-// - Ring buffer to row buffer pixel transfer
-// - Row buffer line erasure
+// Author: Jelena Horvat
+//
+// CRITICAL FIX 2026-02-08: Restored original MiSTer for-loop approach!
+//
+// PROBLEM: The state machine took 10 cycles per pixel write, meaning:
+//   - Only ~102 erases per line (1024 pixels / 10 cycles)
+//   - Stale pixels persisted in rowbuffer
+//   - Ghost lines appeared on every Y with matching Y[2:0]
+//
+// SOLUTION: Use combinational for-loop that checks ALL taps in ONE cycle.
+// Verilog for-loops in always blocks synthesize to PARALLEL hardware!
+// Now rowbuff_wren = 1 ALWAYS, allowing 1024 writes per line.
 //
 always @(posedge i_clk) begin
-    //--------------------------------------------------------------------------
-    // Row Buffer Read: Generate address for current pixel position
-    //--------------------------------------------------------------------------
-    // Address format: {line[2:0], x[9:0]} - 8 lines x 1024 pixels
-    r_rowbuff_rdaddr <= {w_current_y[2:0], w_current_x};
-    r_rowbuff_wren   <= 1'b1;
-
-    //--------------------------------------------------------------------------
-    // 3x3 Blur Kernel Shift Register Update
-    //--------------------------------------------------------------------------
-    // Shift pixel values through the 3x3 matrix:
-    //   p11 <- p12 <- p13 <- line1_out (oldest line)
-    //   p21 <- p22 <- p23 <- line2_out
-    //   p31 <- p32 <- p33 <- line3_out <- rowbuffer (newest line)
-    //
-    r_p11 <= r_p12; r_p12 <= r_p13; r_p13 <= w_line1_out;
-    r_p21 <= r_p22; r_p22 <= r_p23; r_p23 <= w_line2_out;
-    r_p31 <= r_p32; r_p32 <= r_p33; r_p33 <= w_line3_out;
-
-    //--------------------------------------------------------------------------
-    // Blur Kernel Convolution
-    //--------------------------------------------------------------------------
-    // Apply 3x3 averaging blur when center pixel below threshold.
-    // Uses divide-by-8 (shift right 3) instead of divide-by-9 for efficiency.
-    // Corner pixels (p11, p33) weighted at 0.5 to prevent overflow.
-    //
-    if (r_p22 < BRIGHTNESS) begin
-        r_pixel_out <= ({8'b0, r_p11[7:1]} + r_p12 + r_p13 +
-                        r_p21 + r_p22 + r_p23 +
-                        r_p31 + r_p32 + r_p33[7:1]) >> 3;
-        r_p21 <= r_pixel_out;           // Feedback for smoother decay
+    if (!i_rst_n) begin
+        //----------------------------------------------------------------------
+        // Reset for row buffer registers
+        //----------------------------------------------------------------------
+        r_rowbuff_rdaddr   <= 13'd0;
+        r_rowbuff_wraddr   <= 13'd0;
+        r_rowbuff_wdata    <= 8'd0;
+        r_rowbuff_wren     <= 1'b0;
+        r_erase_counter    <= 10'd0;
+        r_pixel_out        <= 16'd0;
+        r_p11 <= 8'd0; r_p12 <= 8'd0; r_p13 <= 8'd0;
+        r_p21 <= 8'd0; r_p22 <= 8'd0; r_p23 <= 8'd0;
+        r_p31 <= 8'd0; r_p32 <= 8'd0; r_p33 <= 8'd0;
+        o_red   <= 8'd0;
+        o_green <= 8'd0;
+        o_blue  <= 8'd0;
     end else begin
-        r_pixel_out <= r_p22;           // No blur for bright pixels
-    end
+        //----------------------------------------------------------------------
+        // Row Buffer Read: Generate address for current pixel position
+        //----------------------------------------------------------------------
+        // Address format: {line[2:0], x[9:0]} - 8 lines x 1024 pixels
+        r_rowbuff_rdaddr <= {w_current_y[2:0], w_current_x};
 
-    //--------------------------------------------------------------------------
-    // VGA Output: Convert intensity to RGB
-    //--------------------------------------------------------------------------
-    // Inline pixel output conversion (was previously a task)
-    // Default low-intensity output
-    o_red   <= r_inside_visible ? {5'b0, r_pixel_out[7:5]} : 8'b0;
-    o_green <= r_inside_visible ? r_pixel_out              : 8'b0;
-    o_blue  <= r_inside_visible ? r_pixel_out[7]          : 8'b0;
+        //----------------------------------------------------------------------
+        // CRITICAL: rowbuff_wren = 1 ALWAYS (like original MiSTer)
+        //----------------------------------------------------------------------
+        // This allows writing EVERY clock cycle - either a pixel or an erase
+        r_rowbuff_wren <= 1'b1;
 
-    // High intensity override: shift toward blue-white
-    if (r_pixel_out >= 8'h80) begin
-        o_red   <= r_inside_visible ? r_pixel_out[7:6] : 8'b0;
-        o_green <= r_inside_visible ? r_pixel_out      : 8'b0;
-        o_blue  <= r_inside_visible ? r_pixel_out      : 8'b0;
-    end
+        //----------------------------------------------------------------------
+        // 3x3 Blur Kernel Shift Register Update
+        //----------------------------------------------------------------------
+        // Shift pixel values through the 3x3 matrix:
+        //   p11 <- p12 <- p13 <- line1_out (oldest line)
+        //   p21 <- p22 <- p23 <- line2_out
+        //   p31 <- p32 <- p33 <- line3_out <- rowbuffer (newest line)
+        //
+        r_p11 <= r_p12; r_p12 <= r_p13; r_p13 <= w_line1_out;
+        r_p21 <= r_p22; r_p22 <= r_p23; r_p23 <= w_line2_out;
+        r_p31 <= r_p32; r_p32 <= r_p33; r_p33 <= w_line3_out;
 
-    //--------------------------------------------------------------------------
-    // Row Buffer Write: Transfer pixels from ring buffer taps
-    //--------------------------------------------------------------------------
-    // FIX 2026-02-04 (Emard): Pixel write has priority over erase
-    // Previous fix incorrectly gave erase priority, blocking pixel writes
-    //
-    r_pixel_found = 1'b0;
+        //----------------------------------------------------------------------
+        // Blur Kernel Convolution
+        //----------------------------------------------------------------------
+        // Apply 3x3 averaging blur when center pixel below threshold.
+        // Uses divide-by-8 (shift right 3) instead of divide-by-9 for efficiency.
+        // Corner pixels (p11, p33) weighted at 0.5 to prevent overflow.
+        //
+        if (r_p22 < BRIGHTNESS) begin
+            r_pixel_out <= ({8'b0, r_p11[7:1]} + r_p12 + r_p13 +
+                            r_p21 + r_p22 + r_p23 +
+                            r_p31 + r_p32 + r_p33[7:1]) >> 3;
+            r_p21 <= r_pixel_out;           // Feedback for smoother decay
+        end else begin
+            r_pixel_out <= r_p22;           // No blur for bright pixels
+        end
 
-    // FIX 2026-02-04: PIXEL WRITE HAS PRIORITY (erase was blocking pixels)
-    for (i = 8; i > 0; i = i - 1'b1) begin
-            // Check taps1
-            if (!r_pixel_found &&
-                w_taps1[i*DATA_WIDTH-1 -: 10] >= w_pdp1_y &&
-                w_taps1[i*DATA_WIDTH-1 -: 10] < w_pdp1_y + 10'd8 &&
+        //----------------------------------------------------------------------
+        // VGA Output: Convert intensity to RGB
+        //----------------------------------------------------------------------
+        // Default low-intensity output
+        o_red   <= r_inside_visible ? {5'b0, r_pixel_out[7:5]} : 8'b0;
+        o_green <= r_inside_visible ? r_pixel_out              : 8'b0;
+        o_blue  <= r_inside_visible ? r_pixel_out[7]          : 8'b0;
+
+        // High intensity override: shift toward blue-white
+        if (r_pixel_out >= 8'h80) begin
+            o_red   <= r_inside_visible ? r_pixel_out[7:6] : 8'b0;
+            o_green <= r_inside_visible ? r_pixel_out      : 8'b0;
+            o_blue  <= r_inside_visible ? r_pixel_out      : 8'b0;
+        end
+
+        //----------------------------------------------------------------------
+        // Row Buffer Write: PARALLEL for-loop (Original MiSTer approach)
+        //----------------------------------------------------------------------
+        // Author: Jelena Horvat
+        //
+        // This for-loop synthesizes to PARALLEL combinational logic!
+        // All 8 taps across all 4 buffers checked in ONE clock cycle.
+        // Last matching tap wins (priority: tap 8 > tap 7 > ... > tap 1)
+        //
+        // Default: erase current pixel position if no match found
+        // CRITICAL: else branch prevents erase and pixel write from running simultaneously
+        if (r_erase_counter < w_current_x) begin
+            r_rowbuff_wraddr <= {w_current_y[2:0], r_erase_counter};
+            r_rowbuff_wdata  <= 8'd0;
+            r_erase_counter  <= r_erase_counter + 1'b1;
+        end
+        else begin  // <-- CRITICAL: Only check taps when NOT erasing (matches original MiSTer)
+
+        // Check all 8 taps across all 4 ring buffers - PARALLEL!
+        // Uses blocking = for pixel_found flag, non-blocking <= for outputs
+        // This matches original MiSTer pattern exactly.
+        for (i = 8; i > 0; i = i - 1'b1) begin
+            // Check taps1: is this pixel within our 8-line lookahead window?
+            if (w_pdp1_y < w_taps1[i*DATA_WIDTH-1 -: 10] &&
+                w_taps1[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
                 w_taps1[i*DATA_WIDTH-21 -: 8] > 0) begin
-                // FIX #2: Use RELATIVE Y position (tap_y - w_pdp1_y)[2:0]
-                r_rowbuff_wraddr <= {(w_taps1[i*DATA_WIDTH-1 -: 10] - w_pdp1_y),
-                                      w_taps1[i*DATA_WIDTH-11 -: 10]};
+                r_rowbuff_wraddr <= {w_taps1[i*DATA_WIDTH-8 -: 3], w_taps1[i*DATA_WIDTH-11 -: 10]};
                 r_rowbuff_wdata  <= w_taps1[i*DATA_WIDTH-21 -: 8];
-                r_pixel_found = 1'b1;
             end
             // Check taps2
-            else if (!r_pixel_found &&
-                     w_taps2[i*DATA_WIDTH-1 -: 10] >= w_pdp1_y &&
-                     w_taps2[i*DATA_WIDTH-1 -: 10] < w_pdp1_y + 10'd8 &&
+            else if (w_pdp1_y < w_taps2[i*DATA_WIDTH-1 -: 10] &&
+                     w_taps2[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
                      w_taps2[i*DATA_WIDTH-21 -: 8] > 0) begin
-                r_rowbuff_wraddr <= {(w_taps2[i*DATA_WIDTH-1 -: 10] - w_pdp1_y),
-                                      w_taps2[i*DATA_WIDTH-11 -: 10]};
+                r_rowbuff_wraddr <= {w_taps2[i*DATA_WIDTH-8 -: 3], w_taps2[i*DATA_WIDTH-11 -: 10]};
                 r_rowbuff_wdata  <= w_taps2[i*DATA_WIDTH-21 -: 8];
-                r_pixel_found = 1'b1;
             end
             // Check taps3
-            else if (!r_pixel_found &&
-                     w_taps3[i*DATA_WIDTH-1 -: 10] >= w_pdp1_y &&
-                     w_taps3[i*DATA_WIDTH-1 -: 10] < w_pdp1_y + 10'd8 &&
+            else if (w_pdp1_y < w_taps3[i*DATA_WIDTH-1 -: 10] &&
+                     w_taps3[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
                      w_taps3[i*DATA_WIDTH-21 -: 8] > 0) begin
-                r_rowbuff_wraddr <= {(w_taps3[i*DATA_WIDTH-1 -: 10] - w_pdp1_y),
-                                      w_taps3[i*DATA_WIDTH-11 -: 10]};
+                r_rowbuff_wraddr <= {w_taps3[i*DATA_WIDTH-8 -: 3], w_taps3[i*DATA_WIDTH-11 -: 10]};
                 r_rowbuff_wdata  <= w_taps3[i*DATA_WIDTH-21 -: 8];
-                r_pixel_found = 1'b1;
             end
             // Check taps4
-            else if (!r_pixel_found &&
-                     w_taps4[i*DATA_WIDTH-1 -: 10] >= w_pdp1_y &&
-                     w_taps4[i*DATA_WIDTH-1 -: 10] < w_pdp1_y + 10'd8 &&
+            else if (w_pdp1_y < w_taps4[i*DATA_WIDTH-1 -: 10] &&
+                     w_taps4[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
                      w_taps4[i*DATA_WIDTH-21 -: 8] > 0) begin
-                r_rowbuff_wraddr <= {(w_taps4[i*DATA_WIDTH-1 -: 10] - w_pdp1_y),
-                                      w_taps4[i*DATA_WIDTH-11 -: 10]};
+                r_rowbuff_wraddr <= {w_taps4[i*DATA_WIDTH-8 -: 3], w_taps4[i*DATA_WIDTH-11 -: 10]};
                 r_rowbuff_wdata  <= w_taps4[i*DATA_WIDTH-21 -: 8];
-                r_pixel_found = 1'b1;
             end
-    end
+        end
+        end  // <-- End of else block (matches original MiSTer structure)
 
-    // Erase ONLY if no pixel was written (pixel write has priority)
-    if (!r_pixel_found && r_erase_counter < w_current_x) begin
-        r_rowbuff_wraddr <= {w_current_y[2:0], r_erase_counter};
-        r_rowbuff_wdata  <= 8'd0;
-        r_erase_counter  <= r_erase_counter + 1'b1;
-    end
+        //----------------------------------------------------------------------
+        // Reset erase counter at end of line
+        //----------------------------------------------------------------------
+        if (i_h_counter == `h_line_timing - 1)
+            r_erase_counter <= 10'd0;
 
-    //--------------------------------------------------------------------------
-    // Reset erase counter at end of line
-    //--------------------------------------------------------------------------
-    if (i_h_counter == `h_line_timing - 1)
-        r_erase_counter <= 10'd0;
-end
+    end // else (!i_rst_n)
+end // always @(posedge i_clk)
 
 
 //==============================================================================
@@ -802,11 +850,12 @@ always @(posedge i_clk) begin
         //----------------------------------------------------------------------
         // Falling Edge Detection: Generate strobe when pixel data is ready
         //----------------------------------------------------------------------
-        // CDC FIX: Use delayed sync signal for edge detection, NOT metastable!
-        // Old (WRONG): r_pixel_valid_sync & ~r_pixel_valid_meta (compares with metastable)
-        // New (CORRECT): r_pixel_valid_sync & ~r_pixel_valid_sync_d (both are stable)
+        // CDC FIX: FALLING edge detection with 2-stage delay (matches original MiSTer)
+        // Original MiSTer: wren <= prev_prev_wren_i & ~prev_wren_i (FALLING edge)
+        // This gives coordinates time to stabilize before being captured
         r_pixel_valid_sync_d <= r_pixel_valid_sync;
-        r_pixel_strobe <= r_pixel_valid_sync & ~r_pixel_valid_sync_d;
+        r_pixel_valid_sync_dd <= r_pixel_valid_sync_d;
+        r_pixel_strobe <= r_pixel_valid_sync_dd & ~r_pixel_valid_sync_d;
     end
 end
 
