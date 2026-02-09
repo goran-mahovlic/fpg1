@@ -44,25 +44,28 @@ parameter
 function [0:0] is_circle_12;                                   /* Lookup tables to decide if a (x, y) coordinate is within a circle (r = 12). */
    input [4:0] coord_x;                                        /* Contains only data for the first quadrant, and transforms other quadrants accordingly */
    input [4:0] coord_y;
+   // FIX: Use local variables instead of modifying inputs - Jelena Horvat, SNOWFLAKE FAZA 3
+   reg [4:0] local_x;
+   reg [4:0] local_y;
 begin
    /* Translate everything into the first quadrant */
-   if (coord_x < 5'd16) coord_x = ~coord_x;
-   if (coord_y > 5'd16) coord_y = ~coord_y;
+   local_x = (coord_x < 5'd16) ? ~coord_x : coord_x;
+   local_y = (coord_y > 5'd16) ? ~coord_y : coord_y;
 
-   case (coord_y)
-      5'd16: is_circle_12 = coord_x < 5'd27;
-      5'd15: is_circle_12 = coord_x < 5'd27;
-      5'd14: is_circle_12 = coord_x < 5'd27;
-      5'd13: is_circle_12 = coord_x < 5'd27;
-      5'd12: is_circle_12 = coord_x < 5'd27;
-      5'd11: is_circle_12 = coord_x < 5'd27;
-      5'd10: is_circle_12 = coord_x < 5'd26;
-      5'd9: is_circle_12 = coord_x < 5'd26;
-      5'd8: is_circle_12 = coord_x < 5'd25;
-      5'd7: is_circle_12 = coord_x < 5'd24;
-      5'd6: is_circle_12 = coord_x < 5'd23;
-      5'd5: is_circle_12 = coord_x < 5'd22;
-      5'd4: is_circle_12 = coord_x < 5'd20;        
+   case (local_y)
+      5'd16: is_circle_12 = local_x < 5'd27;
+      5'd15: is_circle_12 = local_x < 5'd27;
+      5'd14: is_circle_12 = local_x < 5'd27;
+      5'd13: is_circle_12 = local_x < 5'd27;
+      5'd12: is_circle_12 = local_x < 5'd27;
+      5'd11: is_circle_12 = local_x < 5'd27;
+      5'd10: is_circle_12 = local_x < 5'd26;
+      5'd9: is_circle_12 = local_x < 5'd26;
+      5'd8: is_circle_12 = local_x < 5'd25;
+      5'd7: is_circle_12 = local_x < 5'd24;
+      5'd6: is_circle_12 = local_x < 5'd23;
+      5'd5: is_circle_12 = local_x < 5'd22;
+      5'd4: is_circle_12 = local_x < 5'd20;
       default: is_circle_12 = 1'b0;
    endcase           
 end
@@ -73,24 +76,28 @@ function [0:0] is_circle_8;												/* For circle with radius = 8 pixels */
    input [4:0] coord_x;
    input [4:0] coord_y;
    input [0:0] position; /* 1 = up, 0 = down */
+   // FIX: Use local variables instead of modifying inputs - Jelena Horvat, SNOWFLAKE FAZA 3
+   reg [4:0] local_x;
+   reg [4:0] local_y;
 begin
    /* Translate everything into the first quadrant */
-   if (coord_x < 5'd16) coord_x = ~coord_x;
-   if (~position) coord_y = ~coord_y;
+   local_x = (coord_x < 5'd16) ? ~coord_x : coord_x;
+   local_y = (~position) ? ~coord_y : coord_y;
 
-   if (coord_y > 5'd7 && coord_y < 5'd16)  coord_y = 5'd15 - coord_y;            
+   if (local_y > 5'd7 && local_y < 5'd16)
+      local_y = 5'd15 - local_y;
 
-   case (coord_y)
-      5'd7:  is_circle_8 = coord_x < 5'd23;
-      5'd6:  is_circle_8 = coord_x < 5'd23;
-      5'd5:  is_circle_8 = coord_x < 5'd23;
-      5'd4:  is_circle_8 = coord_x < 5'd23;
-      5'd3:  is_circle_8 = coord_x < 5'd22;
-      5'd2:  is_circle_8 = coord_x < 5'd22;
-      5'd1:  is_circle_8 = coord_x < 5'd21;
-      5'd0:  is_circle_8 = coord_x < 5'd19;
+   case (local_y)
+      5'd7:  is_circle_8 = local_x < 5'd23;
+      5'd6:  is_circle_8 = local_x < 5'd23;
+      5'd5:  is_circle_8 = local_x < 5'd23;
+      5'd4:  is_circle_8 = local_x < 5'd23;
+      5'd3:  is_circle_8 = local_x < 5'd22;
+      5'd2:  is_circle_8 = local_x < 5'd22;
+      5'd1:  is_circle_8 = local_x < 5'd21;
+      5'd0:  is_circle_8 = local_x < 5'd19;
       default: is_circle_8 = 1'b0;
-   endcase           
+   endcase
 end
 
 endfunction

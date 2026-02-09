@@ -115,21 +115,24 @@ pdp1_terminal_fb terminal_framebuf (
 function [0:0] is_circle_8;                                    /* Lookup table to decide if a (x, y) coordinate is within a circle. */
    input [4:0] coord_x;                                        /* Contains only data for the first quadrant, and transforms other quadrants accordingly */
    input [4:0] coord_y;
+   // FIX: Use local variables instead of modifying inputs - Jelena Horvat, SNOWFLAKE FAZA 3
+   reg [4:0] local_x;
+   reg [4:0] local_y;
 begin
    /* Translate everything into first quadrant */
-   if (coord_x < 5'd16) coord_x = ~coord_x;
-   if (coord_y > 5'd16) coord_y = ~coord_y;
+   local_x = (coord_x < 5'd16) ? ~coord_x : coord_x;
+   local_y = (coord_y > 5'd16) ? ~coord_y : coord_y;
 
-   case (coord_y)
-      5'd16:  is_circle_8 = coord_x < 5'd23;
-      5'd15:  is_circle_8 = coord_x < 5'd23;
-      5'd14:  is_circle_8 = coord_x < 5'd23;
-      5'd13:  is_circle_8 = coord_x < 5'd23;
-      5'd12:  is_circle_8 = coord_x < 5'd23;
-      5'd11:  is_circle_8 = coord_x < 5'd22;
-      5'd10:  is_circle_8 = coord_x < 5'd22;
-      5'd9:   is_circle_8 = coord_x < 5'd21;
-      5'd8:   is_circle_8 = coord_x < 5'd19;
+   case (local_y)
+      5'd16:  is_circle_8 = local_x < 5'd23;
+      5'd15:  is_circle_8 = local_x < 5'd23;
+      5'd14:  is_circle_8 = local_x < 5'd23;
+      5'd13:  is_circle_8 = local_x < 5'd23;
+      5'd12:  is_circle_8 = local_x < 5'd23;
+      5'd11:  is_circle_8 = local_x < 5'd22;
+      5'd10:  is_circle_8 = local_x < 5'd22;
+      5'd9:   is_circle_8 = local_x < 5'd21;
+      5'd8:   is_circle_8 = local_x < 5'd19;
       default: is_circle_8 = 1'b0;
    endcase
 end

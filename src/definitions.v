@@ -29,10 +29,11 @@
 `define   v_visible_offset       11'd40        /* v_front + v_sync + v_back = 3 + 6 + 31 = 40 */
 `define   v_visible_offset_end   11'd808       /* v_visible_offset + v_visible = 40 + 768 = 808 */
 
-/* CRT vertical offset - moves PDP-1 image down by N lines */
+/* CRT vertical offset - maps PDP-1 Y coordinate to VGA scanline */
 /* PDP-1 has 1024x1024 coordinate system, VGA displays 768 lines */
-/* Offset 128 moves visible area from 0-767 to 128-895 */
-`define   v_crt_offset           10'd128       /* Vertical image offset in PDP-1 coordinates */
+/* Offset 128: Centers sun (at buffer_Y=511) to VGA Y=383 (screen center) */
+/* Window check uses w_pdp1_y = w_current_y + offset to select visible region */
+`define   v_crt_offset           10'd128       /* Center the sun */
 
 
 /* Joystick, defined in core configuration string as 

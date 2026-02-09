@@ -528,11 +528,10 @@ always @(posedge i_clk) begin
 
 `ifdef TEST_ANIMATION
         // TEST_ANIMATION: Use coordinates directly without transformation
-        // BRIGHTNESS FIX: Only brightness 1-3 get 5x expansion (original MiSTer)
-        if (i_variable_brightness && i_pixel_brightness > 3'b0 && i_pixel_brightness < 3'b100) begin
-            // Brightness 0 (ships) = NO expansion (single bright pixel)
-            // Brightness 1-3 = 5x expansion ("+" pattern for medium brightness)
-            // Brightness 4-7 = NO expansion (dim stars, single pixel)
+        // SHIP VISIBILITY FIX (Emard 2026-02-08): Include brightness 0 in expansion!
+        if (i_variable_brightness && i_pixel_brightness < 3'b100) begin
+            // Brightness 0-3 = 5x expansion ("+" pattern) - includes ships!
+            // Brightness 4-7 = NO expansion (dim background stars)
             {r_fifo_pixel_y[r_fifo_wr_ptr], r_fifo_pixel_x[r_fifo_wr_ptr]} <= {i_pixel_y, i_pixel_x};
             {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd1], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd1]} <= {i_pixel_y + 1'b1, i_pixel_x};
             {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd2], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd2]} <= {i_pixel_y, i_pixel_x + 1'b1};
@@ -549,9 +548,11 @@ always @(posedge i_clk) begin
         // 1) X inversion: ~i_pixel_x = 1023 - i_pixel_x (10-bit inversion)
         // 2) X/Y swap: inverted X goes to Y buffer, Y goes to X buffer
         //
-        // BRIGHTNESS FIX: Only brightness 1-3 get 5x expansion (original MiSTer)
-        // Brightness 0 (ships) = NO expansion, 4-7 = NO expansion
-        if (i_variable_brightness && i_pixel_brightness > 3'b0 && i_pixel_brightness < 3'b100) begin
+        // SHIP VISIBILITY FIX v3 (Emard 2026-02-08): Expansion for brightness 0-3 AND 4-6
+        // Ships use brightness 4-6 (dim), NOT 0-3 as previously assumed!
+        // Brightness 7 = barely visible, no expansion needed
+        // This gives expansion to all visible objects (stars, ships, explosions)
+        if (i_variable_brightness && i_pixel_brightness != 3'b111) begin  // All except B=7
             {r_fifo_pixel_y[r_fifo_wr_ptr], r_fifo_pixel_x[r_fifo_wr_ptr]} <= {~i_pixel_x, i_pixel_y};
             {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd1], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd1]} <= {~i_pixel_x + 1'b1, i_pixel_y};
             {r_fifo_pixel_y[r_fifo_wr_ptr + 3'd2], r_fifo_pixel_x[r_fifo_wr_ptr + 3'd2]} <= {~i_pixel_x, i_pixel_y + 1'b1};
@@ -722,7 +723,9 @@ always @(posedge i_clk) begin
             r_pixel_out <= ({8'b0, r_p11[7:1]} + r_p12 + r_p13 +
                             r_p21 + r_p22 + r_p23 +
                             r_p31 + r_p32 + r_p33[7:1]) >> 3;
-            r_p21 <= r_pixel_out;           // Feedback for smoother decay
+            // EMARD FIX 2026-02-08: Removed feedback (r_p21 <= r_pixel_out) to eliminate
+            // horizontal ghosting. Original MiSTer had this for "smoother decay" but it
+            // causes horizontal smearing on lower resolution displays.
         end else begin
             r_pixel_out <= r_p22;           // No blur for bright pixels
         end
@@ -762,7 +765,8 @@ always @(posedge i_clk) begin
 
         // Check all 8 taps across all 4 ring buffers - PARALLEL!
         // Uses blocking = for pixel_found flag, non-blocking <= for outputs
-        // This matches original MiSTer pattern exactly.
+        // Window check uses w_pdp1_y (VGA Y + offset) to check against buffer Y coords
+        // This maps VGA scanline to PDP-1 buffer coordinate space
         for (i = 8; i > 0; i = i - 1'b1) begin
             // Check taps1: is this pixel within our 8-line lookahead window?
             if (w_pdp1_y < w_taps1[i*DATA_WIDTH-1 -: 10] &&
@@ -850,12 +854,12 @@ always @(posedge i_clk) begin
         //----------------------------------------------------------------------
         // Falling Edge Detection: Generate strobe when pixel data is ready
         //----------------------------------------------------------------------
-        // CDC FIX: FALLING edge detection with 2-stage delay (matches original MiSTer)
-        // Original MiSTer: wren <= prev_prev_wren_i & ~prev_wren_i (FALLING edge)
-        // This gives coordinates time to stabilize before being captured
-        r_pixel_valid_sync_d <= r_pixel_valid_sync;
+        // CRITICAL FIX (Emard 2026-02-08): Must be FALLING edge, not rising!
+        // Original MiSTer: r_pixel_strobe <= r_pixel_valid_sync_d & ~r_pixel_valid_sync;
+        // Pixel data is valid on FALLING edge of pixel_valid signal
+        r_pixel_valid_sync_d  <= r_pixel_valid_sync;
         r_pixel_valid_sync_dd <= r_pixel_valid_sync_d;
-        r_pixel_strobe <= r_pixel_valid_sync_dd & ~r_pixel_valid_sync_d;
+        r_pixel_strobe <= r_pixel_valid_sync_d & ~r_pixel_valid_sync;  // FALLING edge!
     end
 end
 

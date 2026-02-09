@@ -462,9 +462,9 @@ module esp32_osd #(
     end
 
     assign video_out    = video_mixed;
-    assign de_in_out = de_d3;
-    assign hs_in_out = hs_d3;
-    assign vs_in_out = vs_d3;
+    assign de_out = de_d3;
+    assign hs_out = hs_d3;
+    assign vs_out = vs_d3;
 
     // Control outputs
     assign status     = status_reg;
