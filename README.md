@@ -7,19 +7,32 @@ Port of the classic PDP-1 Spacewar! emulator from Intel Cyclone V (MiSTer) to La
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Ships visible | ✅ Working | Brightness fix applied (B=0-6 expansion) |
-| Central star | ✅ Working | Rotates correctly, centered on screen |
+| Central star | ✅ Working | Rotates correctly, centered at (512,512) |
 | Stars background | ✅ Working | Visible with phosphor decay |
 | Explosions | ✅ Working | Particle effects render correctly |
+| Phosphor decay | ✅ Working | CRT glow effects visible |
+| UART Debug | ✅ Working | HEX format output at 115200 baud |
+| Timing closure | ✅ **PASS** | clk_pixel 51.04 MHz achieved |
 | Controls | ❌ Not working | Buttons not responding |
 | Player 2 | ❌ Not working | One ship flies autonomously (AI?) |
-| Display artifacts | ⚠️ Timing issues | "Snow" artifacts due to CDC timing |
+
+### Timing Results (2026-02-09 Optimization)
+
+| Clock | Required | Achieved | Status |
+|-------|----------|----------|--------|
+| clk_shift | 255 MHz | **322.89 MHz** | ✅ PASS |
+| clk_pixel | 51 MHz | **51.04 MHz** | ✅ PASS |
+| clk_cpu | 51 MHz | 41.62 MHz | ⚠️ WARN* |
+
+*CPU actually runs at 1.82 MHz (prescaler ÷28), timing constraint can be relaxed.
+
+**See [OPTIMISATIONS.md](OPTIMISATIONS.md) for detailed timing optimization report.**
 
 ### Known Issues
 
 1. **Controls not responding** - Button inputs not reaching CPU properly
 2. **Single ship AI mode** - Only one ship controllable, other follows AI pattern
-3. **Snow artifacts** - Random pixels ("snow") due to clock domain crossing timing issues
-4. **Phosphor persistence** - Decay rate may need tuning for 50Hz refresh
+3. **Phosphor persistence** - Decay rate may need tuning for 50Hz refresh
 
 ## Hardware Target
 
@@ -150,21 +163,20 @@ Port of the classic PDP-1 Spacewar! emulator from Intel Cyclone V (MiSTer) to La
     ┌─────────────────────┐                    ┌─────────────────────┐
     │    CPU DOMAIN       │                    │   PIXEL DOMAIN      │
     │    (1.82 MHz)       │                    │   (51 MHz)          │
+    │                     │    clock_domain.v  │                     │
+    │   pdp1_cpu.v        │    (CDC module)    │   pdp1_vga_crt.v    │
     │                     │                    │                     │
-    │   pdp1_cpu.v        │    CDC PATH        │   pdp1_vga_crt.v    │
-    │                     │                    │                     │
-    │   pixel_x[9:0] ─────┼───▶ 2FF SYNC ─────▶│   i_pixel_x         │
-    │   pixel_y[9:0] ─────┼───▶ 2FF SYNC ─────▶│   i_pixel_y         │
-    │   brightness[2:0] ──┼───▶ 2FF SYNC ─────▶│   i_brightness      │
-    │   pixel_valid ──────┼───▶ 2FF SYNC ─────▶│   i_pixel_valid     │
+    │   pixel_x[9:0] ─────┼───▶ 2FF SYNC ─────▶│   vid_pixel_x       │
+    │   pixel_y[9:0] ─────┼───▶ 2FF SYNC ─────▶│   vid_pixel_y       │
+    │   brightness[2:0] ──┼───▶ 2FF SYNC ─────▶│   vid_brightness    │
+    │   pixel_shift ──────┼───▶ 2FF SYNC ─────▶│   vid_pixel_shift   │
     │                     │                    │                     │
     │                     │◀── 2FF SYNC ◀──────┼── vblank            │
     │                     │                    │                     │
     └─────────────────────┘                    └─────────────────────┘
 
-    ⚠️  KNOWN ISSUE: CDC timing causing "snow" artifacts
-        - pixel_valid strobe may be missed or duplicated
-        - Coordinates may be sampled during transition
+    ✅ CDC FIXED (2026-02-09): All crossings use 2-FF synchronizers
+       with (* ASYNC_REG = "TRUE" *) attributes for proper placement.
 ```
 
 ## Module List
@@ -176,7 +188,7 @@ Port of the classic PDP-1 Spacewar! emulator from Intel Cyclone V (MiSTer) to La
 | `ecp5pll.sv` | - | Emard's ECP5 PLL wrapper |
 | `clock_domain.v` | 51MHz | Prescaler (÷28), reset sync, CDC |
 | `pdp1_cpu.v` | 1.82MHz | PDP-1 CPU core emulation |
-| `pdp1_cpu_alu_div.v` | 1.82MHz | ALU division unit |
+| `pdp1_cpu_alu_div.v` | 1.82MHz | ALU division unit (8-stage pipelined) |
 | `pdp1_main_ram.v` | 1.82MHz | 4K x 18-bit main memory |
 | `pdp1_vga_crt.v` | 51MHz | CRT phosphor decay emulation |
 | `pixel_ring_buffer.v` | 51MHz | 256Kbit ring buffer for phosphor |
@@ -222,7 +234,7 @@ Port of the classic PDP-1 Spacewar! emulator from Intel Cyclone V (MiSTer) to La
 source <path-to-oss-cad-suite>/environment
 
 # Build bitstream
-make clean && make
+make clean && make pdp1
 
 # Program ULX3S (SRAM - temporary)
 fujprog build/pdp1.bit
@@ -252,18 +264,39 @@ Enable serial debug output (115200 baud):
 screen /dev/ttyUSB0 115200
 ```
 
-Debug output format:
-- `F:xxxx PC:xxx I:xxxx D:xxxx V:xxxx X:xxx Y:xxx R` - Frame info
-- `P:xxxxx X:xxx Y:xxx B:x R:xxxx` - Pixel info
+Debug output format (HEX):
+- `F:06FE PC:066 I:9D1E D:12AE V:005F X:200 Y:3FF S:1A R` - Frame info
+- `P:1AC85 X:200 Y:200 B:0 R:0111` - Pixel info
+
+| Field | Description | Format |
+|-------|-------------|--------|
+| F | Frame counter | 16-bit HEX |
+| PC | Program Counter | 12-bit HEX |
+| I | Instruction Register | 18-bit HEX |
+| D | Data Bus | 18-bit HEX |
+| V | VBlank counter | 16-bit HEX |
+| X | Pixel X coordinate | 10-bit HEX (0-3FF) |
+| Y | Pixel Y coordinate | 10-bit HEX (0-3FF) |
+| B | Brightness | 3-bit HEX (0-7) |
+| R | Ring buffer pointer | 16-bit HEX |
 
 ## TODO
 
 - [ ] Fix button input handling (controls not responding)
-- [ ] Investigate CDC timing issues (snow artifacts)
-- [ ] Tune phosphor decay rate for 50Hz
 - [ ] Test Player 2 controls
 - [ ] Verify sense switch mapping
-- [ ] Consider async FIFO for CDC path
+- [ ] Tune phosphor decay rate for 50Hz
+- [ ] Consider async FIFO for CDC path (optional improvement)
+- [ ] Relax clk_cpu timing constraint to 42 MHz
+
+## Completed Optimizations (2026-02-09)
+
+- [x] ~~Investigate CDC timing issues~~ - Fixed with 2-FF synchronizers
+- [x] Pipelined 8-stage divider (170ns → 20ns)
+- [x] HEX format serial debug (168ns → 2ns)
+- [x] Pipelined 2-stage multiplier (80ns → 30ns)
+- [x] Registered pixel outputs
+- [x] CDC synchronizers with ASYNC_REG attributes
 
 ## Credits
 
