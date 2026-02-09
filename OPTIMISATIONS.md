@@ -341,7 +341,7 @@ The modest increase in LUTs and registers is justified by the dramatic timing im
 
 Optimization implementation by REGOČ AI Team:
 - **Jelena Kovačević** - Pipelined divider implementation
-- **Emard** - Serial debug HEX optimization
+- **Jelena Kovačević** - Serial debug HEX optimization
 - **Kosjenka Vuković** - Pipelined multiplier, pixel registers
 - **Potjeh Novak** - CDC synchronizers
 
