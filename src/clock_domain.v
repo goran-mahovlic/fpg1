@@ -41,7 +41,17 @@ module clock_domain (
 
     // CDC interface: Video -> CPU (vertical blank signal)
     input  wire        vid_vblank,      // VBlank from video controller
-    output reg         cpu_vblank       // Synchronized to CPU domain
+    output reg         cpu_vblank,      // Synchronized to CPU domain
+
+    // CDC interface: CPU pixel coordinates and control -> Video
+    input  wire [9:0]  cpu_pixel_x,     // Pixel X coordinate from CPU (clk_cpu domain)
+    input  wire [9:0]  cpu_pixel_y,     // Pixel Y coordinate from CPU (clk_cpu domain)
+    input  wire [2:0]  cpu_pixel_brightness, // Pixel brightness from CPU (clk_cpu domain)
+    input  wire        cpu_pixel_shift,  // Pixel strobe/shift signal from CPU (clk_cpu domain)
+    output reg  [9:0]  vid_pixel_x,     // Synchronized to video domain
+    output reg  [9:0]  vid_pixel_y,     // Synchronized to video domain
+    output reg  [2:0]  vid_pixel_brightness, // Synchronized to video domain
+    output reg         vid_pixel_shift   // Synchronized to video domain
 );
 
     // =========================================================================
@@ -212,6 +222,65 @@ module clock_domain (
             vblank_sync1 <= vid_vblank;
             vblank_sync2 <= vblank_sync1;
             cpu_vblank   <= vblank_sync2;
+        end
+    end
+
+    // =========================================================================
+    // CLOCK DOMAIN CROSSING: CPU PIXEL COORDINATES -> VIDEO
+    // =========================================================================
+    // CDC: Pixel coordinates (X, Y, brightness) and strobe signal from CPU domain
+    // to pixel domain. Uses 2-stage synchronizers to prevent metastability issues.
+    //
+    // Signal timing: CPU updates these signals infrequently (on DPY instruction),
+    // so simple 2-FF synchronizers are sufficient.
+
+    // CDC synchronizer for pixel X coordinate (10-bit)
+    (* ASYNC_REG = "TRUE" *) reg [9:0] pixel_x_sync1, pixel_x_sync2;
+
+    // CDC synchronizer for pixel Y coordinate (10-bit)
+    (* ASYNC_REG = "TRUE" *) reg [9:0] pixel_y_sync1, pixel_y_sync2;
+
+    // CDC synchronizer for pixel brightness (3-bit)
+    (* ASYNC_REG = "TRUE" *) reg [2:0] pixel_brightness_sync1, pixel_brightness_sync2;
+
+    // CDC synchronizer for pixel shift/strobe signal (1-bit control signal)
+    (* ASYNC_REG = "TRUE" *) reg pixel_shift_sync1, pixel_shift_sync2;
+
+    always @(posedge clk_pixel or negedge rst_pixel_n) begin
+        if (!rst_pixel_n) begin
+            // Reset all pixel coordinate synchronizers
+            pixel_x_sync1           <= 10'b0;
+            pixel_x_sync2           <= 10'b0;
+            pixel_y_sync1           <= 10'b0;
+            pixel_y_sync2           <= 10'b0;
+            pixel_brightness_sync1  <= 3'b0;
+            pixel_brightness_sync2  <= 3'b0;
+            pixel_shift_sync1       <= 1'b0;
+            pixel_shift_sync2       <= 1'b0;
+
+            // Output registers
+            vid_pixel_x             <= 10'b0;
+            vid_pixel_y             <= 10'b0;
+            vid_pixel_brightness    <= 3'b0;
+            vid_pixel_shift         <= 1'b0;
+        end else begin
+            // Stage 1: Capture asynchronous input (may go metastable)
+            pixel_x_sync1           <= cpu_pixel_x;
+            pixel_y_sync1           <= cpu_pixel_y;
+            pixel_brightness_sync1  <= cpu_pixel_brightness;
+            pixel_shift_sync1       <= cpu_pixel_shift;
+
+            // Stage 2: Stable output (metastability resolved by here)
+            pixel_x_sync2           <= pixel_x_sync1;
+            pixel_y_sync2           <= pixel_y_sync1;
+            pixel_brightness_sync2  <= pixel_brightness_sync1;
+            pixel_shift_sync2       <= pixel_shift_sync1;
+
+            // Final output registers
+            vid_pixel_x             <= pixel_x_sync2;
+            vid_pixel_y             <= pixel_y_sync2;
+            vid_pixel_brightness    <= pixel_brightness_sync2;
+            vid_pixel_shift         <= pixel_shift_sync2;
         end
     end
 

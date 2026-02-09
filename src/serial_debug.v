@@ -16,18 +16,18 @@
 //     PC = CPU Program Counter (hex, 3 digits for 12-bit)
 //     I  = Instruction count (hex, 4 digits)
 //     D  = Display/IOT count (hex, 4 digits)
-//     V  = pixel_valid count per frame (decimal, 4 digits)
-//     X  = Pixel X coordinate (decimal, 3 digits)
-//     Y  = Pixel Y coordinate (decimal, 3 digits)
+//     V  = pixel_valid count per frame (hex, 4 digits)
+//     X  = Pixel X coordinate (hex, 3 digits)
+//     Y  = Pixel Y coordinate (hex, 3 digits)
 //     S  = CPU state machine state (hex, 2 digits)
 //     R  = Running indicator (R=running, .=halted)
 //
 //   Pixel Message: "P:xxxxx X:xxx Y:xxx B:x R:xxxx\r\n"
-//     P  = Pixel count (decimal, 5 digits, wraps at 100000)
-//     X  = Pixel X coordinate (decimal, 3 digits)
-//     Y  = Pixel Y coordinate (decimal, 3 digits)
-//     B  = Pixel brightness (0-7)
-//     R  = Ring buffer write pointer (decimal, 4 digits)
+//     P  = Pixel count (hex, 5 digits = 20-bit value)
+//     X  = Pixel X coordinate (hex, 3 digits)
+//     Y  = Pixel Y coordinate (hex, 3 digits)
+//     B  = Pixel brightness (0-7, single hex digit)
+//     R  = Ring buffer write pointer (hex, 4 digits)
 //
 // SPECIFICATIONS:
 //   - Baud Rate: 115200
@@ -314,23 +314,18 @@ module serial_debug #(
     end
 
     // =========================================================================
-    // Hex to ASCII conversion functions
+    // Hex to ASCII Conversion Function
+    // =========================================================================
+    // Single function for all nibble-to-ASCII conversion. Uses only compare
+    // and add operations (~4 LUT4s on ECP5). No division or modulo required.
     // =========================================================================
     function [7:0] hex_to_ascii;
         input [3:0] hex;
         begin
             if (hex < 10)
-                hex_to_ascii = 8'd48 + hex;  // '0'-'9'
+                hex_to_ascii = 8'd48 + hex;  // '0'-'9' (ASCII 0x30-0x39)
             else
-                hex_to_ascii = 8'd55 + hex;  // 'A'-'F'
-        end
-    endfunction
-
-    // Decimal digit extraction (hundreds, tens, units)
-    function [7:0] digit_to_ascii;
-        input [3:0] digit;
-        begin
-            digit_to_ascii = 8'd48 + digit;  // '0'-'9'
+                hex_to_ascii = 8'd55 + hex;  // 'A'-'F' (ASCII 0x41-0x46)
         end
     endfunction
 
@@ -338,9 +333,9 @@ module serial_debug #(
     // Message Buffer and FSM State
     // =========================================================================
     // Frame Message Length: 57 characters (was 52, +5 for " S:xx")
-    // Pixel Message Length: 32 characters (28 + CR/LF + padding)
+    // Pixel Message Length: 32 characters (P:xxxxx X:xxx Y:xxx B:x R:xxxx CR LF)
     localparam MSG_LEN       = 57;
-    localparam PIXEL_MSG_LEN = 28;
+    localparam PIXEL_MSG_LEN = 32;
 
     reg [7:0] r_msg_buffer [0:MSG_LEN-1];  // Message character buffer
     reg [5:0] r_msg_index;                 // Current character index
@@ -358,59 +353,57 @@ module serial_debug #(
     reg        r_sending_pixel_msg;        // Currently sending pixel (not frame) msg
 
     // =========================================================================
-    // Decimal Conversion Wires (Combinational)
+    // HEX Conversion - TIMING OPTIMIZED
     // =========================================================================
-    // Frame X/Y coordinates (0-639 range)
-    wire [3:0] w_x_hundreds = r_latched_x / 100;
-    wire [3:0] w_x_tens     = (r_latched_x / 10) % 10;
-    wire [3:0] w_x_units    = r_latched_x % 10;
+    // CRITICAL: Replaced all combinational divide/modulo operations with
+    // pure bit-slice operations. Division by non-power-of-2 creates massive
+    // combinational paths (~168ns for 17-bit divider). HEX output uses only
+    // wire slicing (zero logic delay) + small nibble-to-ASCII LUT.
+    // Reference: Cliff Cummings, "Synthesizing Arithmetic Operations"
+    // =========================================================================
 
-    wire [3:0] w_y_hundreds = r_latched_y / 100;
-    wire [3:0] w_y_tens     = (r_latched_y / 10) % 10;
-    wire [3:0] w_y_units    = r_latched_y % 10;
+    // Frame X/Y coordinates - 3 hex digits (10-bit registers, max 0x3FF)
+    // Format: 0xXXX where XXX is 10-bit hex value (1024x768 resolution)
+    wire [3:0] w_x_digit2 = {2'b00, r_latched_x[9:8]};  // Upper 2 bits (0-3)
+    wire [3:0] w_x_digit1 = r_latched_x[7:4];           // Middle nibble
+    wire [3:0] w_x_digit0 = r_latched_x[3:0];           // Lower nibble
 
-    // Per-frame counters (0-9999 range)
-    wire [3:0] w_pv_thousands = r_latched_pv_count / 1000;
-    wire [3:0] w_pv_hundreds  = (r_latched_pv_count / 100) % 10;
-    wire [3:0] w_pv_tens      = (r_latched_pv_count / 10) % 10;
-    wire [3:0] w_pv_units     = r_latched_pv_count % 10;
+    wire [3:0] w_y_digit2 = {2'b00, r_latched_y[9:8]};  // Upper 2 bits (0-3)
+    wire [3:0] w_y_digit1 = r_latched_y[7:4];           // Middle nibble
+    wire [3:0] w_y_digit0 = r_latched_y[3:0];           // Lower nibble
 
-    wire [3:0] w_wr_thousands = r_latched_wren_count / 1000;
-    wire [3:0] w_wr_hundreds  = (r_latched_wren_count / 100) % 10;
-    wire [3:0] w_wr_tens      = (r_latched_wren_count / 10) % 10;
-    wire [3:0] w_wr_units     = r_latched_wren_count % 10;
-
-    // Rowbuffer write count (0-9999 range)
-    wire [3:0] w_rb_thousands = r_latched_rowbuff_count / 1000;
-    wire [3:0] w_rb_hundreds  = (r_latched_rowbuff_count / 100) % 10;
-    wire [3:0] w_rb_tens      = (r_latched_rowbuff_count / 10) % 10;
-    wire [3:0] w_rb_units     = r_latched_rowbuff_count % 10;
+    // Per-frame counters - 4 hex digits (16 bits)
+    wire [3:0] w_pv_digit3 = r_latched_pv_count[15:12];
+    wire [3:0] w_pv_digit2 = r_latched_pv_count[11:8];
+    wire [3:0] w_pv_digit1 = r_latched_pv_count[7:4];
+    wire [3:0] w_pv_digit0 = r_latched_pv_count[3:0];
 
     // =========================================================================
-    // Pixel Debug: Decimal Conversion (5 digits, wraps at 100000)
+    // Pixel Debug: HEX Conversion (no division, pure bit-slicing)
     // =========================================================================
-    wire [16:0] w_pixel_count_mod = r_latched_pixel_count % 100000;
-    wire [3:0] w_pc_ten_thousands = w_pixel_count_mod / 10000;
-    wire [3:0] w_pc_thousands     = (w_pixel_count_mod / 1000) % 10;
-    wire [3:0] w_pc_hundreds      = (w_pixel_count_mod / 100) % 10;
-    wire [3:0] w_pc_tens          = (w_pixel_count_mod / 10) % 10;
-    wire [3:0] w_pc_units         = w_pixel_count_mod % 10;
+    // Pixel count - 5 hex digits (20 bits, supports 0-1048575)
+    wire [3:0] w_pc_digit4 = r_latched_pixel_count[19:16];
+    wire [3:0] w_pc_digit3 = r_latched_pixel_count[15:12];
+    wire [3:0] w_pc_digit2 = r_latched_pixel_count[11:8];
+    wire [3:0] w_pc_digit1 = r_latched_pixel_count[7:4];
+    wire [3:0] w_pc_digit0 = r_latched_pixel_count[3:0];
 
-    // Pixel X coordinate (3 digits, 0-999)
-    wire [3:0] w_px_hundreds = r_latched_pixel_x / 100;
-    wire [3:0] w_px_tens     = (r_latched_pixel_x / 10) % 10;
-    wire [3:0] w_px_units    = r_latched_pixel_x % 10;
+    // Pixel X coordinate - 3 hex digits (10-bit register, max 0x3FF)
+    wire [3:0] w_px_digit2 = {2'b00, r_latched_pixel_x[9:8]};  // Upper 2 bits
+    wire [3:0] w_px_digit1 = r_latched_pixel_x[7:4];           // Middle nibble
+    wire [3:0] w_px_digit0 = r_latched_pixel_x[3:0];           // Lower nibble
 
-    // Pixel Y coordinate (3 digits, 0-999)
-    wire [3:0] w_py_hundreds = r_latched_pixel_y / 100;
-    wire [3:0] w_py_tens     = (r_latched_pixel_y / 10) % 10;
-    wire [3:0] w_py_units    = r_latched_pixel_y % 10;
+    // Pixel Y coordinate - 3 hex digits (10-bit register, max 0x3FF)
+    wire [3:0] w_py_digit2 = {2'b00, r_latched_pixel_y[9:8]};  // Upper 2 bits
+    wire [3:0] w_py_digit1 = r_latched_pixel_y[7:4];           // Middle nibble
+    wire [3:0] w_py_digit0 = r_latched_pixel_y[3:0];           // Lower nibble
 
-    // Ring buffer write pointer (4 digits, 0-1023)
-    wire [3:0] w_rw_thousands = r_latched_ring_wrptr / 1000;
-    wire [3:0] w_rw_hundreds  = (r_latched_ring_wrptr / 100) % 10;
-    wire [3:0] w_rw_tens      = (r_latched_ring_wrptr / 10) % 10;
-    wire [3:0] w_rw_units     = r_latched_ring_wrptr % 10;
+    // Ring buffer write pointer - 4 hex digits (supports full 10-bit range)
+    // 10-bit value = 3 hex digits needed (max 0x3FF), pad to 4 for message format
+    wire [3:0] w_rw_digit3 = 4'h0;                                 // Always 0 (10-bit max = 0x3FF)
+    wire [3:0] w_rw_digit2 = {2'b00, r_latched_ring_wrptr[9:8]};  // Upper 2 bits (0-3)
+    wire [3:0] w_rw_digit1 = r_latched_ring_wrptr[7:4];           // Middle nibble
+    wire [3:0] w_rw_digit0 = r_latched_ring_wrptr[3:0];           // Lower nibble
 
     // =========================================================================
     // Message Sending FSM
@@ -462,37 +455,37 @@ module serial_debug #(
                     end
                     // Priority 1: Pixel debug message
                     else if (r_pixel_msg_pending) begin
-                        // Format: "P:xxxxx X:xxx Y:xxx B:x R:xxxx\r\n"
+                        // Format: "P:xxxxx X:xxx Y:xxx B:x R:xxx\r\n" (HEX values)
                         r_msg_buffer[0]  <= "P";
                         r_msg_buffer[1]  <= ":";
-                        r_msg_buffer[2]  <= digit_to_ascii(w_pc_ten_thousands);
-                        r_msg_buffer[3]  <= digit_to_ascii(w_pc_thousands);
-                        r_msg_buffer[4]  <= digit_to_ascii(w_pc_hundreds);
-                        r_msg_buffer[5]  <= digit_to_ascii(w_pc_tens);
-                        r_msg_buffer[6]  <= digit_to_ascii(w_pc_units);
+                        r_msg_buffer[2]  <= hex_to_ascii(w_pc_digit4);
+                        r_msg_buffer[3]  <= hex_to_ascii(w_pc_digit3);
+                        r_msg_buffer[4]  <= hex_to_ascii(w_pc_digit2);
+                        r_msg_buffer[5]  <= hex_to_ascii(w_pc_digit1);
+                        r_msg_buffer[6]  <= hex_to_ascii(w_pc_digit0);
                         r_msg_buffer[7]  <= " ";
                         r_msg_buffer[8]  <= "X";
                         r_msg_buffer[9]  <= ":";
-                        r_msg_buffer[10] <= digit_to_ascii(w_px_hundreds);
-                        r_msg_buffer[11] <= digit_to_ascii(w_px_tens);
-                        r_msg_buffer[12] <= digit_to_ascii(w_px_units);
+                        r_msg_buffer[10] <= hex_to_ascii(w_px_digit2);
+                        r_msg_buffer[11] <= hex_to_ascii(w_px_digit1);
+                        r_msg_buffer[12] <= hex_to_ascii(w_px_digit0);
                         r_msg_buffer[13] <= " ";
                         r_msg_buffer[14] <= "Y";
                         r_msg_buffer[15] <= ":";
-                        r_msg_buffer[16] <= digit_to_ascii(w_py_hundreds);
-                        r_msg_buffer[17] <= digit_to_ascii(w_py_tens);
-                        r_msg_buffer[18] <= digit_to_ascii(w_py_units);
+                        r_msg_buffer[16] <= hex_to_ascii(w_py_digit2);
+                        r_msg_buffer[17] <= hex_to_ascii(w_py_digit1);
+                        r_msg_buffer[18] <= hex_to_ascii(w_py_digit0);
                         r_msg_buffer[19] <= " ";
                         r_msg_buffer[20] <= "B";
                         r_msg_buffer[21] <= ":";
-                        r_msg_buffer[22] <= digit_to_ascii({1'b0, r_latched_pixel_brightness});
+                        r_msg_buffer[22] <= hex_to_ascii({1'b0, r_latched_pixel_brightness});
                         r_msg_buffer[23] <= " ";
                         r_msg_buffer[24] <= "R";
                         r_msg_buffer[25] <= ":";
-                        r_msg_buffer[26] <= digit_to_ascii(w_rw_thousands);
-                        r_msg_buffer[27] <= digit_to_ascii(w_rw_hundreds);
-                        r_msg_buffer[28] <= digit_to_ascii(w_rw_tens);
-                        r_msg_buffer[29] <= digit_to_ascii(w_rw_units);
+                        r_msg_buffer[26] <= hex_to_ascii(w_rw_digit3);
+                        r_msg_buffer[27] <= hex_to_ascii(w_rw_digit2);
+                        r_msg_buffer[28] <= hex_to_ascii(w_rw_digit1);
+                        r_msg_buffer[29] <= hex_to_ascii(w_rw_digit0);
                         r_msg_buffer[30] <= 8'd13;  // CR
                         r_msg_buffer[31] <= 8'd10;  // LF
 
@@ -534,22 +527,22 @@ module serial_debug #(
                         r_msg_buffer[27] <= " ";
                         r_msg_buffer[28] <= "V";
                         r_msg_buffer[29] <= ":";
-                        r_msg_buffer[30] <= digit_to_ascii(w_pv_thousands);
-                        r_msg_buffer[31] <= digit_to_ascii(w_pv_hundreds);
-                        r_msg_buffer[32] <= digit_to_ascii(w_pv_tens);
-                        r_msg_buffer[33] <= digit_to_ascii(w_pv_units);
+                        r_msg_buffer[30] <= hex_to_ascii(w_pv_digit3);
+                        r_msg_buffer[31] <= hex_to_ascii(w_pv_digit2);
+                        r_msg_buffer[32] <= hex_to_ascii(w_pv_digit1);
+                        r_msg_buffer[33] <= hex_to_ascii(w_pv_digit0);
                         r_msg_buffer[34] <= " ";
                         r_msg_buffer[35] <= "X";
                         r_msg_buffer[36] <= ":";
-                        r_msg_buffer[37] <= digit_to_ascii(w_x_hundreds);
-                        r_msg_buffer[38] <= digit_to_ascii(w_x_tens);
-                        r_msg_buffer[39] <= digit_to_ascii(w_x_units);
+                        r_msg_buffer[37] <= hex_to_ascii(w_x_digit2);
+                        r_msg_buffer[38] <= hex_to_ascii(w_x_digit1);
+                        r_msg_buffer[39] <= hex_to_ascii(w_x_digit0);
                         r_msg_buffer[40] <= " ";
                         r_msg_buffer[41] <= "Y";
                         r_msg_buffer[42] <= ":";
-                        r_msg_buffer[43] <= digit_to_ascii(w_y_hundreds);
-                        r_msg_buffer[44] <= digit_to_ascii(w_y_tens);
-                        r_msg_buffer[45] <= digit_to_ascii(w_y_units);
+                        r_msg_buffer[43] <= hex_to_ascii(w_y_digit2);
+                        r_msg_buffer[44] <= hex_to_ascii(w_y_digit1);
+                        r_msg_buffer[45] <= hex_to_ascii(w_y_digit0);
                         r_msg_buffer[46] <= " ";
                         r_msg_buffer[47] <= "S";
                         r_msg_buffer[48] <= ":";
@@ -580,7 +573,7 @@ module serial_debug #(
                     if (w_tx_busy) begin
                         // Check message length based on type
                         if (r_sending_pixel_msg) begin
-                            if (r_msg_index < PIXEL_MSG_LEN + 3) begin
+                            if (r_msg_index < PIXEL_MSG_LEN - 1) begin
                                 r_msg_index <= r_msg_index + 1'b1;
                                 r_msg_state <= ST_MSG_SEND;
                             end else begin

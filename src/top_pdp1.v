@@ -212,7 +212,17 @@ module top_pdp1
         .vid_fb_data    (w_vid_fb_data),
         .vid_fb_we      (w_vid_fb_we),
         .vid_vblank     (w_vid_vblank),
-        .cpu_vblank     (w_cpu_vblank)
+        .cpu_vblank     (w_cpu_vblank),
+
+        // CDC interface: CPU pixel coordinates and control -> Video
+        .cpu_pixel_x            (w_cpu_pixel_x),
+        .cpu_pixel_y            (w_cpu_pixel_y),
+        .cpu_pixel_brightness   (w_cpu_pixel_brightness),
+        .cpu_pixel_shift        (w_cpu_pixel_shift),
+        .vid_pixel_x            (w_vid_pixel_x),
+        .vid_pixel_y            (w_vid_pixel_y),
+        .vid_pixel_brightness   (w_vid_pixel_brightness),
+        .vid_pixel_shift        (w_vid_pixel_shift)
     );
 
     // =========================================================================
@@ -370,6 +380,12 @@ module top_pdp1
     wire [9:0]  w_cpu_pixel_y;
     wire [2:0]  w_cpu_pixel_brightness;
     wire        w_cpu_pixel_shift;
+
+    // CRT output signals synchronized to pixel clock domain (via CDC in clock_domain module)
+    wire [9:0]  w_vid_pixel_x;
+    wire [9:0]  w_vid_pixel_y;
+    wire [2:0]  w_vid_pixel_brightness;
+    wire        w_vid_pixel_shift;
 
     // Typewriter signals (active-high, active when character available)
     wire [6:0]  w_typewriter_char_out;

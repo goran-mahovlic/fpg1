@@ -150,6 +150,23 @@ reg [16:0] division_remainder;
 reg [9:0] pixel_x_latched;
 reg [9:0] pixel_y_latched;
 
+// ============================================================================
+// OPTIMIZATION: 2-stage pipelined multiplier for DSP inference
+// Pipeline latency: 2 clock cycles (FSM already waits 1000 cycles for MUL)
+// ============================================================================
+// Pipeline Stage 1: Capture operands
+reg [16:0] r_mult_op_a;
+reg [16:0] r_mult_op_b;
+// Pipeline Stage 2: Registered result (helps DSP inference on ECP5/iCE40)
+reg [33:0] r_multiply_result;
+
+// ============================================================================
+// OPTIMIZATION: Registered pixel output for improved timing
+// Adds 1 cycle latency but improves Fmax by breaking combinational path
+// ============================================================================
+reg [9:0] r_pixel_x_out;
+reg [9:0] r_pixel_y_out;
+
 // FIX BUG 15: One-shot PC forcing at startup
 // Use a simple one-shot: force PC once when counter transitions 99->100
 // This happens exactly once regardless of initial counter value (within 100 cycles of wrap)
@@ -181,6 +198,11 @@ wire [33:0] multiply_result;
 
 wire [33:0] division_quotient_w;
 wire [16:0] division_remainder_w;
+wire        div_valid_w;
+
+// Generate div_start pulse when entering execute state for DIV instruction with hw div enabled
+// Pipeline has 8 cycles latency, but waste_cycles provides 1750 cycles delay - plenty of margin
+wire div_start = (cpu_state == execute) && (IR[17:13] == i_di_) && hw_mul_enabled;
 
 wire [33:0] multiply_input;
 wire [16:0] denominator;
@@ -253,10 +275,12 @@ wire [3:0] w_num_shift = DI[8] + DI[7] + DI[6] + DI[5] + DI[4] + DI[3] + DI[2] +
 
 pdp1_cpu_alu_div divider(
    .in_clock(clk),
+   .i_start(div_start),
    .numer(multiply_input),
    .denom(denominator),
    .quotient(division_quotient_w),
-   .remain(division_remainder_w)
+   .remain(division_remainder_w),
+   .o_valid(div_valid_w)
    );
 
 ////////////////////  TASKS  //////////////////////
@@ -794,18 +818,64 @@ endtask
 assign denominator     = (DI[17] ? (~(DI[16:0])) : DI[16:0]);
 assign multiply_input  = AC[17] ? { ~AC[16:0], ~IO[17:1] } : { AC[16:0], IO[17:1] };
 
-assign multiply_result = abs_nosign(AC) * abs_nosign(DI);
+// OPTIMIZATION: Pipelined multiply result from registered DSP output
+// Original combinational: assign multiply_result = abs_nosign(AC) * abs_nosign(DI);
+// Pipeline adds 2 cycles latency, but FSM already waits 1000 cycles for MUL instruction
+assign multiply_result = r_multiply_result;
 
+// OPTIMIZATION: Registered pixel output coordinates
 // PDP-1 coordinates are signed 10-bit (-512 to +511), mapped to display coordinates
-// REVERT: Use COMBINATIONAL coordinates like original MiSTer!
-// Latched coordinates become stale by the time CRT detects falling edge (4-5 cycles later)
-// Combinational keeps coordinates valid as long as IO/AC registers hold the values
-assign pixel_x_out = IO[17:8] + 10'd512;
-assign pixel_y_out = AC[17:8] + 10'd512;
+// Offset +512 ensures center star remains centered (0,0 -> 512,512)
+// Original combinational: assign pixel_x_out = IO[17:8] + 10'd512;
+// Registered version adds 1 cycle latency for improved Fmax
+assign pixel_x_out = r_pixel_x_out;
+assign pixel_y_out = r_pixel_y_out;
 
 assign typewriter_char_out = IO[5:0];
 
 assign BUS_out[19:0] = { cpu_running && ~`power_switch, OV, IR[17:13], PF[6:1], sense_switches[5:0] };
+
+
+// ============================================================================
+// PIPELINED MULTIPLIER AND REGISTERED PIXEL OUTPUT
+// ============================================================================
+// This always block implements:
+// 1. 2-stage pipelined multiplier for better DSP inference on FPGA
+//    - Stage 1: Capture absolute values of operands
+//    - Stage 2: Perform multiplication and register result
+//    - Latency: 2 clock cycles (MUL instruction waits 1000 cycles, so plenty of margin)
+//
+// 2. Registered pixel output coordinates for improved Fmax
+//    - Breaks combinational path from IO/AC registers to output pins
+//    - Offset +512 preserved to keep center star centered at (512,512)
+//    - Latency: 1 clock cycle (acceptable for 50MHz display refresh)
+// ============================================================================
+always @(posedge clk) begin
+    if (rst) begin
+        // Reset pipeline registers
+        r_mult_op_a <= 17'd0;
+        r_mult_op_b <= 17'd0;
+        r_multiply_result <= 34'd0;
+        // Reset pixel output registers to center
+        r_pixel_x_out <= 10'd512;
+        r_pixel_y_out <= 10'd512;
+    end
+    else begin
+        // Pipeline Stage 1: Capture absolute values of operands
+        r_mult_op_a <= abs_nosign(AC);
+        r_mult_op_b <= abs_nosign(DI);
+
+        // Pipeline Stage 2: Registered multiplication result
+        // This allows synthesis tool to infer DSP blocks on ECP5/iCE40
+        r_multiply_result <= r_mult_op_a * r_mult_op_b;
+
+        // Registered pixel output with offset +512 for centered display
+        // PDP-1 coordinates: -512 to +511 (signed 10-bit in upper bits of IO/AC)
+        // Display coordinates: 0 to 1023 (unsigned 10-bit)
+        r_pixel_x_out <= IO[17:8] + 10'd512;
+        r_pixel_y_out <= AC[17:8] + 10'd512;
+    end
+end
 
 
 /////////////////  MAIN BLOCK  ////////////////////
