@@ -232,6 +232,19 @@ reg [7:0]   r_p21, r_p22, r_p23;
 reg [7:0]   r_p31, r_p32, r_p33;
 
 //------------------------------------------------------------------------------
+// PIPELINE FIX: Blur Kernel Pipeline Registers (3-stage)
+//------------------------------------------------------------------------------
+// Stage 1: Row sums (parallel addition)
+// Stage 2: Final kernel sum
+// Stage 3: Output selection
+reg [9:0]   r_row1_sum;                  // Stage 1: p11/2 + p12 + p13
+reg [9:0]   r_row2_sum;                  // Stage 1: p21 + p22 + p23
+reg [9:0]   r_row3_sum;                  // Stage 1: p31 + p32 + p33/2
+reg [7:0]   r_p22_d1;                    // Stage 1: delayed center pixel
+reg [10:0]  r_kernel_sum;                // Stage 2: total sum of all rows
+reg [7:0]   r_p22_d2;                    // Stage 2: delayed center pixel
+
+//------------------------------------------------------------------------------
 // Ring Buffer Connection Registers
 //------------------------------------------------------------------------------
 // These registers connect ring buffers in a circular chain.
@@ -293,6 +306,30 @@ reg         r_inside_visible;           // Current position is in visible area
 // Loop Index (for generate-style loops in always blocks)
 //------------------------------------------------------------------------------
 integer i;
+
+//------------------------------------------------------------------------------
+// PIPELINE FIX: Tap Window Check Pipeline Registers
+//------------------------------------------------------------------------------
+// Stage 1: Pre-computed window flags (registered from combinational logic)
+reg [7:0]   r_taps1_in_window;           // Which taps in buffer 1 are in window
+reg [7:0]   r_taps2_in_window;           // Which taps in buffer 2 are in window
+reg [7:0]   r_taps3_in_window;           // Which taps in buffer 3 are in window
+reg [7:0]   r_taps4_in_window;           // Which taps in buffer 4 are in window
+
+// Stage 1: Pre-computed addresses and data for each tap
+reg [12:0]  r_taps1_addr [0:7];          // Rowbuffer addresses for taps1
+reg [12:0]  r_taps2_addr [0:7];          // Rowbuffer addresses for taps2
+reg [12:0]  r_taps3_addr [0:7];          // Rowbuffer addresses for taps3
+reg [12:0]  r_taps4_addr [0:7];          // Rowbuffer addresses for taps4
+reg [7:0]   r_taps1_data [0:7];          // Luma data for taps1
+reg [7:0]   r_taps2_data [0:7];          // Luma data for taps2
+reg [7:0]   r_taps3_data [0:7];          // Luma data for taps3
+reg [7:0]   r_taps4_data [0:7];          // Luma data for taps4
+
+// Stage 1: Delayed signals for Stage 2
+reg [9:0]   r_erase_counter_d1;          // Delayed erase counter
+reg [9:0]   r_current_x_d1;              // Delayed current X
+reg [2:0]   r_current_y_bits_d1;         // Delayed current Y[2:0]
 
 //==============================================================================
 // Parallel Tap Matching Logic (Jelena Horvat - CRITICAL FIX 2026-02-08)
@@ -655,6 +692,48 @@ always @(posedge i_clk) begin
 end
 
 //==============================================================================
+// PIPELINE FIX: Generate Block for Combinational Window Check Logic
+//==============================================================================
+// This combinational logic is computed in parallel for all 8 taps per buffer.
+// Results are registered in the always block below (Stage 1).
+// Using generate avoids timing issues from complex for-loops in always blocks.
+//
+wire [7:0] w_taps1_in_window_comb;
+wire [7:0] w_taps2_in_window_comb;
+wire [7:0] w_taps3_in_window_comb;
+wire [7:0] w_taps4_in_window_comb;
+
+genvar g;
+generate
+    for (g = 0; g < 8; g = g + 1) begin : gen_window_check
+        // PIPELINE FIX: Combinational window check for taps1
+        // Checks: (w_pdp1_y < tap_y) && (tap_y - w_pdp1_y <= 7) && (luma > 0)
+        assign w_taps1_in_window_comb[g] =
+            (w_pdp1_y < w_taps1[(g+1)*DATA_WIDTH-1 -: 10]) &&
+            (w_taps1[(g+1)*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7) &&
+            (w_taps1[(g+1)*DATA_WIDTH-21 -: 8] > 0);
+
+        // PIPELINE FIX: Combinational window check for taps2
+        assign w_taps2_in_window_comb[g] =
+            (w_pdp1_y < w_taps2[(g+1)*DATA_WIDTH-1 -: 10]) &&
+            (w_taps2[(g+1)*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7) &&
+            (w_taps2[(g+1)*DATA_WIDTH-21 -: 8] > 0);
+
+        // PIPELINE FIX: Combinational window check for taps3
+        assign w_taps3_in_window_comb[g] =
+            (w_pdp1_y < w_taps3[(g+1)*DATA_WIDTH-1 -: 10]) &&
+            (w_taps3[(g+1)*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7) &&
+            (w_taps3[(g+1)*DATA_WIDTH-21 -: 8] > 0);
+
+        // PIPELINE FIX: Combinational window check for taps4
+        assign w_taps4_in_window_comb[g] =
+            (w_pdp1_y < w_taps4[(g+1)*DATA_WIDTH-1 -: 10]) &&
+            (w_taps4[(g+1)*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7) &&
+            (w_taps4[(g+1)*DATA_WIDTH-21 -: 8] > 0);
+    end
+endgenerate
+
+//==============================================================================
 // Always Block 2: Row Buffer Read/Write and Blur Kernel Processing
 //==============================================================================
 // Author: Jelena Horvat
@@ -670,7 +749,10 @@ end
 // Verilog for-loops in always blocks synthesize to PARALLEL hardware!
 // Now rowbuff_wren = 1 ALWAYS, allowing 1024 writes per line.
 //
-always @(posedge i_clk) begin
+always @(posedge i_clk) begin : main_pipeline_block
+    // PIPELINE FIX: Loop index for Stage 1 address/data capture
+    integer j;
+
     if (!i_rst_n) begin
         //----------------------------------------------------------------------
         // Reset for row buffer registers
@@ -687,6 +769,39 @@ always @(posedge i_clk) begin
         o_red   <= 8'd0;
         o_green <= 8'd0;
         o_blue  <= 8'd0;
+
+        //----------------------------------------------------------------------
+        // PIPELINE FIX: Reset for blur kernel pipeline registers
+        //----------------------------------------------------------------------
+        r_row1_sum   <= 10'd0;
+        r_row2_sum   <= 10'd0;
+        r_row3_sum   <= 10'd0;
+        r_p22_d1     <= 8'd0;
+        r_kernel_sum <= 11'd0;
+        r_p22_d2     <= 8'd0;
+
+        //----------------------------------------------------------------------
+        // PIPELINE FIX: Reset for tap window check pipeline registers
+        //----------------------------------------------------------------------
+        r_taps1_in_window <= 8'd0;
+        r_taps2_in_window <= 8'd0;
+        r_taps3_in_window <= 8'd0;
+        r_taps4_in_window <= 8'd0;
+        r_erase_counter_d1   <= 10'd0;
+        r_current_x_d1       <= 10'd0;
+        r_current_y_bits_d1  <= 3'd0;
+
+        // PIPELINE FIX: Reset tap address/data arrays
+        for (j = 0; j < 8; j = j + 1) begin
+            r_taps1_addr[j] <= 13'd0;
+            r_taps2_addr[j] <= 13'd0;
+            r_taps3_addr[j] <= 13'd0;
+            r_taps4_addr[j] <= 13'd0;
+            r_taps1_data[j] <= 8'd0;
+            r_taps2_data[j] <= 8'd0;
+            r_taps3_data[j] <= 8'd0;
+            r_taps4_data[j] <= 8'd0;
+        end
     end else begin
         //----------------------------------------------------------------------
         // Row Buffer Read: Generate address for current pixel position
@@ -713,21 +828,33 @@ always @(posedge i_clk) begin
         r_p31 <= r_p32; r_p32 <= r_p33; r_p33 <= w_line3_out;
 
         //----------------------------------------------------------------------
-        // Blur Kernel Convolution
+        // PIPELINE FIX: Blur Kernel Convolution - 3-Stage Pipeline
         //----------------------------------------------------------------------
-        // Apply 3x3 averaging blur when center pixel below threshold.
-        // Uses divide-by-8 (shift right 3) instead of divide-by-9 for efficiency.
-        // Corner pixels (p11, p33) weighted at 0.5 to prevent overflow.
+        // Stage 1: Row sums (parallel addition) - reduces critical path
+        // Stage 2: Final kernel sum
+        // Stage 3: Output selection based on brightness threshold
         //
-        if (r_p22 < BRIGHTNESS) begin
-            r_pixel_out <= ({8'b0, r_p11[7:1]} + r_p12 + r_p13 +
-                            r_p21 + r_p22 + r_p23 +
-                            r_p31 + r_p32 + r_p33[7:1]) >> 3;
-            // EMARD FIX 2026-02-08: Removed feedback (r_p21 <= r_pixel_out) to eliminate
-            // horizontal ghosting. Original MiSTer had this for "smoother decay" but it
-            // causes horizontal smearing on lower resolution displays.
+        // This pipeline improves timing by breaking the long combinational
+        // path of the 9-input addition into 3 stages.
+        //----------------------------------------------------------------------
+
+        // PIPELINE FIX: Stage 1 - Parallel row sums
+        // Corner pixels (p11, p33) weighted at 0.5 to prevent overflow
+        r_row1_sum <= {2'b0, r_p11[7:1]} + {2'b0, r_p12} + {2'b0, r_p13};
+        r_row2_sum <= {2'b0, r_p21} + {2'b0, r_p22} + {2'b0, r_p23};
+        r_row3_sum <= {2'b0, r_p31} + {2'b0, r_p32} + {2'b0, r_p33[7:1]};
+        r_p22_d1   <= r_p22;  // Delay center pixel for threshold check
+
+        // PIPELINE FIX: Stage 2 - Final sum of all rows
+        r_kernel_sum <= {1'b0, r_row1_sum} + {1'b0, r_row2_sum} + {1'b0, r_row3_sum};
+        r_p22_d2     <= r_p22_d1;  // Further delay center pixel
+
+        // PIPELINE FIX: Stage 3 - Output selection
+        // Apply blur only when center pixel below brightness threshold
+        if (r_p22_d2 < BRIGHTNESS) begin
+            r_pixel_out <= r_kernel_sum[10:3];  // Divide by 8 (shift right 3)
         end else begin
-            r_pixel_out <= r_p22;           // No blur for bright pixels
+            r_pixel_out <= r_p22_d2;  // No blur for bright pixels
         end
 
         //----------------------------------------------------------------------
@@ -746,58 +873,78 @@ always @(posedge i_clk) begin
         end
 
         //----------------------------------------------------------------------
-        // Row Buffer Write: PARALLEL for-loop (Original MiSTer approach)
+        // PIPELINE FIX: Row Buffer Write - 2-Stage Pipeline
         //----------------------------------------------------------------------
-        // Author: Jelena Horvat
+        // Author: Jelena Kovacevic
         //
-        // This for-loop synthesizes to PARALLEL combinational logic!
-        // All 8 taps across all 4 buffers checked in ONE clock cycle.
-        // Last matching tap wins (priority: tap 8 > tap 7 > ... > tap 1)
+        // Stage 1: Register window check flags and pre-compute addresses/data
+        //          (combinational logic computed in generate block above)
+        // Stage 2: Use registered flags for priority selection and output
         //
+        // This avoids multi-driver conflicts by keeping ALL pipeline registers
+        // in this SINGLE always block with proper reset handling.
+        //----------------------------------------------------------------------
+
+        //----------------------------------------------------------------------
+        // PIPELINE FIX: Stage 1 - Register window flags from combinational logic
+        //----------------------------------------------------------------------
+        r_taps1_in_window <= w_taps1_in_window_comb;
+        r_taps2_in_window <= w_taps2_in_window_comb;
+        r_taps3_in_window <= w_taps3_in_window_comb;
+        r_taps4_in_window <= w_taps4_in_window_comb;
+
+        // PIPELINE FIX: Stage 1 - Pre-compute addresses and data for all taps
+        for (j = 0; j < 8; j = j + 1) begin
+            // Tap addresses: {Y[2:0], X[9:0]}
+            r_taps1_addr[j] <= {w_taps1[(j+1)*DATA_WIDTH-8 -: 3], w_taps1[(j+1)*DATA_WIDTH-11 -: 10]};
+            r_taps2_addr[j] <= {w_taps2[(j+1)*DATA_WIDTH-8 -: 3], w_taps2[(j+1)*DATA_WIDTH-11 -: 10]};
+            r_taps3_addr[j] <= {w_taps3[(j+1)*DATA_WIDTH-8 -: 3], w_taps3[(j+1)*DATA_WIDTH-11 -: 10]};
+            r_taps4_addr[j] <= {w_taps4[(j+1)*DATA_WIDTH-8 -: 3], w_taps4[(j+1)*DATA_WIDTH-11 -: 10]};
+            // Tap luma data
+            r_taps1_data[j] <= w_taps1[(j+1)*DATA_WIDTH-21 -: 8];
+            r_taps2_data[j] <= w_taps2[(j+1)*DATA_WIDTH-21 -: 8];
+            r_taps3_data[j] <= w_taps3[(j+1)*DATA_WIDTH-21 -: 8];
+            r_taps4_data[j] <= w_taps4[(j+1)*DATA_WIDTH-21 -: 8];
+        end
+
+        // PIPELINE FIX: Stage 1 - Delay control signals for Stage 2
+        r_erase_counter_d1  <= r_erase_counter;
+        r_current_x_d1      <= w_current_x;
+        r_current_y_bits_d1 <= w_current_y[2:0];
+
+        //----------------------------------------------------------------------
+        // PIPELINE FIX: Stage 2 - Priority selection using registered flags
+        //----------------------------------------------------------------------
         // Default: erase current pixel position if no match found
-        // CRITICAL: else branch prevents erase and pixel write from running simultaneously
-        if (r_erase_counter < w_current_x) begin
-            r_rowbuff_wraddr <= {w_current_y[2:0], r_erase_counter};
+        // Uses REGISTERED values from Stage 1 (one cycle delayed)
+        if (r_erase_counter_d1 < r_current_x_d1) begin
+            r_rowbuff_wraddr <= {r_current_y_bits_d1, r_erase_counter_d1};
             r_rowbuff_wdata  <= 8'd0;
             r_erase_counter  <= r_erase_counter + 1'b1;
         end
-        else begin  // <-- CRITICAL: Only check taps when NOT erasing (matches original MiSTer)
-
-        // Check all 8 taps across all 4 ring buffers - PARALLEL!
-        // Uses blocking = for pixel_found flag, non-blocking <= for outputs
-        // Window check uses w_pdp1_y (VGA Y + offset) to check against buffer Y coords
-        // This maps VGA scanline to PDP-1 buffer coordinate space
-        for (i = 8; i > 0; i = i - 1'b1) begin
-            // Check taps1: is this pixel within our 8-line lookahead window?
-            if (w_pdp1_y < w_taps1[i*DATA_WIDTH-1 -: 10] &&
-                w_taps1[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
-                w_taps1[i*DATA_WIDTH-21 -: 8] > 0) begin
-                r_rowbuff_wraddr <= {w_taps1[i*DATA_WIDTH-8 -: 3], w_taps1[i*DATA_WIDTH-11 -: 10]};
-                r_rowbuff_wdata  <= w_taps1[i*DATA_WIDTH-21 -: 8];
+        else begin
+            // PIPELINE FIX: Stage 2 - Check registered window flags
+            // Priority: higher tap index wins (tap 7 > tap 6 > ... > tap 0)
+            // Check taps in order 0-7, last match wins
+            for (i = 0; i < 8; i = i + 1) begin
+                if (r_taps1_in_window[i]) begin
+                    r_rowbuff_wraddr <= r_taps1_addr[i];
+                    r_rowbuff_wdata  <= r_taps1_data[i];
+                end
+                else if (r_taps2_in_window[i]) begin
+                    r_rowbuff_wraddr <= r_taps2_addr[i];
+                    r_rowbuff_wdata  <= r_taps2_data[i];
+                end
+                else if (r_taps3_in_window[i]) begin
+                    r_rowbuff_wraddr <= r_taps3_addr[i];
+                    r_rowbuff_wdata  <= r_taps3_data[i];
+                end
+                else if (r_taps4_in_window[i]) begin
+                    r_rowbuff_wraddr <= r_taps4_addr[i];
+                    r_rowbuff_wdata  <= r_taps4_data[i];
+                end
             end
-            // Check taps2
-            else if (w_pdp1_y < w_taps2[i*DATA_WIDTH-1 -: 10] &&
-                     w_taps2[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
-                     w_taps2[i*DATA_WIDTH-21 -: 8] > 0) begin
-                r_rowbuff_wraddr <= {w_taps2[i*DATA_WIDTH-8 -: 3], w_taps2[i*DATA_WIDTH-11 -: 10]};
-                r_rowbuff_wdata  <= w_taps2[i*DATA_WIDTH-21 -: 8];
-            end
-            // Check taps3
-            else if (w_pdp1_y < w_taps3[i*DATA_WIDTH-1 -: 10] &&
-                     w_taps3[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
-                     w_taps3[i*DATA_WIDTH-21 -: 8] > 0) begin
-                r_rowbuff_wraddr <= {w_taps3[i*DATA_WIDTH-8 -: 3], w_taps3[i*DATA_WIDTH-11 -: 10]};
-                r_rowbuff_wdata  <= w_taps3[i*DATA_WIDTH-21 -: 8];
-            end
-            // Check taps4
-            else if (w_pdp1_y < w_taps4[i*DATA_WIDTH-1 -: 10] &&
-                     w_taps4[i*DATA_WIDTH-1 -: 10] - w_pdp1_y <= 3'd7 &&
-                     w_taps4[i*DATA_WIDTH-21 -: 8] > 0) begin
-                r_rowbuff_wraddr <= {w_taps4[i*DATA_WIDTH-8 -: 3], w_taps4[i*DATA_WIDTH-11 -: 10]};
-                r_rowbuff_wdata  <= w_taps4[i*DATA_WIDTH-21 -: 8];
-            end
-        end
-        end  // <-- End of else block (matches original MiSTer structure)
+        end  // end Stage 2 priority selection
 
         //----------------------------------------------------------------------
         // Reset erase counter at end of line
