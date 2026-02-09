@@ -222,7 +222,7 @@ Port of the classic PDP-1 Spacewar! emulator from Intel Cyclone V (MiSTer) to La
 source <path-to-oss-cad-suite>/environment
 
 # Build bitstream
-make clean && make pdp1
+make clean && make
 
 # Program ULX3S (SRAM - temporary)
 fujprog build/pdp1.bit
