@@ -14,7 +14,7 @@
 // - Input clock: 25 MHz (ULX3S onboard oscillator)
 // - out0 (clko):  255 MHz HDMI shift clock (5x pixel for DDR TMDS)
 // - out1 (clks1): 51 MHz pixel clock (1024x768 @ 50Hz)
-// - out2 (clks2): 51 MHz CPU clock (PLL cannot produce exactly 50 MHz from VCO 510 MHz)
+// - out2 (clks2): 5 MHz CPU clock directly (VCO 510 MHz / 102 = 5 MHz, within P&R max 5.87 MHz)
 //
 // TIMING PARAMETERS (1024x768 @ 50Hz):
 // - H total: 1264 pixels (1024 visible + 240 blanking)
@@ -33,7 +33,7 @@ module clk_25_shift_pixel_cpu
     input  wire clki,      // 25 MHz input clock
     output wire clko,      // 255 MHz HDMI shift clock (5x 51MHz pixel)
     output wire clks1,     // 51 MHz pixel clock (1024x768@50Hz)
-    output wire clks2,     // 51 MHz CPU clock
+    output wire clks2,     // 5 MHz CPU clock (direct from PLL)
     output wire locked     // PLL lock indicator
 );
 
@@ -44,7 +44,7 @@ module clk_25_shift_pixel_cpu
         .in_hz      (25000000),     // 25 MHz input
         .out0_hz    (255000000),    // 255 MHz shift clock (HDMI DDR, 5x pixel)
         .out1_hz    (51000000),     // 51 MHz pixel clock (1024x768@50Hz)
-        .out2_hz    (51000000),     // 51 MHz CPU clock (same as pixel, PLL compatible)
+        .out2_hz    (5000000),      // 5 MHz CPU clock directly from PLL (no prescaler needed)
         .out3_hz    (0)             // unused
     )
     pll_inst
@@ -62,6 +62,6 @@ module clk_25_shift_pixel_cpu
 
     assign clko  = clocks[0];   // 255 MHz shift clock
     assign clks1 = clocks[1];   // 51 MHz pixel clock
-    assign clks2 = clocks[2];   // 51 MHz CPU clock
+    assign clks2 = clocks[2];   // 5 MHz CPU clock
 
 endmodule

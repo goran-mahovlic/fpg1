@@ -6,25 +6,25 @@
 // Date: 2026-01-31
 //
 // FUNCTIONALITY:
-// 1. CPU clock prescaler: 51 MHz -> 1.82 MHz (original PDP-1 timing)
+// 1. CPU clock passthrough: 5 MHz directly from PLL (no prescaler needed)
 // 2. Clock Domain Crossing (CDC) between CPU and Video domains
 // 3. Reset sequencing with PLL lock wait
 //
 // CLOCK DOMAINS:
-// - clk_pixel (51 MHz)    : Video/HDMI domain (1024x768@50Hz)
-// - clk_cpu_fast (51 MHz) : CPU base clock
-// - clk_cpu (1.82 MHz)    : PDP-1 original frequency (51 MHz / 28)
+// - clk_pixel (51 MHz)   : Video/HDMI domain (1024x768@50Hz)
+// - clk_cpu_fast (5 MHz) : CPU clock from PLL (direct passthrough)
+// - clk_cpu (5 MHz)      : CPU clock output (same as input, within P&R max 5.87 MHz)
 // =============================================================================
 
 module clock_domain (
     // PLL inputs
     input  wire clk_pixel,      // 51 MHz pixel clock (1024x768@50Hz)
-    input  wire clk_cpu_fast,   // 51 MHz CPU base clock
+    input  wire clk_cpu_fast,   // 5 MHz CPU clock from PLL (direct passthrough)
     input  wire pll_locked,     // PLL lock signal
     input  wire rst_n,          // External async reset (active low)
 
     // Generated clocks
-    output wire clk_cpu,        // 1.82 MHz CPU clock (51 MHz / 28)
+    output wire clk_cpu,        // 5 MHz CPU clock (direct from PLL, no division)
     output reg  clk_cpu_en,     // Clock enable for synchronous design
 
     // Synchronized resets (active low)
@@ -48,49 +48,35 @@ module clock_domain (
     // PARAMETERS
     // =========================================================================
 
-    // Prescaler: 51 MHz / (2*6) = 4.25 MHz (accelerated for better performance)
-    // Max safe frequency per P&R: 5.87 MHz (current config = 72% margin)
-    localparam PRESCALER_DIV = 6;
-    localparam PRESCALER_BITS = 3;  // ceil(log2(6)) = 3
+    // Prescaler bypassed: 5 MHz clock directly from PLL (no division needed)
+    // Max safe frequency per P&R: 5.87 MHz (current config = 85% utilization)
+    localparam PRESCALER_DIV = 1;   // Passthrough mode (no division)
+    localparam PRESCALER_BITS = 1;  // Minimum width for counter
 
     // Reset sequencing: wait 128 cycles after PLL lock
-    // 128 cycles @ 51 MHz = 2.5 us - covers 4+ CPU clock cycles (548 ns each)
+    // 128 cycles @ 5 MHz = 25.6 us - ample time for stabilization
     localparam RESET_DELAY = 128;
     localparam RESET_DELAY_BITS = 8;  // ceil(log2(128)) = 7, use 8 for safety
 
     // =========================================================================
-    // CPU CLOCK PRESCALER
+    // CPU CLOCK PASSTHROUGH (No prescaler - 5 MHz directly from PLL)
     // =========================================================================
-    // Generates 1.82 MHz clock from 51 MHz (51 MHz / 28 = 1.821 MHz)
-    // Uses clock enable approach for better FPGA compatibility
+    // PLL now generates 5 MHz directly, no division needed.
+    // Clock enable pulses every cycle for synchronous design compatibility.
 
-    reg [PRESCALER_BITS-1:0] prescaler_cnt;
-    reg clk_cpu_reg;
-
+    // Clock enable generation - pulses every cycle when PLL locked
     always @(posedge clk_cpu_fast or negedge rst_n) begin
         if (!rst_n) begin
-            prescaler_cnt <= 0;
-            clk_cpu_reg   <= 1'b0;
-            clk_cpu_en    <= 1'b0;
+            clk_cpu_en <= 1'b0;
         end else if (!pll_locked) begin
-            prescaler_cnt <= 0;
-            clk_cpu_reg   <= 1'b0;
-            clk_cpu_en    <= 1'b0;
+            clk_cpu_en <= 1'b0;
         end else begin
-            clk_cpu_en <= 1'b0;  // Default: disabled
-
-            if (prescaler_cnt == PRESCALER_DIV - 1) begin
-                prescaler_cnt <= 0;
-                clk_cpu_reg   <= ~clk_cpu_reg;
-                clk_cpu_en    <= clk_cpu_reg;  // Enable on falling edge of divided clock
-            end else begin
-                prescaler_cnt <= prescaler_cnt + 1'b1;
-            end
+            clk_cpu_en <= 1'b1;  // Always enabled when PLL locked (5 MHz direct)
         end
     end
 
-    // BUFG would be used on real FPGA, but for simulation use direct assignment
-    assign clk_cpu = clk_cpu_reg;
+    // Direct passthrough - no division, cleaner timing from PLL
+    assign clk_cpu = clk_cpu_fast;
 
     // =========================================================================
     // RESET SEQUENCING

@@ -14,9 +14,9 @@
 //   - 8 LED indicators
 //
 // Clock Domains:
-//   - clk_shift  : 125 MHz  - HDMI DDR serializer (5x pixel clock)
+//   - clk_shift  : 255 MHz  - HDMI DDR serializer (5x pixel clock)
 //   - clk_pixel  :  51 MHz  - VGA timing (1024x768@50Hz)
-//   - clk_cpu    :  51 MHz  - PDP-1 CPU emulation base clock
+//   - clk_cpu    :   5 MHz  - PDP-1 CPU clock (direct from PLL, no prescaler)
 //
 // Reset Strategy:
 //   - Asynchronous assert, synchronous deassert per clock domain
@@ -153,7 +153,7 @@ module top_pdp1
     // -------------------------------------------------------------------------
     wire clk_shift;     // 255 MHz HDMI shift clock (5x pixel for DDR)
     wire clk_pixel;     // 51 MHz pixel clock (1024x768@50Hz timing)
-    wire clk_cpu;       // 51 MHz CPU base clock (same as pixel)
+    wire clk_cpu;       // 5 MHz CPU clock (direct from PLL, no prescaler)
     wire w_pll_locked;  // PLL lock indicator (active-high)
 
     clk_25_shift_pixel_cpu u_pll
@@ -173,7 +173,7 @@ module top_pdp1
     // Reset source: ~btn[0] (PWR inverted) AND pll_locked
     // NOTE: btn[0] inverted - system reset when PWR button is NOT pressed
     // -------------------------------------------------------------------------
-    wire w_clk_cpu_slow;    // 1.82 MHz PDP-1 clock (51 MHz / 28, legacy interface)
+    wire w_clk_cpu_slow;    // 5 MHz PDP-1 clock (direct from PLL, legacy interface name)
     wire w_clk_cpu_en;      // Clock enable pulse
     wire rst_pixel_n;       // Synchronized reset for pixel domain (active-low)
     wire rst_cpu_n;         // Synchronized reset for CPU domain (active-low)
