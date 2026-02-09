@@ -153,7 +153,7 @@ module top_pdp1
     // -------------------------------------------------------------------------
     wire clk_shift;     // 255 MHz HDMI shift clock (5x pixel for DDR)
     wire clk_pixel;     // 51 MHz pixel clock (1024x768@50Hz timing)
-    wire clk_cpu;       // 5 MHz CPU clock (direct from PLL, no prescaler)
+    wire clk_cpu = clk_pixel;       // 51 MHz CPU clock (direct from PLL, no prescaler)
     wire w_pll_locked;  // PLL lock indicator (active-high)
 
     clk_25_shift_pixel_cpu u_pll
@@ -161,7 +161,7 @@ module top_pdp1
         .clki   (clk_25mhz),
         .clko   (clk_shift),
         .clks1  (clk_pixel),
-        .clks2  (clk_cpu),
+        //.clks2  (clk_cpu),
         .locked (w_pll_locked)
     );
 

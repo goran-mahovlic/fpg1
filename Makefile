@@ -8,7 +8,7 @@
 # Project settings
 PROJECT = pdp1
 BOARD = ulx3s
-FPGA_SIZE = 85
+FPGA_SIZE = 45
 FPGA_PACKAGE = CABGA381
 
 # Directories
