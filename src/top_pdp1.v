@@ -235,6 +235,8 @@ module top_pdp1
     wire [7:0] w_led_input_feedback;
     wire       w_p2_mode_active;
     wire       w_single_player;
+    wire rst_replacement;
+    wire [6:0] btn_extended = { btn[6:1], rst_replacement};
 
     ulx3s_input #(
         .CLK_FREQ    (C_PIXEL_CLK_FREQ),  // 51 MHz pixel clock
@@ -242,7 +244,7 @@ module top_pdp1
     ) u_input (
         .i_clk            (clk_pixel),
         .i_rst_n          (rst_pixel_n),
-        .i_btn_n          (btn),              // Active-low from board (BTN[6:0], btn[6] is reset, btn[0] is P1 Fire)
+        .i_btn_n          (btn_extended),              // Active-low from board (BTN[6:0], btn[6] is reset, btn[0] is P1 Fire)
         .i_sw             (sw),
         .o_joystick_emu   (w_joystick_emu),
         .o_led_feedback   (w_led_input_feedback),

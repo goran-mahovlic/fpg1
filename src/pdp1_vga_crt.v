@@ -861,9 +861,9 @@ always @(posedge i_clk) begin : main_pipeline_block
         // VGA Output: Convert intensity to RGB
         //----------------------------------------------------------------------
         // Default low-intensity output
-        o_red   <= r_inside_visible ? {5'b0, r_pixel_out[7:5]} : 8'b0;
-        o_green <= r_inside_visible ? r_pixel_out              : 8'b0;
-        o_blue  <= r_inside_visible ? r_pixel_out[7]          : 8'b0;
+        o_red   <= r_inside_visible ? {5'b0, r_pixel_out[7:5]} : 8'd16;
+        o_green <= r_inside_visible ? r_pixel_out              : 8'd16;
+        o_blue  <= r_inside_visible ? r_pixel_out[7]          : 8'd16;
 
         // High intensity override: shift toward blue-white
         if (r_pixel_out >= 8'h80) begin
