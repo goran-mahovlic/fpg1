@@ -20,11 +20,11 @@ BOARD        := ulx3s
 
 # ==== FPGA specifications (ULX3S 45F) ====
 # LFE5U-45F-6BG381C
-FPGA_DEVICE  := LFE5U-85F
-FPGA_SIZE    := 85k
+FPGA_DEVICE  := LFE5U-45F
+FPGA_SIZE    := 45k
 FPGA_PACKAGE := CABGA381
-FPGA_SPEED   := 6
-FPGA_IDCODE  := 0x41113043
+FPGA_SPEED   := 8
+FPGA_IDCODE  := 0x41112043
 
 # ==== Toolchain paths ====
 # OSS CAD Suite location - adjust if installed differently
@@ -57,7 +57,7 @@ V_FILES      := $(SRC_DIR)/clk_25_shift_pixel_cpu.v
 SOURCES      := $(SV_FILES) $(V_FILES)
 
 # ==== Constraints ====
-LPF_FILE     := $(CONSTRAINTS_DIR)/ulx3s_v20_segpdi.lpf
+LPF_FILE     := $(SRC_DIR)/ulx3s_v317.lpf
 
 # ==== Output files ====
 JSON_FILE    := $(BUILD_DIR)/$(PROJECT).json
@@ -92,7 +92,7 @@ PDP1_TOP_MODULE  := top_pdp1
 PDP1_JSON_FILE   := $(BUILD_DIR)/$(PDP1_PROJECT).json
 PDP1_CONFIG_FILE := $(BUILD_DIR)/$(PDP1_PROJECT).config
 PDP1_BIT_FILE    := $(BUILD_DIR)/$(PDP1_PROJECT).bit
-PDP1_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
+PDP1_LPF_FILE    := $(SRC_DIR)/ulx3s_v317.lpf
 
 # PDP-1 SystemVerilog source files
 PDP1_SV_FILES    := $(SRC_DIR)/ecp5pll.sv
@@ -127,7 +127,7 @@ PDP1_ANIM_TOP_MODULE  := top_pdp1
 PDP1_ANIM_JSON_FILE   := $(BUILD_DIR)/$(PDP1_ANIM_PROJECT).json
 PDP1_ANIM_CONFIG_FILE := $(BUILD_DIR)/$(PDP1_ANIM_PROJECT).config
 PDP1_ANIM_BIT_FILE    := $(BUILD_DIR)/$(PDP1_ANIM_PROJECT).bit
-PDP1_ANIM_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
+PDP1_ANIM_LPF_FILE    := $(SRC_DIR)/ulx3s_v317.lpf
 
 # =============================================================================
 # PDP-1 + ESP32 OSD CONFIGURATION
@@ -137,7 +137,7 @@ PDP1_ESP32_TOP_MODULE  := top_pdp1
 PDP1_ESP32_JSON_FILE   := $(BUILD_DIR)/$(PDP1_ESP32_PROJECT).json
 PDP1_ESP32_CONFIG_FILE := $(BUILD_DIR)/$(PDP1_ESP32_PROJECT).config
 PDP1_ESP32_BIT_FILE    := $(BUILD_DIR)/$(PDP1_ESP32_PROJECT).bit
-PDP1_ESP32_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
+PDP1_ESP32_LPF_FILE    := $(SRC_DIR)/ulx3s_v317.lpf
 
 # ESP32 OSD modules
 ESP32_OSD_FILES  := $(SRC_DIR)/esp32_spi_slave.v \
@@ -358,7 +358,7 @@ PDP1_45F_TOP_MODULE  := top_pdp1
 PDP1_45F_JSON_FILE   := $(BUILD_DIR)/$(PDP1_45F_PROJECT).json
 PDP1_45F_CONFIG_FILE := $(BUILD_DIR)/$(PDP1_45F_PROJECT).config
 PDP1_45F_BIT_FILE    := $(BUILD_DIR)/$(PDP1_45F_PROJECT).bit
-PDP1_45F_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
+PDP1_45F_LPF_FILE    := $(SRC_DIR)/ulx3s_v317.lpf
 
 # 45F FPGA specifications
 FPGA_SIZE_45F        := 45k
