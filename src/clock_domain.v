@@ -48,10 +48,10 @@ module clock_domain (
     // PARAMETERS
     // =========================================================================
 
-    // Prescaler: 51 MHz / 28 = 1.821428 MHz (close to original PDP-1 1.79 MHz)
-    // PDP-1 operated at 200 kHz to 1.79 MHz depending on version
-    localparam PRESCALER_DIV = 28;
-    localparam PRESCALER_BITS = 5;  // ceil(log2(28)) = 5
+    // Prescaler: 51 MHz / (2*6) = 4.25 MHz (accelerated for better performance)
+    // Max safe frequency per P&R: 5.87 MHz (current config = 72% margin)
+    localparam PRESCALER_DIV = 6;
+    localparam PRESCALER_BITS = 3;  // ceil(log2(6)) = 3
 
     // Reset sequencing: wait 128 cycles after PLL lock
     // 128 cycles @ 51 MHz = 2.5 us - covers 4+ CPU clock cycles (548 ns each)
