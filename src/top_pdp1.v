@@ -14,9 +14,9 @@
 //   - 8 LED indicators
 //
 // Clock Domains:
-//   - clk_shift  : 255 MHz  - HDMI DDR serializer (5x pixel clock)
+//   - clk_shift  : 125 MHz  - HDMI DDR serializer (5x pixel clock)
 //   - clk_pixel  :  51 MHz  - VGA timing (1024x768@50Hz)
-//   - clk_cpu    :   5 MHz  - PDP-1 CPU clock (direct from PLL, no prescaler)
+//   - clk_cpu    :  51 MHz  - PDP-1 CPU emulation base clock
 //
 // Reset Strategy:
 //   - Asynchronous assert, synchronous deassert per clock domain
@@ -38,18 +38,10 @@
 //   - ulx3s_input.v            : Button debounce, joystick mapping
 //   - pdp1_cpu.v               : PDP-1 CPU core
 //   - pdp1_main_ram.v          : 4K x 18-bit main memory
-//   - test_sinus.v             : Sine wave test pattern generator (SW[2])
 //   - vga2dvid.v               : VGA to DVI/HDMI conversion
 //   - fake_differential.v      : ECP5 DDR output primitives
 //
-// Test Mode:
-//   - Define TEST_ANIMATION for "Orbital Spark" phosphor decay test
-//   - Animated point traces elliptical orbit with phosphor trail
-//
 //==============================================================================
-
-// Uncomment to enable test animation mode
-// `define TEST_ANIMATION
 
 `include "definitions.v"
 
@@ -153,7 +145,7 @@ module top_pdp1
     // -------------------------------------------------------------------------
     wire clk_shift;     // 255 MHz HDMI shift clock (5x pixel for DDR)
     wire clk_pixel;     // 51 MHz pixel clock (1024x768@50Hz timing)
-    wire clk_cpu = clk_pixel;       // 51 MHz CPU clock (direct from PLL, no prescaler)
+    wire clk_cpu;       // 51 MHz CPU base clock (same as pixel)
     wire w_pll_locked;  // PLL lock indicator (active-high)
 
     clk_25_shift_pixel_cpu u_pll
@@ -161,7 +153,7 @@ module top_pdp1
         .clki   (clk_25mhz),
         .clko   (clk_shift),
         .clks1  (clk_pixel),
-        //.clks2  (clk_cpu),
+        .clks2  (clk_cpu),
         .locked (w_pll_locked)
     );
 
@@ -173,7 +165,7 @@ module top_pdp1
     // Reset source: ~btn[0] (PWR inverted) AND pll_locked
     // NOTE: btn[0] inverted - system reset when PWR button is NOT pressed
     // -------------------------------------------------------------------------
-    wire w_clk_cpu_slow;    // 5 MHz PDP-1 clock (direct from PLL, legacy interface name)
+    wire w_clk_cpu_slow;    // 1.82 MHz PDP-1 clock (51 MHz / 28, legacy interface)
     wire w_clk_cpu_en;      // Clock enable pulse
     wire rst_pixel_n;       // Synchronized reset for pixel domain (active-low)
     wire rst_cpu_n;         // Synchronized reset for CPU domain (active-low)
@@ -235,8 +227,6 @@ module top_pdp1
     wire [7:0] w_led_input_feedback;
     wire       w_p2_mode_active;
     wire       w_single_player;
-    wire rst_replacement;
-    wire [6:0] btn_extended = { btn[6:1], rst_replacement};
 
     ulx3s_input #(
         .CLK_FREQ    (C_PIXEL_CLK_FREQ),  // 51 MHz pixel clock
@@ -244,7 +234,7 @@ module top_pdp1
     ) u_input (
         .i_clk            (clk_pixel),
         .i_rst_n          (rst_pixel_n),
-        .i_btn_n          (btn_extended),              // Active-low from board (BTN[6:0], btn[6] is reset, btn[0] is P1 Fire)
+        .i_btn_n          (btn),              // Active-low from board (BTN[6:0], btn[6] is reset, btn[0] is P1 Fire)
         .i_sw             (sw),
         .o_joystick_emu   (w_joystick_emu),
         .o_led_feedback   (w_led_input_feedback),
@@ -299,54 +289,6 @@ module top_pdp1
     wire [15:0] w_crt_debug_rowbuff_write_count;
     wire [9:0]  w_crt_debug_ring_buffer_wrptr;
 
-`ifdef TEST_ANIMATION
-    // =========================================================================
-    // TEST ANIMATION MODE: "Orbital Spark" (clk_pixel domain only)
-    // =========================================================================
-    // Point traces elliptical orbit, phosphor decay creates trailing effect.
-    // No CDC required - entire animation runs in clk_pixel domain.
-    // -------------------------------------------------------------------------
-
-    // Frame tick generator - single-cycle pulse at start of each frame
-    reg        r_frame_tick;
-    reg [10:0] r_prev_v_counter;
-
-    always @(posedge clk_pixel) begin
-        if (!rst_pixel_n) begin
-            r_frame_tick      <= 1'b0;
-            r_prev_v_counter  <= 11'd0;
-        end else begin
-            r_prev_v_counter <= r_v_counter;
-            // Detect start of new frame (transition into vblank)
-            r_frame_tick <= (r_v_counter == 11'd0) && (r_prev_v_counter != 11'd0);
-        end
-    end
-
-    // Test animation outputs (all in clk_pixel domain)
-    wire [9:0] w_anim_pixel_x;
-    wire [9:0] w_anim_pixel_y;
-    wire [2:0] w_anim_brightness;
-    wire       w_anim_pixel_valid;
-    wire [7:0] w_anim_debug_angle;
-
-    test_animation u_test_anim (
-        .clk              (clk_pixel),
-        .rst_n            (rst_pixel_n),
-        .frame_tick       (r_frame_tick),
-        .pixel_x          (w_anim_pixel_x),
-        .pixel_y          (w_anim_pixel_y),
-        .pixel_brightness (w_anim_brightness),
-        .pixel_valid      (w_anim_pixel_valid),
-        .debug_angle      (w_anim_debug_angle)
-    );
-
-    // Map animation outputs to generic pixel signals
-    wire [9:0] w_test_pixel_x     = w_anim_pixel_x;
-    wire [9:0] w_test_pixel_y     = w_anim_pixel_y;
-    wire [2:0] w_test_brightness  = w_anim_brightness;
-    wire       w_test_pixel_avail = w_anim_pixel_valid;
-
-`else
     // =========================================================================
     // PDP-1 CPU INTEGRATION (clk_cpu domain)
     // =========================================================================
@@ -590,36 +532,6 @@ module top_pdp1
     );
 
     // =========================================================================
-    // SINE TEST PATTERN GENERATOR (SW[2] = 1 activates test mode)
-    // =========================================================================
-    // Refactored to separate module: test_sinus.v (Kosjenka Vukovic, 2026-02-06)
-    // When SW[2]=1, replace CPU pixel coordinates with sine wave pattern.
-    // Uses CPU DPY timing (pixel_shift) to maintain proper pipeline flow.
-    //
-    // Original implementation: Jelena Horvat, REGOC team (2026-02-02)
-    // =========================================================================
-
-    // Test mode flag from synchronized DIP switch (clk_cpu domain)
-    wire w_sine_test_mode = r_sw_sync[2];
-
-    // Sine test pattern outputs
-    wire [9:0] w_sine_mux_x;
-    wire [9:0] w_sine_mux_y;
-    wire [2:0] w_sine_mux_brightness;
-    wire       w_sine_valid;
-
-    test_sinus u_test_sinus (
-        .i_clk          (clk_cpu),
-        .i_rst_n        (rst_cpu_n),
-        .i_enable       (w_sine_test_mode),
-        .i_pixel_shift  (w_cpu_pixel_shift),
-        .o_x            (w_sine_mux_x),
-        .o_y            (w_sine_mux_y),
-        .o_brightness   (w_sine_mux_brightness),
-        .o_valid        (w_sine_valid)
-    );
-
-    // =========================================================================
     // CDC: MULTI-BIT PIXEL DATA (clk_cpu -> clk_pixel)
     // =========================================================================
     // PROBLEM: 23 bits (10+10+3) transferred across CDC without handshake.
@@ -636,22 +548,12 @@ module top_pdp1
     //           - 3-stage sync needs only 3 pixel cycles -> plenty of margin!
     //
     // CDC Path: w_cpu_pixel_* -> r_pixel_*_hold -> [stable] -> 3FF sync -> CRT
-    //
-    // SINE TEST MODE (SW[2]=1):
-    //   When test mode active, sine wave coordinates replace CPU coordinates.
-    //   Still uses CPU DPY timing for proper pipeline synchronization.
     // =========================================================================
     reg [9:0]  r_pixel_x_hold;
     reg [9:0]  r_pixel_y_hold;
     reg [2:0]  r_pixel_brightness_hold;
     reg [3:0]  r_pixel_hold_counter;
     reg        r_pixel_hold_valid;
-
-    // Select between CPU coordinates and sine test pattern
-    // Uses multiplexed sine (sine1/sine2 alternating) when in test mode
-    wire [9:0] w_selected_pixel_x = w_sine_test_mode ? w_sine_mux_x : w_cpu_pixel_x;
-    wire [9:0] w_selected_pixel_y = w_sine_test_mode ? w_sine_mux_y : w_cpu_pixel_y;
-    wire [2:0] w_selected_brightness = w_sine_test_mode ? w_sine_mux_brightness : w_cpu_pixel_brightness;
 
     always @(posedge clk_cpu) begin
         if (~rst_cpu_n) begin
@@ -663,10 +565,10 @@ module top_pdp1
         end else begin
             if (w_cpu_pixel_shift && r_pixel_hold_counter == 0) begin
                 // Latch new pixel and hold stable for CDC
-                // Use selected coordinates (CPU or sine depending on SW[2])
-                r_pixel_x_hold          <= w_selected_pixel_x;
-                r_pixel_y_hold          <= w_selected_pixel_y;
-                r_pixel_brightness_hold <= w_selected_brightness;
+                // Direct CPU coordinates (no test pattern MUX)
+                r_pixel_x_hold          <= w_cpu_pixel_x;
+                r_pixel_y_hold          <= w_cpu_pixel_y;
+                r_pixel_brightness_hold <= w_cpu_pixel_brightness;
                 r_pixel_hold_counter    <= 4'd8;    // Hold 8 CPU cycles (~1.28us)
                 r_pixel_hold_valid      <= 1'b1;
             end else if (r_pixel_hold_counter > 0) begin
@@ -683,21 +585,7 @@ module top_pdp1
     wire [9:0] w_test_pixel_y     = r_pixel_y_hold;
     wire [2:0] w_test_brightness  = r_pixel_brightness_hold;
     wire       w_test_pixel_avail = r_pixel_hold_valid;
-`endif
 
-`ifdef TEST_ANIMATION
-    // =========================================================================
-    // TEST ANIMATION: No CDC needed (already in clk_pixel domain)
-    // =========================================================================
-    // Animation module runs entirely in clk_pixel domain, no CDC required.
-    // Direct wire mapping (no synchronization needed).
-    // -------------------------------------------------------------------------
-    wire [9:0] w_pixel_x_sync       = w_test_pixel_x;
-    wire [9:0] w_pixel_y_sync       = w_test_pixel_y;
-    wire [2:0] w_brightness_sync    = w_test_brightness;
-    wire       w_pixel_avail_synced = w_test_pixel_avail;
-
-`else
     // =========================================================================
     // CDC: PIXEL VALID SYNCHRONIZATION (clk_cpu -> clk_pixel)
     // =========================================================================
@@ -749,7 +637,6 @@ module top_pdp1
     wire [9:0] w_pixel_x_sync    = r_pixel_x_sync;
     wire [9:0] w_pixel_y_sync    = r_pixel_y_sync;
     wire [2:0] w_brightness_sync = r_brightness_sync;
-`endif
 
     pdp1_vga_crt u_crt_display
     (
@@ -859,26 +746,17 @@ module top_pdp1
     // -------------------------------------------------------------------------
     wire [7:0] w_vga_r, w_vga_g, w_vga_b;
 
-    // Test pattern for debug: simple gradient color bars
-    wire [7:0] w_test_r = r_h_counter[7:0];
-    wire [7:0] w_test_g = r_v_counter[7:0];
-    wire [7:0] w_test_b = {r_h_counter[3:0], r_v_counter[3:0]};
-
 `ifdef ESP32_OSD
     // OSD overlay output (when ESP32 OSD is enabled)
-    wire [7:0] w_final_r = w_osd_video_out[23:16];
-    wire [7:0] w_final_g = w_osd_video_out[15:8];
-    wire [7:0] w_final_b = w_osd_video_out[7:0];
+    assign w_vga_r = w_osd_video_out[23:16];
+    assign w_vga_g = w_osd_video_out[15:8];
+    assign w_vga_b = w_osd_video_out[7:0];
 `else
-    // Direct CRT output (no OSD)
-    wire [7:0] w_final_r = w_crt_r;
-    wire [7:0] w_final_g = w_crt_g;
-    wire [7:0] w_final_b = w_crt_b;
+    // Direct CRT output (no OSD, no test pattern switching)
+    assign w_vga_r = w_crt_r;
+    assign w_vga_g = w_crt_g;
+    assign w_vga_b = w_crt_b;
 `endif
-
-    assign w_vga_r = sw[3] ? w_test_r : w_final_r;
-    assign w_vga_g = sw[3] ? w_test_g : w_final_g;
-    assign w_vga_b = sw[3] ? w_test_b : w_final_b;
 
     // =========================================================================
     // HDMI OUTPUT (VGA -> DVID/TMDS CONVERSION)
@@ -941,7 +819,6 @@ module top_pdp1
 
     // Latch activity signals on slow clock for human visibility
     reg r_pixel_valid_seen;
-    reg r_frame_tick_seen;
     reg r_rowbuff_write_seen;
     reg r_inside_visible_seen;
     reg r_pixel_to_rowbuff_seen;
@@ -949,7 +826,6 @@ module top_pdp1
     always @(posedge clk_pixel) begin
         if (!rst_pixel_n) begin
             r_pixel_valid_seen    <= 1'b0;
-            r_frame_tick_seen     <= 1'b0;
             r_rowbuff_write_seen  <= 1'b0;
             r_inside_visible_seen <= 1'b0;
             r_pixel_to_rowbuff_seen <= 1'b0;
@@ -957,7 +833,6 @@ module top_pdp1
             // Reset on each slow clock tick (~0.5s period)
             if (r_led_divider[24]) begin
                 r_pixel_valid_seen    <= 1'b0;
-                r_frame_tick_seen     <= 1'b0;
                 r_rowbuff_write_seen  <= 1'b0;
                 r_inside_visible_seen <= 1'b0;
                 r_pixel_to_rowbuff_seen <= 1'b0;
@@ -965,10 +840,6 @@ module top_pdp1
                 // Latch if event occurred
                 if (w_pixel_avail_synced)
                     r_pixel_valid_seen <= 1'b1;
-`ifdef TEST_ANIMATION
-                if (r_frame_tick)
-                    r_frame_tick_seen <= 1'b1;
-`endif
                 // DEBUG: Latch rowbuffer write activity
                 if (w_crt_debug_rowbuff_wren)
                     r_rowbuff_write_seen <= 1'b1;
@@ -985,14 +856,7 @@ module top_pdp1
     // =========================================================================
     // COMPREHENSIVE LED DEBUG (clk_pixel domain)
     // =========================================================================
-    // LED[0] = heartbeat (clk_pixel running) - blink at ~1.5Hz
-    // LED[1] = r_cpu_clk_seen - CPU clock activity detected
-    // LED[2] = r_pixel_valid_seen - Pixel valid signal seen
-    // LED[3] = r_frame_tick_seen - Frame tick detected
-    // LED[4] = r_h_counter[9] - H counter MSB (toggles during line)
-    // LED[5] = r_v_counter[9] - V counter MSB (toggles during frame)
-    // LED[6] = w_pll_locked - PLL lock indicator
-    // LED[7] = rst_pixel_n - Reset released
+    // Note: LED assignments now show CPU debug state directly
     // -------------------------------------------------------------------------
 
     // CDC: CPU clock enable synchronization (clk_cpu -> clk_pixel)
@@ -1014,8 +878,7 @@ module top_pdp1
         end
     end
 
-    // Frame tick detector for non-TEST_ANIMATION mode
-`ifndef TEST_ANIMATION
+    // Frame tick detector for CPU mode
     reg r_frame_tick_seen_cpu;
     always @(posedge clk_pixel) begin
         if (!rst_pixel_n)
@@ -1025,7 +888,6 @@ module top_pdp1
         else if (r_cpu_frame_tick)
             r_frame_tick_seen_cpu <= 1'b1;
     end
-`endif
 
     // DEBUG: Show CPU state and reset status on LEDs
     // LED[4:0] = CPU state low bits (0-31)
@@ -1039,51 +901,6 @@ module top_pdp1
 
     // =========================================================================
     // DEBUG: SERIAL OUTPUT (UART TX)
-    // =========================================================================
-    // DEBUG: SERIAL OUTPUT (UART TX)
-    // =========================================================================
-`ifdef TEST_ANIMATION
-    // Serial debug for TEST_ANIMATION mode - uses animation signals
-    serial_debug #(
-        .CLK_FREQ(C_PIXEL_CLK_FREQ)
-    ) u_serial_debug (
-        .i_clk                (clk_pixel),
-        .i_rst_n              (rst_pixel_n),
-        .i_enable             (w_single_player),  // SW[1] synchronized signal
-        .i_frame_tick         (r_frame_tick),
-        .i_angle              (w_anim_debug_angle),
-        .i_pixel_x            (w_anim_pixel_x),
-        .i_pixel_y            (w_anim_pixel_y),
-        .i_pixel_valid        (w_anim_pixel_valid),
-        .i_led_status         (led),
-        // CRT Pipeline Debug
-        .i_pixel_avail_synced (w_pixel_avail_synced),
-        .i_crt_wren           (w_crt_debug_wren),
-        .i_crt_write_ptr      (w_crt_debug_write_ptr),
-        .i_crt_read_ptr       (w_crt_debug_read_ptr),
-        .i_search_counter_msb (w_crt_debug_search_counter),
-        .i_luma1              (w_crt_debug_luma1),
-        .i_rowbuff_write_count(w_crt_debug_rowbuff_write_count),
-        // CPU Debug (not used in TEST_ANIMATION mode)
-        .i_cpu_pc             (12'd0),
-        .i_cpu_instr_count    (16'd0),
-        .i_cpu_iot_count      (16'd0),
-        .i_cpu_running        (1'b0),
-        .i_cpu_state          (8'd0),
-        // Pixel Debug (animation signals)
-        .i_pixel_count        (32'd0),
-        .i_pixel_debug_x      (w_anim_pixel_x),
-        .i_pixel_debug_y      (w_anim_pixel_y),
-        .i_pixel_brightness   (w_anim_brightness),
-        .i_pixel_shift_out    (w_anim_pixel_valid),
-        .i_ring_buffer_wrptr  (w_crt_debug_ring_buffer_wrptr),
-        .o_uart_tx            (ftdi_rxd)
-    );
-`else
-
-    // =========================================================================
-    // CPU MODE: Serial Debug Output
-    // TODO: Refactor into separate module with enable/disable control
     // =========================================================================
     // Frame tick generator for CPU mode
     reg        r_cpu_frame_tick;
@@ -1145,6 +962,5 @@ module top_pdp1
         .i_ring_buffer_wrptr  (w_crt_debug_ring_buffer_wrptr),
         .o_uart_tx            (ftdi_rxd)
     );
-`endif
 
 endmodule
