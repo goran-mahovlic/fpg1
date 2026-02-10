@@ -805,9 +805,12 @@ module top_pdp1
     // =========================================================================
     // DEBUG: LED INDICATORS (clk_pixel domain, human-visible rate)
     // =========================================================================
+    // Compile-time option: -DENABLE_LED_DEBUG to enable LED debug indicators
+    // Without this define, LEDs are driven to constant 0 (off)
+    // -------------------------------------------------------------------------
+`ifdef ENABLE_LED_DEBUG
     // LED divider creates ~1.5Hz blink rate for human observation.
     // 51MHz / 2^25 = ~1.52 Hz
-    // -------------------------------------------------------------------------
     reg [24:0] r_led_divider;
 
     always @(posedge clk_pixel) begin
@@ -878,7 +881,8 @@ module top_pdp1
         end
     end
 
-    // Frame tick detector for CPU mode
+    // Frame tick detector for CPU mode (requires UART DEBUG for r_cpu_frame_tick signal)
+`ifdef ENABLE_UART_DEBUG
     reg r_frame_tick_seen_cpu;
     always @(posedge clk_pixel) begin
         if (!rst_pixel_n)
@@ -888,6 +892,7 @@ module top_pdp1
         else if (r_cpu_frame_tick)
             r_frame_tick_seen_cpu <= 1'b1;
     end
+`endif
 
     // DEBUG: Show CPU state and reset status on LEDs
     // LED[4:0] = CPU state low bits (0-31)
@@ -898,10 +903,18 @@ module top_pdp1
     assign led[5] = ~rst_cpu_n;  // 1 = reset active
     assign led[6] = w_cpu_debug_running;
     assign led[7] = w_pll_locked;
+`else
+    // LED DEBUG disabled - all LEDs off
+    assign led = 8'b0;
+`endif
 
     // =========================================================================
     // DEBUG: SERIAL OUTPUT (UART TX)
     // =========================================================================
+    // Compile-time option: -DENABLE_UART_DEBUG to enable serial debug output
+    // Without this define, ftdi_rxd is driven HIGH (idle state for UART)
+    // -------------------------------------------------------------------------
+`ifdef ENABLE_UART_DEBUG
     // Frame tick generator for CPU mode
     reg        r_cpu_frame_tick;
     reg [10:0] r_cpu_prev_v_counter;
@@ -962,5 +975,9 @@ module top_pdp1
         .i_ring_buffer_wrptr  (w_crt_debug_ring_buffer_wrptr),
         .o_uart_tx            (ftdi_rxd)
     );
+`else
+    // UART DEBUG disabled - TX line held HIGH (UART idle state)
+    assign ftdi_rxd = 1'b1;
+`endif
 
 endmodule

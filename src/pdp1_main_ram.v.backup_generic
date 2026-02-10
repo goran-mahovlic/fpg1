@@ -1,0 +1,76 @@
+/*
+ * PDP-1 Main RAM - ECP5 Compatible Version
+ *
+ * 4096 x 18-bit dual-port RAM for PDP-1 CPU
+ * Initialized from minskytron.hex at synthesis time
+ *
+ * Original Altera version used altsyncram with MIF file.
+ * This version uses generic Verilog $readmemh for ECP5/Yosys.
+ *
+ * Port A: CPU access (read/write)
+ * Port B: Secondary access (unused in basic config, but available)
+ *
+ * Author: Jelena Horvat, REGOC team
+ * Task: TASK-213 CPU Integration
+ */
+
+module pdp1_main_ram (
+    // Port A - Primary CPU interface
+    input  wire [11:0] address_a,
+    input  wire        clock_a,
+    input  wire [17:0] data_a,
+    input  wire        wren_a,
+    output reg  [17:0] q_a,
+
+    // Port B - Secondary interface (optional)
+    input  wire [11:0] address_b,
+    input  wire        clock_b,
+    input  wire [17:0] data_b,
+    input  wire        wren_b,
+    output reg  [17:0] q_b
+);
+
+    // 4096 x 18-bit memory array
+    // PDP-1 has 18-bit words, 4K word address space (12-bit address)
+    reg [17:0] mem [0:4095];
+
+    // Initialize memory at synthesis time
+    // TEST: Using ONLY hardcoded values (no $readmemh) to verify BRAM init works
+    //
+    // Simple test program:
+    // Addr 4: JMP 5 (jump to next instruction)
+    // Addr 5: JMP 6
+    // Addr 6: JMP 7
+    // etc... infinite loop if working
+    //
+    // JMP opcode is 60xxxx (octal) = 6 << 13 | address
+    // JMP 5 = 0o600005 = 18'h30005
+    // JMP 6 = 0o600006 = 18'h30006
+    // etc.
+    initial begin
+        mem[0]  = 18'h00000;
+        mem[1]  = 18'h00000;
+        mem[2]  = 18'h00000;
+        mem[3]  = 18'h00000;
+        mem[4]  = 18'h30005;  // JMP 5
+        mem[5]  = 18'h30006;  // JMP 6
+        mem[6]  = 18'h30007;  // JMP 7
+        mem[7]  = 18'h30010;  // JMP 8 (octal 10)
+        mem[8]  = 18'h30011;  // JMP 9 (octal 11)
+        mem[9]  = 18'h30004;  // JMP 4 (loop back)
+    end
+
+    // Port A - synchronous read (WRITE DISABLED FOR DEBUGGING!)
+    // Removing write logic to see if that affects BRAM init
+    always @(posedge clock_a) begin
+        // DISABLED: if (wren_a) mem[address_a] <= data_a;
+        q_a <= mem[address_a];
+    end
+
+    // Port B - synchronous read (WRITE DISABLED FOR DEBUGGING!)
+    always @(posedge clock_b) begin
+        // DISABLED: if (wren_b) mem[address_b] <= data_b;
+        q_b <= mem[address_b];
+    end
+
+endmodule
