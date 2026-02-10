@@ -1,0 +1,201 @@
+# =============================================================================
+# Makefile for Sine Wave Test (ULX3S ECP5)
+# =============================================================================
+# Purpose: PDP-1 CPU with sine wave test pattern generator
+# Top Module: top_test_sinus
+# Project: test_sinus
+# Author: REGOC team
+# Date: 2026-02-10
+#
+# Includes: Full PDP-1 CPU (pdp1_cpu), RAM, CRT display, sine test pattern
+# =============================================================================
+
+# ==== Project configuration ====
+PROJECT      := test_sinus
+TOP_MODULE   := top_test_sinus
+BOARD        := ulx3s
+
+# ==== FPGA specifications (ULX3S 85F) ====
+FPGA_DEVICE  := LFE5U-85F
+FPGA_SIZE    := 85k
+FPGA_PACKAGE := CABGA381
+FPGA_SPEED   := 6
+FPGA_IDCODE  := 0x41113043
+
+# ==== Toolchain paths ====
+OSS_CAD_SUITE ?= $(HOME)/Programs/oss-cad-suite
+
+# Tools
+YOSYS        := yosys
+NEXTPNR      := nextpnr-ecp5
+ECPPACK      := ecppack
+PROGRAMMER   := openFPGALoader
+
+# ==== Directories ====
+SRC_DIR      := src
+BUILD_DIR    := build
+CONSTRAINTS_DIR := src
+
+# ==== Source files ====
+# SystemVerilog source
+SV_FILES     := $(SRC_DIR)/ecp5pll.sv
+
+# Verilog source - full PDP-1 with sine test pattern
+V_FILES      := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
+                $(SRC_DIR)/top_test_sinus.v \
+                $(SRC_DIR)/clock_domain.v \
+                $(SRC_DIR)/ulx3s_input.v \
+                $(SRC_DIR)/pdp1_vga_crt.v \
+                $(SRC_DIR)/pdp1_vga_rowbuffer.v \
+                $(SRC_DIR)/line_shift_register.v \
+                $(SRC_DIR)/pixel_ring_buffer.v \
+                $(SRC_DIR)/pdp1_cpu.v \
+                $(SRC_DIR)/pdp1_main_ram.v \
+                $(SRC_DIR)/pdp1_cpu_alu_div.v \
+                $(SRC_DIR)/pdp1_terminal_fb.v \
+                $(SRC_DIR)/pdp1_terminal_charset.v \
+                $(SRC_DIR)/test_sinus.v \
+                $(SRC_DIR)/serial_debug.v \
+                $(SRC_DIR)/vga2dvid.v \
+                $(SRC_DIR)/tmds_encoder.v \
+                $(SRC_DIR)/fake_differential.v
+
+# ==== Constraints ====
+LPF_FILE     := $(CONSTRAINTS_DIR)/ulx3s_v317_pdp1.lpf
+
+# ==== Output files ====
+JSON_FILE    := $(BUILD_DIR)/$(PROJECT).json
+CONFIG_FILE  := $(BUILD_DIR)/$(PROJECT).config
+BIT_FILE     := $(BUILD_DIR)/$(PROJECT).bit
+
+# ==== Yosys options ====
+YOSYS_FLAGS  :=
+
+# ==== nextpnr options ====
+NEXTPNR_THREADS := $(shell nproc)
+NEXTPNR_FLAGS := --timing-allow-fail --threads $(NEXTPNR_THREADS)
+
+# ==== ecppack options ====
+ECPPACK_FLAGS := --compress --freq 62.0
+
+# =============================================================================
+# TARGETS
+# =============================================================================
+
+.PHONY: sinus sinus_synth sinus_pnr sinus_bit sinus_prog clean help
+
+# Default target
+all: sinus_bit
+
+# Creating build directory
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+# ==== SYNTHESIS (Yosys) ====
+sinus_synth: $(JSON_FILE)
+
+$(JSON_FILE): $(SV_FILES) $(V_FILES) | $(BUILD_DIR)
+	@echo "========================================"
+	@echo "SYNTHESIS: $(PROJECT)"
+	@echo "========================================"
+	@echo "Top Module: $(TOP_MODULE)"
+	@echo "SystemVerilog: $(SV_FILES)"
+	@echo "Verilog: $(V_FILES)"
+	@echo "========================================"
+	$(YOSYS) -p "\
+		read_verilog -sv $(SV_FILES); \
+		read_verilog -I$(SRC_DIR) $(V_FILES); \
+		hierarchy -top $(TOP_MODULE); \
+		synth_ecp5 $(YOSYS_FLAGS) -json $@" \
+		2>&1 | tee $(BUILD_DIR)/synth.log
+	@echo "Synthesis completed: $@"
+
+# ==== PLACE & ROUTE (nextpnr-ecp5) ====
+sinus_pnr: $(CONFIG_FILE)
+
+$(CONFIG_FILE): $(JSON_FILE) $(LPF_FILE)
+	@echo "========================================"
+	@echo "PLACE & ROUTE: $(PROJECT)"
+	@echo "========================================"
+	$(NEXTPNR) \
+		--$(FPGA_SIZE) \
+		--package $(FPGA_PACKAGE) \
+		--speed $(FPGA_SPEED) \
+		--json $(JSON_FILE) \
+		--lpf $(LPF_FILE) \
+		--textcfg $@ \
+		$(NEXTPNR_FLAGS) \
+		2>&1 | tee $(BUILD_DIR)/pnr.log
+	@echo "Place & Route completed: $@"
+
+# ==== BITSTREAM GENERATION (ecppack) ====
+sinus_bit: $(BIT_FILE)
+
+$(BIT_FILE): $(CONFIG_FILE)
+	@echo "========================================"
+	@echo "BITSTREAM: $(PROJECT)"
+	@echo "========================================"
+	$(ECPPACK) \
+		--idcode $(FPGA_IDCODE) \
+		--input $< \
+		--bit $@ \
+		$(ECPPACK_FLAGS)
+	@echo "Bitstream generated: $@"
+	@ls -lh $@
+
+# ==== PROGRAMMING ====
+
+# Upload to SRAM (temporary)
+sinus_prog: $(BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD SINE TEST (SRAM)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) $<
+
+# Upload to FLASH (permanent)
+sinus_prog_flash: $(BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD SINE TEST (FLASH)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) -f $<
+
+# ==== COMPLETE BUILD ====
+sinus: sinus_bit
+	@echo "========================================"
+	@echo "Sine Wave Test build completed!"
+	@echo "Bitstream: $(BIT_FILE)"
+	@echo "To upload: make sinus_prog"
+	@echo "========================================"
+
+# ==== UTILITY ====
+
+clean:
+	@echo "Deleting build directory..."
+	rm -rf $(BUILD_DIR)
+	@echo "Done."
+
+help:
+	@echo "Sine Wave Test Makefile - available targets:"
+	@echo ""
+	@echo "  Build:"
+	@echo "  make sinus             - Complete build (synth + pnr + bit)"
+	@echo "  make sinus_synth       - Synthesis only"
+	@echo "  make sinus_pnr         - Place & route only"
+	@echo "  make sinus_bit         - Bitstream generation only"
+	@echo ""
+	@echo "  Programming:"
+	@echo "  make sinus_prog        - Upload to FPGA (SRAM, temporary)"
+	@echo "  make sinus_prog_flash  - Upload to FLASH (permanent)"
+	@echo ""
+	@echo "  Utility:"
+	@echo "  make clean             - Delete build artifacts"
+	@echo "  make help              - Show this help"
+	@echo ""
+	@echo "Example:"
+	@echo "  source $(OSS_CAD_SUITE)/environment"
+	@echo "  make clean sinus sinus_prog"
+
+# Ensure constraints file exists
+$(LPF_FILE):
+	@echo "ERROR: Constraints file does not exist: $(LPF_FILE)"
+	@exit 1
