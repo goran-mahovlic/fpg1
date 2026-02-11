@@ -44,8 +44,10 @@ module pdp1_main_ram (
     // ISPRAVNO:                                                                                                                                                                                                                                                                  
     initial begin                                                                
         //$readmemh("rom/spacewar.hex", mem);
-        $readmemh("rom/snowflake.hex", mem);
+        //$readmemh("rom/snowflake.hex", mem);
         //$readmemh("rom/minskytron.hex", mem);
+        //$readmemh("rom/oscilloscope.hex", mem);
+        $readmemh("rom/pong_1024x768.hex", mem);
     end
 
     // Port A - synchronous read/write

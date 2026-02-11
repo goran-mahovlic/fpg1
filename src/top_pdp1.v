@@ -408,8 +408,8 @@ module top_pdp1
     // Test word and address switches (active-high)
     //wire [17:0] w_test_word    = 18'b0;
     wire [17:0] w_test_word = 18'b011_011_111_111_010_010;  // Binarno
-    //wire [17:0] w_test_address = 18'o4;     // Start address: octal 4 (Spacewar entry point)
-    wire [17:0] w_test_address = 18'o100;   // snowflake 
+    wire [17:0] w_test_address = 18'o4;     // Start address: octal 4 (Spacewar entry point)
+    //wire [17:0] w_test_address = 18'o100;   // snowflake 
 
     // =========================================================================
     // CDC: DIP SWITCH SYNCHRONIZATION (External -> clk_cpu domain)

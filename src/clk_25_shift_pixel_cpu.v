@@ -44,7 +44,7 @@ module clk_25_shift_pixel_cpu
         .in_hz      (25000000),     // 25 MHz input
         .out0_hz    (255000000),    // 255 MHz shift clock (HDMI DDR, 5x pixel)
         .out1_hz    (51000000),     // 51 MHz pixel clock (1024x768@50Hz)
-        .out2_hz    (5000000),      // 5 MHz CPU clock directly from PLL (no prescaler needed)
+        .out2_hz    (51000000),      // 5 MHz CPU clock directly from PLL (no prescaler needed)
         .out3_hz    (0)             // unused
     )
     pll_inst
