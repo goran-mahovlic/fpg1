@@ -377,8 +377,8 @@ module top_pdp1
         w_joystick_emu[3],                        // bit 17 - P1 CW (Spacewar)
         w_joystick_emu[1],                        // bit 16 - P1 CCW (Spacewar)
         w_joystick_emu[2],                        // bit 15 - P1 thrust (Spacewar)
-        w_joystick_emu[0] | w_btn_direct[1],      // bit 14 - P1 fire (Spacewar) | UP (Pong P1 UP)
-        w_btn_direct[2],                          // bit 13 - DOWN (Pong P1 DOWN) - WAS HARDCODED 0!
+        w_joystick_emu[0] | w_btn_direct[2],      // bit 14 - P1 fire (Spacewar) | DOWN (Pong P1 DOWN)
+        w_btn_direct[1],                          // bit 13 - UP (backup) - Pong ne koristi bit 13
         9'b0,                                     // bits 12-4 unused
         w_joystick_emu[7],                        // bit 3 - P2 CW (Spacewar)
         w_joystick_emu[5],                        // bit 2 - P2 CCW (Spacewar)
