@@ -43,7 +43,9 @@ module pdp1_main_ram (
     //`include "rom/spacewar_init.vh" << old way
     // ISPRAVNO:                                                                                                                                                                                                                                                                  
     initial begin                                                                
-        $readmemh("rom/spacewar.hex", mem);
+        //$readmemh("rom/spacewar.hex", mem);
+        $readmemh("rom/snowflake.hex", mem);
+        //$readmemh("rom/minskytron.hex", mem);
     end
 
     // Port A - synchronous read/write

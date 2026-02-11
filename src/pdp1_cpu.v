@@ -478,7 +478,9 @@ begin
          display_crt:
          begin
             pixel_shift_out <= 1'b1;
-            pixel_brightness <= DI[8:6];  // REVERT: Use DI directly as in original MiSTer (MEM_BUFF was wrong)
+            //pixel_brightness <= (DI[8]) ? 3'b111 : DI[8:6];
+            pixel_brightness <= IO[11:9]; // RADI SHOWFLAKE
+            //pixel_brightness <= DI[8:6];  // REVERT: Use DI directly as in original MiSTer (MEM_BUFF was wrong)
             // FIX: Coordinates IDENTICAL to original - full 10-bit (0-1023)
             // Scaling for 512x512 display is done in CRT module
             // PDP-1 generates 10-bit signed (-512 to +511)
