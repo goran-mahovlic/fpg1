@@ -91,10 +91,15 @@ ECPPACK_FLAGS := --compress --freq 62.0
 #                    Controlled by SW[1] at runtime when enabled
 # ENABLE_LED_DEBUG:  Enables LED debug indicators showing CPU state
 #                    Without this, LEDs are held at 0 (off)
+# SERIAL_LOADER:     Enables serial loader for uploading programs via UART
+#                    Uses ftdi_txd (RX) for receiving commands/data
+#                    Protocol: 'L'=load, 'W'=write test_word, 'A'=write test_addr,
+#                              'R'=run, 'S'=stop, 'P'=ping
 # =============================================================================
 # Uncomment lines below to enable debug features:
 # DEFINES += -DENABLE_UART_DEBUG
 # DEFINES += -DENABLE_LED_DEBUG
+# DEFINES += -DSERIAL_LOADER
 # =============================================================================
 
 # =============================================================================
@@ -129,6 +134,8 @@ PDP1_V_FILES     := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
                     $(SRC_DIR)/test_animation.v \
                     $(SRC_DIR)/test_sinus.v \
                     $(SRC_DIR)/serial_debug.v \
+                    $(SRC_DIR)/uart_rx.v \
+                    $(SRC_DIR)/serial_loader.v \
                     $(SRC_DIR)/vga2dvid.v \
                     $(SRC_DIR)/tmds_encoder.v \
                     $(EMARD_VIDEO)/fake_differential.v

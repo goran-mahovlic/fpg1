@@ -139,12 +139,19 @@ LOCATE COMP "wifi_gpio0" SITE "L2";
 IOBUF PORT "wifi_gpio0" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;
 
 # =============================================================================
-# FTDI UART (Debug Serial Output)
+# FTDI UART (Debug Serial Output + Serial Loader Input)
 # =============================================================================
-# FPGA TX -> FTDI RX -> PC (serial input)
-# Pin L4 is FTDI_RXD on ULX3S v3.1.7
+# FPGA TX -> FTDI RX -> PC (serial output)
+# FPGA RX <- FTDI TX <- PC (serial input for loader)
+# Pin L4 is FTDI_RXD on ULX3S v3.1.7 (FPGA transmits)
+# Pin M1 is FTDI_TXD on ULX3S v3.1.7 (FPGA receives)
 LOCATE COMP "ftdi_rxd" SITE "L4";
 IOBUF PORT "ftdi_rxd" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+
+# FTDI TXD - FPGA receives from PC (for serial loader)
+# Used when SERIAL_LOADER is enabled
+LOCATE COMP "ftdi_txd" SITE "M1";
+IOBUF PORT "ftdi_txd" PULLMODE=UP IO_TYPE=LVCMOS33;
 
 # =============================================================================
 # TIMING CONSTRAINTS
