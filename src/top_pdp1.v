@@ -81,8 +81,11 @@ module top_pdp1
     // ==== WiFi GPIO0 (ESP32 keep-alive) ====
     output wire        wifi_gpio0,     // HIGH prevents ESP32 reboot
 
-    // ==== FTDI UART (Debug Serial Output) ====
+    // ==== FTDI UART (Debug Serial Output + Serial Loader Input) ====
     output wire        ftdi_rxd,       // FPGA TX -> PC RX (active-high)
+`ifdef SERIAL_LOADER
+    input  wire        ftdi_txd,       // FPGA RX <- PC TX (serial loader input)
+`endif
 
     // ==== GPDI Control Pins (HDMI Hot Plug Detect) ====
     output wire        gpdi_scl,       // I2C SCL - drive HIGH for DDC wake-up
@@ -406,10 +409,17 @@ module top_pdp1
     };
 
     // Test word and address switches (active-high)
+    // When SERIAL_LOADER is enabled, these can be set via serial commands
+`ifdef SERIAL_LOADER
+    wire [17:0] w_test_word;       // Set by serial loader
+    wire [11:0] w_test_address_12; // Set by serial loader (12-bit)
+    wire [17:0] w_test_address = {6'b0, w_test_address_12};  // Extend to 18-bit
+`else
     //wire [17:0] w_test_word    = 18'b0;
     wire [17:0] w_test_word = 18'b011_011_111_111_010_010;  // Binarno
     wire [17:0] w_test_address = 18'o4;     // Start address: octal 4 (Spacewar entry point)
-    //wire [17:0] w_test_address = 18'o100;   // snowflake 
+    //wire [17:0] w_test_address = 18'o100;   // snowflake
+`endif 
 
     // =========================================================================
     // CDC: DIP SWITCH SYNCHRONIZATION (External -> clk_cpu domain)
@@ -457,14 +467,59 @@ module top_pdp1
     // NOTE: ADC MAX11123 moved to top_oscilloscope.v
 
     // =========================================================================
+    // SERIAL LOADER (Optional - enabled with -DSERIAL_LOADER)
+    // =========================================================================
+    // Allows loading programs via UART without rebuilding FPGA bitstream.
+    // Protocol: 'L'=load, 'W'=test_word, 'A'=test_address, 'R'=run, 'S'=stop, 'P'=ping
+    // -------------------------------------------------------------------------
+`ifdef SERIAL_LOADER
+    wire [11:0] w_loader_addr;
+    wire [17:0] w_loader_data;
+    wire        w_loader_we;
+    wire        w_loader_active;
+    wire        w_loader_cpu_run;
+    wire        w_loader_cpu_halt;
+    wire [7:0]  w_loader_debug_state;
+
+    serial_loader #(
+        .CLK_FREQ (C_CPU_CLK_FREQ)
+    ) u_serial_loader (
+        .clk          (clk_cpu),
+        .rst_n        (rst_cpu_n),
+        .uart_rx      (ftdi_txd),      // FPGA receives from FTDI TX
+        .uart_tx      (),              // TX handled by serial_debug or directly
+        .loader_addr  (w_loader_addr),
+        .loader_data  (w_loader_data),
+        .loader_we    (w_loader_we),
+        .test_word    (w_test_word),
+        .test_address (w_test_address_12),
+        .cpu_run      (w_loader_cpu_run),
+        .cpu_halt     (w_loader_cpu_halt),
+        .loader_active(w_loader_active),
+        .debug_state  (w_loader_debug_state)
+    );
+
+    // RAM interface MUX: Loader vs CPU
+    // When loader is writing, it takes priority over CPU
+    wire [11:0] w_ram_addr = w_loader_we ? w_loader_addr : w_cpu_mem_addr;
+    wire [17:0] w_ram_data = w_loader_we ? w_loader_data : w_cpu_mem_data_out;
+    wire        w_ram_we   = w_loader_we ? 1'b1 : w_cpu_mem_we;
+`else
+    // Normal operation - direct CPU connection to RAM
+    wire [11:0] w_ram_addr = w_cpu_mem_addr;
+    wire [17:0] w_ram_data = w_cpu_mem_data_out;
+    wire        w_ram_we   = w_cpu_mem_we;
+`endif
+
+    // =========================================================================
     // PDP-1 MAIN RAM (4096 x 18-bit, clk_cpu domain)
     // =========================================================================
     pdp1_main_ram u_main_ram (
-        // Port A - CPU interface (clk_cpu domain)
-        .address_a  (w_cpu_mem_addr),
+        // Port A - CPU/Loader interface (clk_cpu domain)
+        .address_a  (w_ram_addr),
         .clock_a    (clk_cpu),
-        .data_a     (w_cpu_mem_data_out),
-        .wren_a     (w_cpu_mem_we),
+        .data_a     (w_ram_data),
+        .wren_a     (w_ram_we),
         .q_a        (w_cpu_mem_data_in),
 
         // Port B - unused (explicitly tied off)

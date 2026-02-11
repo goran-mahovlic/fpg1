@@ -280,6 +280,79 @@ Debug output format (HEX):
 | B | Brightness | 3-bit HEX (0-7) |
 | R | Ring buffer pointer | 16-bit HEX |
 
+## Serial Loader (Optional)
+
+Load programs via serial without rebuilding the FPGA bitstream.
+
+### Enable Serial Loader
+
+1. Uncomment in Makefile:
+```makefile
+DEFINES += -DSERIAL_LOADER
+```
+
+2. Rebuild:
+```bash
+make clean && make pdp1
+```
+
+### Protocol
+
+| Command | Bytes | Description |
+|---------|-------|-------------|
+| `L` | 1 + 2 + 3 | Load word: `'L'` + addr(2B) + data(3B) |
+| `W` | 1 + 3 | Set test_word (18-bit) |
+| `A` | 1 + 2 | Set test_address (12-bit) |
+| `R` | 1 | Run CPU |
+| `S` | 1 | Stop CPU |
+| `P` | 1 | Ping (returns `'K'`) |
+
+### Python Loader
+
+```bash
+# Install pyserial
+pip install pyserial
+
+# Ping FPGA
+python3 tools/serial_loader.py /dev/ttyUSB0 --ping
+
+# Load program and run
+python3 tools/serial_loader.py /dev/ttyUSB0 src/rom/snowflake.hex --run
+
+# Load with custom start address
+python3 tools/serial_loader.py /dev/ttyUSB0 src/rom/pong.hex --set-address 0o500 --run
+
+# Stop CPU
+python3 tools/serial_loader.py /dev/ttyUSB0 --stop
+```
+
+### Manual Loading (minicom/screen)
+
+```bash
+# Connect
+screen /dev/ttyUSB0 115200
+
+# Ping test (type 'P', should see 'K')
+P
+
+# Stop CPU
+S
+
+# Run CPU
+R
+```
+
+### Load Format Example
+
+Load word `0o777777` at address `0o500`:
+```
+'L' 0x01 0x40 0x03 0xFF 0xFF
+     ├─ addr ─┤  ├── data ──┤
+     (0o500)     (0o777777)
+```
+
+---
+
 ## TODO
 
 - [ ] Fix button input handling (controls not responding)
