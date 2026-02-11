@@ -143,7 +143,7 @@ OSC_CONFIG_FILE  := $(BUILD_DIR)/$(OSC_PROJECT).config
 OSC_BIT_FILE     := $(BUILD_DIR)/$(OSC_PROJECT).bit
 OSC_LPF_FILE     := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
 
-# Oscilloscope Verilog source files (uses pdp1_cpu_osc.v instead of pdp1_cpu.v)
+# Oscilloscope Verilog source files (uses pdp1_cpu_osc.v and pdp1_main_ram_osc.v)
 OSC_V_FILES      := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
                     $(SRC_DIR)/top_oscilloscope.v \
                     $(SRC_DIR)/clock_domain.v \
@@ -153,7 +153,7 @@ OSC_V_FILES      := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
                     $(SRC_DIR)/line_shift_register.v \
                     $(SRC_DIR)/pixel_ring_buffer.v \
                     $(SRC_DIR)/pdp1_cpu_osc.v \
-                    $(SRC_DIR)/pdp1_main_ram.v \
+                    $(SRC_DIR)/pdp1_main_ram_osc.v \
                     $(SRC_DIR)/pdp1_cpu_alu_div.v \
                     $(SRC_DIR)/pdp1_terminal_fb.v \
                     $(SRC_DIR)/pdp1_terminal_charset.v \
