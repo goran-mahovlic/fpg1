@@ -86,13 +86,9 @@ module top_pdp1
 
     // ==== GPDI Control Pins (HDMI Hot Plug Detect) ====
     output wire        gpdi_scl,       // I2C SCL - drive HIGH for DDC wake-up
-    input  wire        gpdi_hpd,       // HDMI HPD from monitor (active-high)
+    input  wire        gpdi_hpd        // HDMI HPD from monitor (active-high)
 
-    // ==== GPIO for ADC MAX11123 (Oscilloscope) ====
-    output wire        gp14,           // ADC CSN (active low)
-    output wire        gp15,           // ADC SCLK
-    output wire        gn14,           // ADC MOSI
-    input  wire        gn15            // ADC MISO
+    // NOTE: ADC GPIO pins (gp14, gp15, gn14, gn15) moved to top_oscilloscope.v
 
 `ifdef ESP32_OSD
     // ==== ESP32 SPI Interface (OSD overlay) ====
@@ -347,12 +343,7 @@ module top_pdp1
     // Paper tape signals
     wire        w_send_next_tape_char;
 
-    // =========================================================================
-    // ADC MAX11123 Interface (Oscilloscope)
-    // =========================================================================
-    wire [11:0] w_adc_data;
-    wire        w_adc_valid;
-    wire [17:0] w_adc_io_data = {6'b0, w_adc_data};  // 12-bit ADC -> 18-bit IO
+    // NOTE: ADC MAX11123 Interface moved to top_oscilloscope.v
 
     // -------------------------------------------------------------------------
     // Gamepad input mapping for Spacewar! (active-high signals)
@@ -463,22 +454,7 @@ module top_pdp1
     // -------------------------------------------------------------------------
     wire [5:0] w_sense_switches = {r_btn_sync, r_sw_sync[3:2], 1'b1, r_sw_sync[0]};
 
-    // =========================================================================
-    // ADC MAX11123 (Oscilloscope Input)
-    // =========================================================================
-    // SPI interface to MAX11123 12-bit ADC on GPIO pins 14-15
-    // Used for oscilloscope program to read analog input
-    adc_max11123 u_adc (
-        .clk        (clk_pixel),        // 51 MHz system clock
-        .rst_n      (rst_pixel_n),
-        .adc_csn    (gp14),             // Chip select (active low)
-        .adc_sclk   (gp15),             // SPI clock
-        .adc_mosi   (gn14),             // Master out
-        .adc_miso   (gn15),             // Master in
-        .adc_data   (w_adc_data),       // 12-bit ADC value
-        .adc_valid  (w_adc_valid),      // Data valid pulse
-        .channel    (3'b000)            // Read channel 0
-    );
+    // NOTE: ADC MAX11123 moved to top_oscilloscope.v
 
     // =========================================================================
     // PDP-1 MAIN RAM (4096 x 18-bit, clk_cpu domain)
@@ -562,11 +538,8 @@ module top_pdp1
         .debug_pixel_count      (w_cpu_debug_pixel_count),
         .debug_pixel_x          (w_cpu_debug_pixel_x),
         .debug_pixel_y          (w_cpu_debug_pixel_y),
-        .debug_pixel_brightness (w_cpu_debug_pixel_brightness),
-
-        // External IO interface (ADC oscilloscope)
-        .external_io_data       (w_adc_io_data),
-        .external_io_valid      (w_adc_valid)
+        .debug_pixel_brightness (w_cpu_debug_pixel_brightness)
+        // NOTE: External IO interface (ADC) moved to top_oscilloscope.v
     );
 
     // =========================================================================

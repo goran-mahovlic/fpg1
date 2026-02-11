@@ -1,0 +1,1113 @@
+/*
+ * PDP-1 CPU - ECP5 Compatible Version (OSCILLOSCOPE VERSION)
+ *
+ * Original cpu.v from fpg1 project, adapted for ULX3S/ECP5.
+ * Uses pdp1_cpu_alu_div module (behavioral divider).
+ *
+ * Changes from original:
+ * - Module renamed to pdp1_cpu_osc (oscilloscope version)
+ * - Pixel output coordinates adjusted for 512x512 -> 480x480 display
+ * - Added external_io_data and external_io_valid for ADC input
+ * - Added device 6'd60 (074 octal) for ADC reading
+ *
+ * Author: Jelena Horvat, REGOC team (port)
+ * Original Author: norbert@bul.co.uk (fpg1 project)
+ * Task: TASK-213 CPU Integration
+ *
+ * NOTE: This is the OSCILLOSCOPE version WITH ADC support.
+ *       For original PDP-1 without ADC, use pdp1_cpu.v
+ */
+
+module pdp1_cpu_osc (
+   input              clk,                         /* CPU clock input, 50 MHz */
+   input              rst,                         /* Reset signal, if high reset CPU */
+
+   /* Main memory connections */
+   output reg  [11:0] MEM_ADDR,                    /* Address bus - memory address register */
+   input       [17:0] DI,                          /* Data input */
+   output reg  [17:0] MEM_BUFF,                    /* Data output - memory data buffer register */
+   output reg         WRITE_ENABLE,                /* Write enable register */
+
+   /* Outputs to console */
+   output reg  [17:0] AC,                          /* Accumulator */
+   output reg  [17:0] IO,                          /* Input Output register */
+   output reg  [11:0] PC = 12'd4,                   /* Program counter - default to start_address, ECP5 may not honor this */
+   output wire [31:0] BUS_out,                     /* Multiplex various flags for console blinkenlights output */
+
+   /* Input controllers */
+   input       [17:0] gamepad_in,                  /* Input for spacewar, goes to IO register (4 LSB and 4 MSB bits act as buttons) */
+
+   /* Output to Type 30 CRT */
+   output wire  [9:0] pixel_x_out,                 /* Current column of pixel to write */
+   output wire  [9:0] pixel_y_out,                 /* In what row the pixel should be written */
+   output reg   [2:0] pixel_brightness,            /* Brightness, levels: 4= -3, 5= -2, 6= -1, 7= -0, 0= 0, 1= +1, 2= +2, 3= +3 */
+   output reg         pixel_shift_out,             /* Signal to CRT that a pixel is to be written */
+
+   /* Typewriter controls */
+   output       [6:0] typewriter_char_out,         /* Character to be output to teletype emulation */
+   output reg         typewriter_strobe_out,       /* Indicate that the character is ready to be written */
+
+   input        [5:0] typewriter_char_in,          /* Character sent from the keyboard module (teletype) to the CPU */
+   input              typewriter_strobe_in,        /* Indicator that there is a key pressed / new character to be read */
+   output reg         typewriter_strobe_ack,       /* Signal the keyboard module (i.e. teletype input) that the character is read by the CPU */
+
+   /* Paper tape connections */
+   output reg         send_next_tape_char,         /* Signal the paper tape reader that it's OK to send another character */
+   input              is_char_available,           /* Indicates when there is something to be read from the paper tape input word */
+   input       [17:0] tape_rcv_word,               /* Word (18-bit) received from paper tape in binary mode (rpb instruction) */
+
+   input       [11:0] start_address,               /* Address to start running the program from, that's where the JMP instruction from RIM points to */
+
+   /* CPU configuration */
+   input              hw_mul_enabled,              /* If true, hardware mul/div instructions are used, else mus/dis. Originally a switch in the PDP1 cabinet. */
+   input              crt_wait,                    /* If true, when doing iot to crt device, respect wait specificed by bits 5 and 6 (12 and 11). */
+
+   /* Console switches input */
+   input       [10:0] console_switches,            /* Commands (start/stop/continue/examine etc) */
+   input       [17:0] test_word,                   /* Test word switches (1-18) */
+   input       [17:0] test_address,                /* Test address switches (1-12) + extension if implemented */
+   input       [5:0]  sense_switches,              /* Sense switches (1-6) */
+
+   /* Debug outputs (TASK-DEBUG: CPU state monitoring) */
+   output reg  [15:0] debug_instr_count,           /* Total instructions executed (wraps at 65535) */
+   output reg  [15:0] debug_iot_count,             /* IOT instructions executed (display commands) */
+   output wire        debug_cpu_running,           /* CPU is running (not halted) */
+   output wire [7:0]  debug_cpu_state,             /* Current CPU state machine state */
+
+   /* Pixel debug outputs (TASK-PIXEL-DEBUG: per-pixel tracking for image reconstruction) */
+   output reg  [31:0] debug_pixel_count,           /* Total pixels sent (32-bit counter) */
+   output wire [9:0]  debug_pixel_x,               /* Last pixel X coordinate */
+   output wire [9:0]  debug_pixel_y,               /* Last pixel Y coordinate */
+   output wire [2:0]  debug_pixel_brightness,      /* Last pixel brightness (0-7) */
+
+   /* External IO interface (ADC oscilloscope) */
+   input       [17:0] external_io_data,            /* External IO data (ADC) */
+   input              external_io_valid            /* External device has data */
+   );
+
+
+/* Since 50 MHz is much faster than original CPU, we can be quite generous with the clock cycles.
+   There is a 250 cycle gap between read_instr_register and read_data_bus which we can simply skip
+   if the instruction lasts 5 us instead of 10. */
+
+parameter
+   poweron_state              = 8'd0,
+   initial_state              = 8'd4,
+   read_program_counter       = 8'd31,
+
+   read_instruction_register  = 8'd51,
+   read_data_bus              = 8'd65,
+
+   get_effective_address      = 8'd75,
+   execute                    = 8'd125,
+	check_instruction_duration = 8'd160,
+   flush_to_ram               = 8'd214,
+
+   cleanup                    = 8'd254;
+
+
+/* Instructions, opcodes */
+
+parameter
+    i_and   = 5'o1,   i_ior   = 5'o2,    i_xor   = 5'o3,    i_xct   = 5'o4,
+    i_cal   = 5'o7,   i_jda   = 5'o7,    i_lac   = 5'o10,   i_lio   = 5'o11,
+    i_dac   = 5'o12,  i_dap   = 5'o13,   i_dip   = 5'o14,   i_dio   = 5'o15,
+    i_dzm   = 5'o16,  i_add   = 5'o20,   i_sub   = 5'o21,   i_idx   = 5'o22,
+    i_isp   = 5'o23,  i_sad   = 5'o24,   i_sas   = 5'o25,   i_mu_   = 5'o26,
+    i_di_   = 5'o27,  i_jmp   = 5'o30,   i_jsp   = 5'o31,   i_skp   = 5'o32,
+    i_shift = 5'o33,  i_law   = 5'o34,   i_iot   = 5'o35,   i_opr   = 5'o37;
+
+/* Input-output device address list */
+
+parameter
+    display_crt               = 6'd7,
+    read_gamepad              = 6'd9,
+    read_punched_tape_alpha   = 6'd1,
+    read_punched_tape_binary  = 6'd2,
+    read_reader_buffer        = 6'd24,
+    type_out                  = 6'd3,
+    type_in                   = 6'd4,
+    cks_iosta_check           = 6'd27;
+
+
+//////////////////  REGISTERS  ////////////////////
+// NOTE: Verilog reg initialization (e.g., "reg x = 1'b1;") is NOT reliable on Yosys/ECP5!
+// These initializers work in simulation but on real hardware registers may start as 0 or random.
+// All critical state must be set in reset_cpu task. See FIX BUG 4 in reset_cpu.
+
+reg  [17:0]  IR, PREV_IR;              /* Instruction Register, previous instruction register */
+reg   [6:0]  PF = 7'b0;                /* Program Flags, 1-6 are used, flag 0 exists simply to avoid handling it as a special case */
+reg   [7:0]  cpu_state = 8'd0;         /* Implement CPU as a State Machine, specify state the CPU is currently in. Implemented as a sequencer */
+reg   [0:0]  halt = 1'b0;              /* if 1, then the cpu should not start the next cycle */
+reg   [0:0]  cpu_running = 1'b1;       /* run-ff If false, well ... cpu is not running! (SET IN reset_cpu!) */
+
+reg  [11:0]  waste_cycles = 12'd0;     /* When non-zero, this will be decremented instead of executing anything by the CPU. (SET IN reset_cpu!) */
+
+reg   [6:0]  IOSTA = 7'b0000100;       /* Stats of various IO devices, read by cks instruction (72 0033). Bit 2 is initially 1, otherwise it would never write anything out. */
+reg   [4:0]  i = 5'b0;                 /* Helper register */
+
+reg   [3:0]  num_shift = 4'b0;         /* Number of shifts in sft instruction */
+reg   [5:0]  typewriter_buffer;        /* Stores incoming character from teletype emulation */
+
+reg   [0:0]  old_typewriter_strobe_in, prev_continue_button;                  /* Registers used in positive edge detection */
+reg   [0:0]  OV, CARRY, SKIP_FLAG, SKIP_REST_OF_INSTR, DIFFERENT_SIGNS;       /* Various flags, SKIP_REST_OF_INSTR will skip all phases until cpu_state rolls over */
+
+reg [33:0] division_quotient;          /* Store results from the lpm_divide component */
+reg [16:0] division_remainder;
+
+// FIX BUG 2: Latched pixel coordinates for CRT output
+reg [9:0] pixel_x_latched;
+reg [9:0] pixel_y_latched;
+
+// ============================================================================
+// OPTIMIZATION: 2-stage pipelined multiplier for DSP inference
+// Pipeline latency: 2 clock cycles (FSM already waits 1000 cycles for MUL)
+// ============================================================================
+// Pipeline Stage 1: Capture operands
+reg [16:0] r_mult_op_a;
+reg [16:0] r_mult_op_b;
+// Pipeline Stage 2: Registered result (helps DSP inference on ECP5/iCE40)
+reg [33:0] r_multiply_result;
+
+// ============================================================================
+// OPTIMIZATION: Registered pixel output for improved timing
+// Adds 1 cycle latency but improves Fmax by breaking combinational path
+// ============================================================================
+reg [9:0] r_pixel_x_out;
+reg [9:0] r_pixel_y_out;
+
+// FIX BUG 15: One-shot PC forcing at startup
+// Use a simple one-shot: force PC once when counter transitions 99->100
+// This happens exactly once regardless of initial counter value (within 100 cycles of wrap)
+reg [7:0] r_startup_cnt = 8'd0;  // 8-bit counter (0-255)
+reg r_pc_forced = 1'b0;  // Set to 1 after PC is forced
+wire w_force_pc_now = (r_startup_cnt == 8'd100) && !r_pc_forced;  // One-shot trigger
+
+//////////////////  FUNCTIONS  ////////////////////
+
+function automatic [17:0] fix_zero;                               /* 1's complement is used, and two representations of zero exist. This converts -0 to +0 (all ones to all zeros). */
+    input [17:0] number;
+    fix_zero = (number == 18'h3ffff) ? 18'b0 : number;
+endfunction
+
+function automatic [17:0] abs;                                    /* MSB bit set means the number is negative. If so, invert all the bits to make it positive (absolute value function). */
+    input [17:0] number;
+    abs = (number[17]) ? ~number : number;
+endfunction
+
+function automatic [16:0] abs_nosign;                             /* Like the abs function, but removes the sign bit. */
+    input [17:0] number;
+    abs_nosign = (number[17]) ? ~number[16:0]: number[16:0];
+endfunction
+
+
+////////////////////  WIRES  //////////////////////
+
+wire [33:0] multiply_result;
+
+wire [33:0] division_quotient_w;
+wire [16:0] division_remainder_w;
+wire        div_valid_w;
+
+// Generate div_start pulse when entering execute state for DIV instruction with hw div enabled
+// Pipeline has 8 cycles latency, but waste_cycles provides 1750 cycles delay - plenty of margin
+wire div_start = (cpu_state == execute) && (IR[17:13] == i_di_) && hw_mul_enabled;
+
+wire [33:0] multiply_input;
+wire [16:0] denominator;
+
+// ============================================================================
+// Combinational logic for arithmetic operations (Verilog good practice)
+// Extracted from execute_instruction to avoid blocking assignments in always @(posedge clk)
+// ============================================================================
+
+// --- i_add combinational logic ---
+wire        w_add_different_signs = AC[17] ^ DI[17];
+wire [18:0] w_add_sum = AC + DI;                           // 19-bit to capture carry
+wire        w_add_carry = w_add_sum[18];
+wire [17:0] w_add_ac_raw = w_add_sum[17:0] + w_add_carry;  // End-around carry
+wire [17:0] w_add_ac = (w_add_ac_raw == 18'h3ffff) ? 18'b0 : w_add_ac_raw;  // fix_zero
+wire        w_add_ov = (w_add_different_signs == 0) && (DI[17] != w_add_ac[17]);
+
+// --- i_sub combinational logic ---
+wire        w_sub_different_signs = AC[17] ^ DI[17];
+wire [18:0] w_sub_sum = AC + (~DI);                        // 19-bit to capture carry
+wire        w_sub_carry = w_sub_sum[18];
+wire [17:0] w_sub_ac_raw = w_sub_sum[17:0] + (!w_sub_carry);  // End-around borrow
+wire [17:0] w_sub_ac = (w_sub_ac_raw == 18'h3ffff) ? 18'b0 : w_sub_ac_raw;  // fix_zero
+wire        w_sub_ov = w_sub_different_signs && (DI[17] == w_sub_ac[17]);
+
+// --- mus (multiply step) combinational logic ---
+wire [18:0] w_mus_sum = AC + DI;                           // 19-bit to capture carry
+wire        w_mus_carry = w_mus_sum[18];
+wire [17:0] w_mus_ac_raw = w_mus_sum[17:0] + w_mus_carry;  // End-around carry
+wire [17:0] w_mus_ac_added = (w_mus_ac_raw == 18'h3ffff) ? 18'b0 : w_mus_ac_raw;  // fix_zero
+wire [17:0] w_mus_ac_result = IO[0] ? w_mus_ac_added : AC;  // Add only if IO[0] set
+wire [17:0] w_mus_io_result = {w_mus_ac_result[0], IO[17:1]};  // Shift right, bring AC[0]
+wire [17:0] w_mus_ac_final = w_mus_ac_result >> 1;          // Shift AC right
+
+// --- dis (divide step) combinational logic ---
+wire [35:0] w_dis_shift = {AC[16:0], IO, AC[17] ^ 1'b1};   // 36-bit shift
+wire [17:0] w_dis_ac_shifted = w_dis_shift[35:18];
+wire [17:0] w_dis_io_shifted = w_dis_shift[17:0];
+wire [18:0] w_dis_sum = w_dis_io_shifted[0] ? (w_dis_ac_shifted + (~DI)) : (w_dis_ac_shifted + DI + 1'b1);
+wire        w_dis_carry = w_dis_sum[18];
+wire [17:0] w_dis_ac_raw = w_dis_sum[17:0] + (w_dis_carry ^ w_dis_io_shifted[0]);
+wire [17:0] w_dis_ac = (w_dis_ac_raw == 18'h3ffff) ? 18'b0 : w_dis_ac_raw;  // fix_zero
+
+// --- mul (hardware multiply) combinational logic ---
+wire        w_mul_different_signs = AC[17] ^ DI[17];
+
+// --- div (hardware divide) combinational logic ---
+wire        w_div_different_signs = AC[17] ^ DI[17];
+
+// --- i_skp (skip) combinational logic ---
+// Note: This depends on IR (instruction), but IR is stable during execute phase
+// Using MEM_BUFF for operand since that's what's passed to execute_instruction
+wire w_skip_flag = (
+      (IR[6]   && AC == 0)                                           // Skip on ZERO Accumulator      (sza)
+   || (IR[7]   && AC[17] == 0)                                       // Skip on Plus Accumulator      (spa)
+   || (IR[8]   && AC[17] == 1)                                       // Skip on Minus Accumulator     (sma)
+   || (IR[9]   && OV == 0)                                           // Skip on ZERO Overflow         (szo)
+   || (IR[10]  && IO[17] == 0)                                       // Skip on Plus In-Out Register  (spi)
+   || (|IR[2:0] && ~&IR[2:0] && PF[IR[2:0]] == 0)                    // Skip on ZERO Program Flag     (szf)
+   || (IR[2:0] == 3'b111 && PF == 0)                                 // Skip on ZERO Program Flag all (szf)
+   || (|IR[5:3] && ~&IR[5:3] && sense_switches[6 - IR[5:3]] == 0)   // Skip on ZERO Switch addr 1-6  (szs)
+   || (IR[5:3] == 3'b111 && sense_switches == 0)                     // Skip on ZERO Switch  addr 7   (szs)
+   );
+
+// --- i_shift combinational logic ---
+// num_shift = popcount of DI[8:0] (number of high bits in encoded count field)
+wire [3:0] w_num_shift = DI[8] + DI[7] + DI[6] + DI[5] + DI[4] + DI[3] + DI[2] + DI[1] + DI[0];
+
+///////////////////  MODULES  /////////////////////
+
+pdp1_cpu_alu_div divider(
+   .in_clock(clk),
+   .i_start(div_start),
+   .numer(multiply_input),
+   .denom(denominator),
+   .quotient(division_quotient_w),
+   .remain(division_remainder_w),
+   .o_valid(div_valid_w)
+   );
+
+////////////////////  TASKS  //////////////////////
+
+task reset_cpu;
+begin
+   PC           <= start_address;
+   AC           <= 18'b0;
+   IO           <= 18'b0;
+   MEM_BUFF     <= 18'b0;
+   MEM_ADDR     <= 12'b0;
+   IR           <= 18'b0;
+   IOSTA        <= 7'b0000100;
+   PF           <= 1'b0;
+   OV           <= 1'b0;
+   halt         <= 1'b0;
+   WRITE_ENABLE <= 1'b0;
+   cpu_state    <= poweron_state;
+   // Debug counters reset
+   debug_instr_count <= 16'd0;
+   debug_iot_count   <= 16'd0;
+   debug_pixel_count <= 32'd0;
+   // FIX BUG 2: Initialize latched pixel coordinates to center
+   pixel_x_latched <= 10'd256;
+   pixel_y_latched <= 10'd256;
+   // FIX BUG 3: Reset waste_cycles to prevent stuck CPU
+   waste_cycles <= 12'd0;
+   // FIX BUG 4: ECP5 doesn't honor Verilog reg initialization - must set cpu_running during reset!
+   // Without this, cpu_running may start as 0 on ECP5 and the state machine case block never executes.
+   cpu_running <= 1'b1;
+   // FIX BUG 7: Reset SKIP_REST_OF_INSTR - if it powers up as 1 on ECP5, the case block is skipped
+   // for all states except initial_state, causing the CPU to never execute instructions properly.
+   SKIP_REST_OF_INSTR <= 1'b0;
+end
+endtask
+
+// Debug output: CPU running status
+assign debug_cpu_running = cpu_running;
+assign debug_cpu_state = cpu_state;
+
+// Pixel debug outputs: expose latched coordinates and brightness
+assign debug_pixel_x = pixel_x_latched;
+assign debug_pixel_y = pixel_y_latched;
+assign debug_pixel_brightness = pixel_brightness;
+
+task execute_instruction;
+    input [4:0] opcode;
+    input [0:0] indirect_addr;
+    input [17:0] instruction;
+    input [17:0] operand;
+begin
+   PREV_IR <= IR;
+
+   /* The memory reference format is:
+
+     0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17
+   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+   |      op      |in|              address              | memory reference
+   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+
+   <0:4> <5>    mnemonic        action                   */
+
+   case (opcode)                                                  /* Instruction   Code #    Op.Time (us)   Explanation                      */
+
+      i_and:   AC <= AC & DI;                                     /* and Y          02          10          Add C(Y) to C(AC)                */
+      i_ior:   AC <= AC | DI;                                     /* ior Y          04          10          Inclusive OR C(Y) with C(AC)     */
+      i_xor:   AC <= AC ^ DI;                                     /* xor Y          06          10          Exclusive OR C(Y) with C(AC)     */
+
+      i_lac:   AC <= DI;                                          /* lac Y          20          10          Load the AC with C(Y)            */
+      i_lio:   IO <= DI;                                          /* lio Y          22          10          Load IO with C(Y)                */
+
+      i_sad:   PC <= PC + (AC != DI);                             /* sad Y          50          10          Skip next instruction if C(AC) != C(Y) */
+      i_sas:   PC <= PC + (AC == DI);                             /* sas Y          52          10          Skip next instruction if C(AC) == C(Y) */
+
+      i_xct:   { IR, MEM_BUFF } <= { 2{DI} };                     /* xct Y          10          5 + extra   Perform instruction in Y         */
+
+      i_cal,                                                      /* cal Y          16          10          Equals JDA 100                   */
+      i_jda:                                                      /* jda Y          17          10          Equals dac Y and jsp Y + 1       */
+      begin
+         MEM_BUFF <= AC;
+         { MEM_ADDR, PC } <= { 2{ instruction[12] ? operand[11:0] : 12'o100 } };
+         AC <= (OV << 17) + PC + 1'b1;
+      end
+
+      i_law:                                                      /* law N          70          5           Load the AC with the number N    */
+         AC <= IR[12] ? ~{6'b0, IR[11:0]} : IR[11:0];
+
+      /* Memory write instructions */
+      /* --------------------------------------------------------------------------------------------------------------------------------------------------- */
+
+      i_dac:   MEM_BUFF <= AC;                                    /* dac Y,         24,         10,         Put C(AC) in Y                   */
+      i_dap:   MEM_BUFF <= { DI[17:12], AC[11:0] };               /* dap Y,         26,         10,         Put contents of address part of AC in Y     */
+      i_dip:   MEM_BUFF[17:12] <= AC[17:12];                      /* dip Y,         30,         10,         Put contents of instruction part of AC in Y */
+      i_dio:   MEM_BUFF <= IO;                                    /* dio Y,         32,         10,         Put C(IO) in Y                   */
+      i_dzm:   MEM_BUFF <= 0;                                     /* dzm Y,         34,         10,         Make C(Y) zero                   */
+
+      i_add:                                                      /* add Y,         40,         10,         Add C(Y) to C(AC                 */
+      begin
+         // FIX: Using combinational wire logic (w_add_*) instead of blocking assignments
+         AC <= w_add_ac;
+         if (w_add_ov)
+            OV <= 1'b1;
+      end
+
+      i_sub:                                                      /* sub Y          42          10          Subtract C(Y) from C(AC)         */
+      begin
+         // FIX: Using combinational wire logic (w_sub_*) instead of blocking assignments
+         AC <= w_sub_ac;
+         if (w_sub_ov)
+            OV <= 1'b1;
+      end
+
+      i_idx,                                                      /* idx Y          44          10          Index (add one) C(Y) leave in Y & AC */
+      i_isp:                                                      /* isp Y          46          10          Index and skip if result is positive */
+      begin
+         { MEM_BUFF, AC } <= {2{fix_zero(DI + 1)}};
+
+         if (opcode == i_isp && (fix_zero(DI + 1'b1) & 18'o400000) == 12'b0)
+            PC <= (PREV_IR[17:13] == i_xct) ? PREV_IR[11:0] + 1'b1 : PC + 1'b1;     /* Edge-case, if previous opcode was XCT, PC is the corresponding y + 1 */
+      end
+
+
+      /* Hardware multiply */
+      i_mu_:
+
+      if (hw_mul_enabled)                                         /* mul Y          54      max 25          Multiply, hardware multiply enabled                       */
+      begin
+         // FIX: Using wire w_mul_different_signs instead of blocking assignment
+         // w_mul_different_signs = AC[17] ^ DI[17] (defined in wire section)
+         /* Negative times negative is positive, also fix zero for a 34-bit wide result */
+         if (w_mul_different_signs && (&multiply_result))
+            {AC, IO} <= 36'h0;
+         else
+            {AC, IO} <= {w_mul_different_signs, w_mul_different_signs ? ~multiply_result : multiply_result, w_mul_different_signs};
+
+      end
+
+      else                                                        /* mus Y          54          10          Multiply step, hardware multiply disabled                 */
+      begin
+         // FIX: Using combinational wire logic (w_mus_*) instead of blocking assignments
+         AC <= w_mus_ac_final;
+         IO <= w_mus_io_result;
+      end
+
+
+      i_di_:
+      /* div instruction, hardware divide enabled */
+
+      if (hw_mul_enabled)                                         /* div Y          56      max 40          Divide, hardware division enabled                         */
+      begin
+         // FIX: Using wire w_div_different_signs instead of blocking assignment (defined in wire section)
+
+         if (abs_nosign(AC) < abs_nosign(DI))   /* Only if not overflow */
+         begin
+
+            IO <= fix_zero( AC[17] ? { 1'b1, ~division_remainder_w[16:0]} : {1'b0, division_remainder_w[16:0]});
+
+            case ({AC[17], DI[17], division_quotient_w[17]})
+               3'b000, 3'b110:  AC <= fix_zero({ 1'b0,  division_quotient_w[16:0] });
+               3'b001, 3'b111:  AC <= fix_zero({ 1'b0, ~division_quotient_w[16:0] });
+               3'b010, 3'b100:  AC <= fix_zero({ 1'b1, ~division_quotient_w[16:0] });
+               3'b101, 3'b011:  AC <= fix_zero({ 1'b1,  division_quotient_w[16:0] });
+            endcase
+
+            PC <= PC + 1'b1;
+
+         end
+         else
+            OV <= 1'b1;
+
+      end
+
+      else
+      /* dis instruction, hardware divide disabled */
+      begin                                                       /* dis Y          56          10          Divide, hardware division disabled                        */
+         // FIX: Using combinational wire logic (w_dis_*) instead of blocking assignments
+         AC <= w_dis_ac;
+         IO <= w_dis_io_shifted;
+      end
+
+
+      /* ---------------------------------------------------------------------------------------------------------------------------------------------------
+         The I/O transfer format is:
+
+    17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
+   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+   | 1  1  1  0  1| W| C|   subopcode  |      device     | I/O transfer
+   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+
+      */
+      i_iot:
+      begin
+         case (operand[5:0])              /* device */
+
+         display_crt:
+         begin
+            pixel_shift_out <= 1'b1;
+            //pixel_brightness <= (DI[8]) ? 3'b111 : DI[8:6];
+            pixel_brightness <= IO[11:9]; // RADI SHOWFLAKE
+            //pixel_brightness <= DI[8:6];  // REVERT: Use DI directly as in original MiSTer (MEM_BUFF was wrong)
+            // FIX: Coordinates IDENTICAL to original - full 10-bit (0-1023)
+            // Scaling for 512x512 display is done in CRT module
+            // PDP-1 generates 10-bit signed (-512 to +511)
+            // Original: IO[17:8] + 512 = 0-1023 for 1024x1024 display
+            pixel_x_latched <= IO[17:8] + 10'd512;  // 0-1023 (as original)
+            pixel_y_latched <= AC[17:8] + 10'd512;  // 0-1023 (as original)
+            // TASK-PIXEL-DEBUG: Increment pixel counter on each pixel output
+            debug_pixel_count <= debug_pixel_count + 1'b1;
+         end
+
+         read_gamepad:
+            IO <= gamepad_in;
+
+         read_reader_buffer,
+         read_punched_tape_binary:
+         begin
+            if (is_char_available)
+            begin
+               send_next_tape_char <= 1'b1;
+               IO <= tape_rcv_word;
+            end
+            else
+               cpu_state <= cpu_state - 4'd10;
+         end
+
+         type_out:
+         begin
+            IOSTA[2] <= 1'b1;                /* Set to 0 at the start of each tyo instruction, back to 1 when typewriter free to receive tyo again */
+                                             /* Until artificial slow-down is implemented, typewriter is always available so IOSTA[2] can be pulled high */
+            typewriter_strobe_out <= 1'b1;
+         end
+
+         type_in:
+         begin
+            IO <= {11'b0, ~IOSTA[3], typewriter_buffer};
+            IOSTA[3] <= 1'b0;                /* Set to 0 by completion of tyi instruction */
+                                             /* Set to 1 when typewriter key struck */
+            typewriter_strobe_ack <= 1'b1;
+         end
+
+         cks_iosta_check:
+            IO[17:12] <= { IOSTA[0], IOSTA[1], IOSTA[2], IOSTA[3], IOSTA[4], IOSTA[5] };
+
+         6'd60:  // Device 074 octal - ADC reader for oscilloscope
+         begin
+            if (external_io_valid)
+               IO <= external_io_data;
+         end
+
+         endcase
+      end
+
+      /* ---------------------------------------------------------------------------------------------------------------------------------------------------
+         skp Y,  opcode 64,  duration 5 us,  Skip instruction
+
+         17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
+        +-----------------+--+--+--+--+--+--+--+--+--+--+--+--+
+        | 1  1  0  1  0|  |  |  |  |  |  |  |  |  |  |  |  |  |
+        +-----------------+--+--+--+--+--+--+--+--+--+--+--+--+
+                         |     |  |  |  |  | \______/ \______/
+                         |     |  |  |  |  |     |        |
+                         |     |  |  |  |  |     |        +---- Program Flags   (szs)
+                         |     |  |  |  |  |     +------------- Sense Switches  (szf)
+                         |     |  |  |  |  +------------------- AC = 0          (sza)
+                         |     |  |  |  +---------------------- AC >= 0         (spa)
+                         |     |  |  +------------------------- AC < 0          (sma)
+                         |     |  +---------------------------- OV = 0          (szo)
+                         |     +------------------------------- IO >= 0         (spi)
+                         +------------------------------------- invert skip
+      */
+      i_skp:
+      begin
+         // FIX: Using combinational wire w_skip_flag instead of blocking assignment
+         if (instruction[12] ^ w_skip_flag) /* If 6-th bit (DEC notation) is 1 and skip flag 0, or vice-versa */
+            PC <= (PREV_IR[17:13] == i_xct) ? PREV_IR[11:0] + 1'b1 : PC + 1'b1;  /* Edge-case, if previous opcode was XCT, PC is the corresponding y + 1 */
+
+         if (operand[9])
+            OV <= 1'b0;
+
+      end
+
+      /* ---------------------------------------------------------------------------------------------------------------------------------------------------
+         sft Y          66          5           Shift instructions
+         The shift format is:
+
+    17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
+   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+   | 1  1  0  1  1| subopcode |      encoded count       | shift
+   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+          */
+
+      i_shift:
+      begin
+         /* num_shift is the number of high bits in instruction word bits 9-17 (DEC notation) - encoded count */
+         /* Maximum shift count is 9 (all bits set in encoded count field) */
+         /* Yosys cannot synthesize variable-count for loops, so we use barrel shifter approach */
+         // FIX: Using wire w_num_shift instead of blocking assignment (defined in wire section)
+
+         /* Unrolled shift implementation - process each possible shift count */
+         /* FIX: All blocking assignments (=) converted to non-blocking (<=) */
+         case (operand[17:9] & 9'o777)
+
+         9'o661:  /* Rotate Accumulator Left (ral) */
+            case (w_num_shift)
+               4'd1: AC <= {AC[16:0], AC[17]};
+               4'd2: AC <= {AC[15:0], AC[17:16]};
+               4'd3: AC <= {AC[14:0], AC[17:15]};
+               4'd4: AC <= {AC[13:0], AC[17:14]};
+               4'd5: AC <= {AC[12:0], AC[17:13]};
+               4'd6: AC <= {AC[11:0], AC[17:12]};
+               4'd7: AC <= {AC[10:0], AC[17:11]};
+               4'd8: AC <= {AC[9:0], AC[17:10]};
+               4'd9: AC <= {AC[8:0], AC[17:9]};
+               default: ; /* No shift for 0 */
+            endcase
+
+         9'o662:  /* Rotate IO Left (ril) */
+            case (w_num_shift)
+               4'd1: IO <= {IO[16:0], IO[17]};
+               4'd2: IO <= {IO[15:0], IO[17:16]};
+               4'd3: IO <= {IO[14:0], IO[17:15]};
+               4'd4: IO <= {IO[13:0], IO[17:14]};
+               4'd5: IO <= {IO[12:0], IO[17:13]};
+               4'd6: IO <= {IO[11:0], IO[17:12]};
+               4'd7: IO <= {IO[10:0], IO[17:11]};
+               4'd8: IO <= {IO[9:0], IO[17:10]};
+               4'd9: IO <= {IO[8:0], IO[17:9]};
+               default: ;
+            endcase
+
+         9'o663:  /* Rotate AC and IO Left (rcl) - 36-bit rotate */
+            case (w_num_shift)
+               4'd1: {AC, IO} <= {AC[16:0], IO, AC[17]};
+               4'd2: {AC, IO} <= {AC[15:0], IO, AC[17:16]};
+               4'd3: {AC, IO} <= {AC[14:0], IO, AC[17:15]};
+               4'd4: {AC, IO} <= {AC[13:0], IO, AC[17:14]};
+               4'd5: {AC, IO} <= {AC[12:0], IO, AC[17:13]};
+               4'd6: {AC, IO} <= {AC[11:0], IO, AC[17:12]};
+               4'd7: {AC, IO} <= {AC[10:0], IO, AC[17:11]};
+               4'd8: {AC, IO} <= {AC[9:0], IO, AC[17:10]};
+               4'd9: {AC, IO} <= {AC[8:0], IO, AC[17:9]};
+               default: ;
+            endcase
+
+         9'o665:  /* Shift Accumulator Left (sal) - arithmetic, sign preserved */
+            case (w_num_shift)
+               4'd1: AC <= {AC[17], AC[15:0], 1'b0};
+               4'd2: AC <= {AC[17], AC[14:0], 2'b0};
+               4'd3: AC <= {AC[17], AC[13:0], 3'b0};
+               4'd4: AC <= {AC[17], AC[12:0], 4'b0};
+               4'd5: AC <= {AC[17], AC[11:0], 5'b0};
+               4'd6: AC <= {AC[17], AC[10:0], 6'b0};
+               4'd7: AC <= {AC[17], AC[9:0], 7'b0};
+               4'd8: AC <= {AC[17], AC[8:0], 8'b0};
+               4'd9: AC <= {AC[17], AC[7:0], 9'b0};
+               default: ;
+            endcase
+
+         9'o666:  /* Shift IO Left (sil) - arithmetic */
+            case (w_num_shift)
+               4'd1: IO <= {IO[17], IO[15:0], 1'b0};
+               4'd2: IO <= {IO[17], IO[14:0], 2'b0};
+               4'd3: IO <= {IO[17], IO[13:0], 3'b0};
+               4'd4: IO <= {IO[17], IO[12:0], 4'b0};
+               4'd5: IO <= {IO[17], IO[11:0], 5'b0};
+               4'd6: IO <= {IO[17], IO[10:0], 6'b0};
+               4'd7: IO <= {IO[17], IO[9:0], 7'b0};
+               4'd8: IO <= {IO[17], IO[8:0], 8'b0};
+               4'd9: IO <= {IO[17], IO[7:0], 9'b0};
+               default: ;
+            endcase
+
+         9'o667:  /* Shift AC and IO Left (scl) - 36-bit arithmetic */
+            case (w_num_shift)
+               4'd1: {AC, IO} <= {AC[17], AC[15:0], IO[17:0], 1'b0};
+               4'd2: {AC, IO} <= {AC[17], AC[14:0], IO[17:0], 2'b0};
+               4'd3: {AC, IO} <= {AC[17], AC[13:0], IO[17:0], 3'b0};
+               4'd4: {AC, IO} <= {AC[17], AC[12:0], IO[17:0], 4'b0};
+               4'd5: {AC, IO} <= {AC[17], AC[11:0], IO[17:0], 5'b0};
+               4'd6: {AC, IO} <= {AC[17], AC[10:0], IO[17:0], 6'b0};
+               4'd7: {AC, IO} <= {AC[17], AC[9:0], IO[17:0], 7'b0};
+               4'd8: {AC, IO} <= {AC[17], AC[8:0], IO[17:0], 8'b0};
+               4'd9: {AC, IO} <= {AC[17], AC[7:0], IO[17:0], 9'b0};
+               default: ;
+            endcase
+
+         9'o671:  /* Rotate Accumulator Right (rar) */
+            case (w_num_shift)
+               4'd1: AC <= {AC[0], AC[17:1]};
+               4'd2: AC <= {AC[1:0], AC[17:2]};
+               4'd3: AC <= {AC[2:0], AC[17:3]};
+               4'd4: AC <= {AC[3:0], AC[17:4]};
+               4'd5: AC <= {AC[4:0], AC[17:5]};
+               4'd6: AC <= {AC[5:0], AC[17:6]};
+               4'd7: AC <= {AC[6:0], AC[17:7]};
+               4'd8: AC <= {AC[7:0], AC[17:8]};
+               4'd9: AC <= {AC[8:0], AC[17:9]};
+               default: ;
+            endcase
+
+         9'o672:  /* Rotate IO Right (rir) */
+            case (w_num_shift)
+               4'd1: IO <= {IO[0], IO[17:1]};
+               4'd2: IO <= {IO[1:0], IO[17:2]};
+               4'd3: IO <= {IO[2:0], IO[17:3]};
+               4'd4: IO <= {IO[3:0], IO[17:4]};
+               4'd5: IO <= {IO[4:0], IO[17:5]};
+               4'd6: IO <= {IO[5:0], IO[17:6]};
+               4'd7: IO <= {IO[6:0], IO[17:7]};
+               4'd8: IO <= {IO[7:0], IO[17:8]};
+               4'd9: IO <= {IO[8:0], IO[17:9]};
+               default: ;
+            endcase
+
+         9'o673:  /* Rotate AC and IO Right (rcr) - 36-bit rotate */
+            case (w_num_shift)
+               4'd1: {AC, IO} <= {IO[0], AC, IO[17:1]};
+               4'd2: {AC, IO} <= {IO[1:0], AC, IO[17:2]};
+               4'd3: {AC, IO} <= {IO[2:0], AC, IO[17:3]};
+               4'd4: {AC, IO} <= {IO[3:0], AC, IO[17:4]};
+               4'd5: {AC, IO} <= {IO[4:0], AC, IO[17:5]};
+               4'd6: {AC, IO} <= {IO[5:0], AC, IO[17:6]};
+               4'd7: {AC, IO} <= {IO[6:0], AC, IO[17:7]};
+               4'd8: {AC, IO} <= {IO[7:0], AC, IO[17:8]};
+               4'd9: {AC, IO} <= {IO[8:0], AC, IO[17:9]};
+               default: ;
+            endcase
+
+         9'o675:  /* Shift Accumulator Right (sar) - arithmetic */
+            case (w_num_shift)
+               4'd1: AC <= {AC[17], AC[17:1]};
+               4'd2: AC <= {{2{AC[17]}}, AC[17:2]};
+               4'd3: AC <= {{3{AC[17]}}, AC[17:3]};
+               4'd4: AC <= {{4{AC[17]}}, AC[17:4]};
+               4'd5: AC <= {{5{AC[17]}}, AC[17:5]};
+               4'd6: AC <= {{6{AC[17]}}, AC[17:6]};
+               4'd7: AC <= {{7{AC[17]}}, AC[17:7]};
+               4'd8: AC <= {{8{AC[17]}}, AC[17:8]};
+               4'd9: AC <= {{9{AC[17]}}, AC[17:9]};
+               default: ;
+            endcase
+
+         9'o676:  /* Shift IO Right (sir) - arithmetic */
+            case (w_num_shift)
+               4'd1: IO <= {IO[17], IO[17:1]};
+               4'd2: IO <= {{2{IO[17]}}, IO[17:2]};
+               4'd3: IO <= {{3{IO[17]}}, IO[17:3]};
+               4'd4: IO <= {{4{IO[17]}}, IO[17:4]};
+               4'd5: IO <= {{5{IO[17]}}, IO[17:5]};
+               4'd6: IO <= {{6{IO[17]}}, IO[17:6]};
+               4'd7: IO <= {{7{IO[17]}}, IO[17:7]};
+               4'd8: IO <= {{8{IO[17]}}, IO[17:8]};
+               4'd9: IO <= {{9{IO[17]}}, IO[17:9]};
+               default: ;
+            endcase
+
+         9'o677:  /* Shift AC and IO Right (scr) - 36-bit arithmetic */
+            case (w_num_shift)
+               4'd1: {AC, IO} <= {AC[17], AC, IO[17:1]};
+               4'd2: {AC, IO} <= {{2{AC[17]}}, AC, IO[17:2]};
+               4'd3: {AC, IO} <= {{3{AC[17]}}, AC, IO[17:3]};
+               4'd4: {AC, IO} <= {{4{AC[17]}}, AC, IO[17:4]};
+               4'd5: {AC, IO} <= {{5{AC[17]}}, AC, IO[17:5]};
+               4'd6: {AC, IO} <= {{6{AC[17]}}, AC, IO[17:6]};
+               4'd7: {AC, IO} <= {{7{AC[17]}}, AC, IO[17:7]};
+               4'd8: {AC, IO} <= {{8{AC[17]}}, AC, IO[17:8]};
+               4'd9: {AC, IO} <= {{9{AC[17]}}, AC, IO[17:9]};
+               default: ;
+            endcase
+
+         endcase
+      end
+
+      /* The operate format:
+
+    17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
+   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+   | 1  1  1  1  1|  |  |  |  |  |  |  |  |  |  |  |  |  | operate
+   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+                    |  |  |  |  |  |  |  |  |  | \______/
+                    |  |  |  |  |  |  |  |  |  |     |
+                    |  |  |  |  |  |  |  |  |  |     +---- PF select
+                    |  |  |  |  |  |  |  |  |  +---------- clear/set PF
+                    |  |  |  |  |  |  |  |  +------------- LIA (PDP-1D)
+                    |  |  |  |  |  |  |  +---------------- LAI (PDP-1D)
+                    |  |  |  |  |  |  +------------------- or PC
+                    |  |  |  |  |  +---------------------- CLA
+                    |  |  |  |  +------------------------- halt
+                    |  |  |  +---------------------------- CMA
+                    |  |  +------------------------------- or TW
+                    |  +---------------------------------- CLI
+                    +------------------------------------- CMI (PDP-1D)   */
+
+      i_opr:
+      begin
+         if (DI[10] && DI[7]) AC <= test_word;                 /* Loads test word switches in Accumulator */
+         else if (DI[10] && !DI[7]) AC <= AC | test_word;      /* OR test word switches with existing Accumulator value */
+         else if (DI[9] && DI[7]) AC <= 18'h3ffff;             /* If both flags are set, we need to perform cla and cma operations (which make accumulator equal to 0x3ffff) */
+         else if (DI[7]) AC <= 0;                              /* Clear Accumulator (cla, Address 200, 5 uSec) */
+         else if (DI[9]) AC <= ~AC;                            /* Complement Accumulator (cma, Address 1000, 5 usec) */
+
+         if (DI[4]) IO <= AC;                                  /* Load IO from Accumulator (lia, Address 20, 5 usec) */
+         if (DI[5]) AC <= IO;                                  /* Load Accumulator from IO (lai, Address 40, 5 usec) */
+                                                               /* Swap Accumulator and IO  (swp, Address 40, 5 usec) - implemented simply by executing both of these ifs */
+
+         if (DI[11]) IO <= 0;                                  /* Clear In-Out Register (cli, Address 4000, 5 usec) */
+         if (DI[8]) halt <= 1;                                 /* Stops the computer, (hlt, Address 400) - temporarily disabled  */
+
+         /* PF select, 1-7. 1-6 sets/clears individual flags, 7 does them all.
+            PF[0] exists simply to avoid handling it as a special case, it is not used  */
+         // FIX: blocking -> non-blocking assignments for PF
+
+         if (operand[2:0] == 3'd7)                             /* Set and clear program flag (clf / stf) 5 usec */
+            PF <= operand[3] ? 6'b111111 : 6'b000000 ;         /* Address 07 clears / sets all program flags */
+         else
+            PF[operand[2:0]] <= operand[3];
+
+      end
+
+      i_jmp: PC <= operand[11:0];
+      i_jsp:
+         begin
+            AC <= {OV, 5'b0, PC + 1'b1};
+            PC <= operand[11:0];
+         end
+
+      // FIX BUG 8: The default case was incorrectly setting SKIP_REST_OF_INSTR for ANY
+      // unhandled opcode. This caused all subsequent states to be skipped until reaching
+      // initial_state again. Since all valid PDP-1 opcodes ARE handled above, this default
+      // case should NEVER match. If it does match (invalid opcode), we should NOT set
+      // SKIP_REST_OF_INSTR because that would break the instruction cycle.
+      //
+      // For i_jmp and i_jsp, SKIP_REST_OF_INSTR is correctly set OUTSIDE this task
+      // at line 894 in the execute state handler.
+      default: ;  // Do nothing for invalid opcodes - let instruction cycle complete normally
+
+   endcase
+end
+endtask
+
+
+/////////////////  ASSIGNMENTS  ///////////////////
+
+assign denominator     = (DI[17] ? (~(DI[16:0])) : DI[16:0]);
+assign multiply_input  = AC[17] ? { ~AC[16:0], ~IO[17:1] } : { AC[16:0], IO[17:1] };
+
+// OPTIMIZATION: Pipelined multiply result from registered DSP output
+// Original combinational: assign multiply_result = abs_nosign(AC) * abs_nosign(DI);
+// Pipeline adds 2 cycles latency, but FSM already waits 1000 cycles for MUL instruction
+assign multiply_result = r_multiply_result;
+
+// OPTIMIZATION: Registered pixel output coordinates
+// PDP-1 coordinates are signed 10-bit (-512 to +511), mapped to display coordinates
+// Offset +512 ensures center star remains centered (0,0 -> 512,512)
+// Original combinational: assign pixel_x_out = IO[17:8] + 10'd512;
+// Registered version adds 1 cycle latency for improved Fmax
+assign pixel_x_out = r_pixel_x_out;
+assign pixel_y_out = r_pixel_y_out;
+
+assign typewriter_char_out = IO[5:0];
+
+assign BUS_out[19:0] = { cpu_running && ~`power_switch, OV, IR[17:13], PF[6:1], sense_switches[5:0] };
+
+
+// ============================================================================
+// PIPELINED MULTIPLIER AND REGISTERED PIXEL OUTPUT
+// ============================================================================
+// This always block implements:
+// 1. 2-stage pipelined multiplier for better DSP inference on FPGA
+//    - Stage 1: Capture absolute values of operands
+//    - Stage 2: Perform multiplication and register result
+//    - Latency: 2 clock cycles (MUL instruction waits 1000 cycles, so plenty of margin)
+//
+// 2. Registered pixel output coordinates for improved Fmax
+//    - Breaks combinational path from IO/AC registers to output pins
+//    - Offset +512 preserved to keep center star centered at (512,512)
+//    - Latency: 1 clock cycle (acceptable for 50MHz display refresh)
+// ============================================================================
+always @(posedge clk) begin
+    if (rst) begin
+        // Reset pipeline registers
+        r_mult_op_a <= 17'd0;
+        r_mult_op_b <= 17'd0;
+        r_multiply_result <= 34'd0;
+        // Reset pixel output registers to center
+        r_pixel_x_out <= 10'd512;
+        r_pixel_y_out <= 10'd512;
+    end
+    else begin
+        // Pipeline Stage 1: Capture absolute values of operands
+        r_mult_op_a <= abs_nosign(AC);
+        r_mult_op_b <= abs_nosign(DI);
+
+        // Pipeline Stage 2: Registered multiplication result
+        // This allows synthesis tool to infer DSP blocks on ECP5/iCE40
+        r_multiply_result <= r_mult_op_a * r_mult_op_b;
+
+        // Registered pixel output with offset +512 for centered display
+        // PDP-1 coordinates: -512 to +511 (signed 10-bit in upper bits of IO/AC)
+        // Display coordinates: 0 to 1023 (unsigned 10-bit)
+        r_pixel_x_out <= IO[17:8] + 10'd512;
+        r_pixel_y_out <= AC[17:8] + 10'd512;
+    end
+end
+
+
+/////////////////  MAIN BLOCK  ////////////////////
+
+/* 50 MHz input clock = 20 ns period. Instructions last 5 or 10 uS (250 or 500 clocks), so we have time to spare. */
+/* FIX BUG 11: Sync reset with first-clock-cycle initialization */
+/* ECP5 DFFs have sync reset - async reset is converted to sync by Yosys */
+always @(posedge clk) begin
+   // CRITICAL: Check reset FIRST before any other logic
+   if (rst) begin
+      // Sync reset - inline code for reliable synthesis
+      PC           <= start_address;
+      AC           <= 18'b0;
+      IO           <= 18'b0;
+      MEM_BUFF     <= 18'b0;
+      MEM_ADDR     <= 12'b0;
+      IR           <= 18'b0;
+      IOSTA        <= 7'b0000100;
+      PF           <= 1'b0;
+      OV           <= 1'b0;
+      halt         <= 1'b0;
+      WRITE_ENABLE <= 1'b0;
+      cpu_state    <= poweron_state;
+      debug_instr_count <= 16'd0;
+      debug_iot_count   <= 16'd0;
+      debug_pixel_count <= 32'd0;
+      pixel_x_latched <= 10'd256;
+      pixel_y_latched <= 10'd256;
+      waste_cycles <= 12'd0;
+      cpu_running <= 1'b1;
+      SKIP_REST_OF_INSTR <= 1'b0;
+      r_pc_forced <= 1'b1;  // Proper reset happened, no need to force PC
+      r_startup_cnt <= 8'd200;  // Skip past trigger point
+   end
+   else begin
+
+   // FIX BUG 15: Startup counter - always increments, wraps at 255
+   r_startup_cnt <= r_startup_cnt + 1'b1;
+
+   old_typewriter_strobe_in <= typewriter_strobe_in;                          /* Store old values for positive edge detection */
+   prev_continue_button <= `continue_button;
+
+   pixel_shift_out <= 1'b0;
+
+   if (`stop_button || halt) begin
+      cpu_running <= 1'b0;
+      halt <= 1'b0;
+   end
+
+   if (`continue_button || `start_button) // && SP_4
+      cpu_running <= 1'b1;
+
+   // FIX BUG 5: When entering initial_state from state 3 (first instruction), ensure waste_cycles is 0
+   // This is critical because ECP5 doesn't honor Verilog reg initialization
+   if (cpu_state == initial_state - 1'b1)  // state 3 -> about to become state 4
+      waste_cycles <= 12'd0;
+
+   /* If we are in single instruction mode, remain in initial_state until continue is pressed, then get stuck again in next initial_state */
+   if (cpu_state == initial_state && `single_inst_switch)
+      cpu_state <=  (~prev_continue_button && `continue_button) ? cpu_state + 1'b1 : initial_state ;
+
+   else if (cpu_state == initial_state && |waste_cycles)                      /* FIX: Use reduction OR for reliable non-zero check. If non-zero, decrement instead of executing. */
+      waste_cycles <= waste_cycles - 1'b1;
+
+   else if (cpu_state == cleanup + 1'b1)                                      /* If skip rest of instruction flag active, this makes sure it overflows to initial state, not poweron state */
+      cpu_state <= initial_state;
+
+   else
+      cpu_state <= cpu_state + 1'b1;
+
+
+   /* Typewriter positive edge transition sets these registers, i.e. on every char received */
+   if (~old_typewriter_strobe_in && typewriter_strobe_in) begin
+      PF[1] <= 1'b1;  // FIX: blocking -> non-blocking (Verilog good practice)
+      IOSTA[3] <= 1'b1;
+      typewriter_buffer <= typewriter_char_in;
+   end
+
+   /* ************************************** */
+
+   // FIX BUG 10: Force PC to start_address during power-on phase (states 0-3)
+   // This ensures PC is correctly initialized even if reset timing is problematic on ECP5.
+   // We check for states < initial_state (4) to cover the entire power-on sequence.
+   if (cpu_state < initial_state)
+      PC <= start_address;
+
+   // FIX BUG 11: Sync reset removed - async reset is now at beginning of always block
+
+   if (`start_button)                      /* Pressing start button puts address set by test address switches in program counter */
+      PC <= test_address[11:0];
+
+   else if (~cpu_running && ~`power_switch) begin                 /* If CPU is stopped, enable reading and writing memory through console switches */
+      WRITE_ENABLE <= `deposit_button;
+      if (`deposit_button) begin
+         MEM_ADDR <= test_address[11:0];
+         MEM_BUFF <= test_word;
+      end
+
+      if (`examine_button)
+         MEM_ADDR <= test_address[11:0];
+   end
+
+   // FIX BUG 9: Added cpu_state == poweron_state to condition to ensure PC initialization
+   // even if SKIP_REST_OF_INSTR is stuck high due to ECP5 not honoring reg initialization
+   else if (!SKIP_REST_OF_INSTR || cpu_state == initial_state || cpu_state == poweron_state) begin  /* Don't do any of this if SKIP_REST_OF_INSTR is set, except when we reach the next initial state or poweron */
+      SKIP_REST_OF_INSTR <= 1'b0;                                       /* Set this to false by default, set to true when needed */
+
+      case (cpu_state)
+         poweron_state:              PC        <= start_address;
+
+         read_program_counter:       MEM_ADDR  <= PC;
+         read_instruction_register:  IR        <= DI;                   /* Make sure the opcode remains in IR even after several cycles of indirect addressing */
+
+         read_data_bus:              MEM_BUFF  <= DI;
+
+         get_effective_address:
+            /* Check if we are processing instruction with memory addressing and get effective address in that case */
+            case (IR[17:13])
+               i_and, i_ior, i_xor, i_xct, i_lac, i_lio, i_dac,
+               i_dap, i_dip, i_dio, i_dzm, i_add, i_sub, i_idx,
+               i_isp, i_sad, i_sas, i_mu_, i_di_, i_jmp, i_jsp:
+                  begin
+                     MEM_ADDR <= MEM_BUFF[11:0];
+
+                     /* If indirect addressing, go to 2 clocks before read_data_bus state after we set the
+                        MEM_ADDR (address bus) so the memory value has enough time to be clocked onto the data bus.
+                        If not, increment current microcode cycle counter and wait for it to reach execute. */
+
+                     cpu_state <= (MEM_BUFF[12] == 1'b1) ? read_data_bus - 2'd2: cpu_state + 1'b1;
+                  end
+               // Non-memory instructions: continue to next state
+               // Added by Jelena Kovacevic for HDL best practices compliance
+               default: ;  // No action needed, cpu_state increments normally
+            endcase
+
+         execute:
+            begin
+               execute_instruction(IR[17:13], IR[12], IR, MEM_BUFF);    /* MEM_BUFF now contains memory[y] */
+
+               case (IR[17:13])
+                  i_jmp, i_jsp:  SKIP_REST_OF_INSTR <= 1'b1;
+                  i_xct:         cpu_state <= read_data_bus - 3'd8;
+               endcase
+
+               // Debug: Count IOT instructions (display operations)
+               if (IR[17:13] == i_iot)
+                  debug_iot_count <= debug_iot_count + 1'b1;
+            end
+
+         check_instruction_duration:
+            case (IR[17:13])
+               i_shift, i_jmp, i_law, i_xct, i_jsp, i_skp, i_opr:
+                  waste_cycles <= 12'd0;                                         /* Waste no cycles, these instructions last only 5 us */
+               i_mu_:
+                  waste_cycles <= hw_mul_enabled ? 12'd1000 : 12'd250;          /* Scaled for 50MHz: 1000 cycles * 20 ns = +20 us if hw mul enabled, otherwise +5 us */
+               i_di_:
+                  waste_cycles <= hw_mul_enabled ? 12'd1750 : 12'd250;          /* Scaled for 50MHz: 1750 cycles * 20 ns = +35 us if hw div enabled, otherwise +5 us */
+               i_iot:
+                  waste_cycles <= (crt_wait && (MEM_BUFF[5:0] == display_crt))   /* Scaled for 50MHz: 2250 cycles * 20 ns = +45 us if writing to CRT */
+                                 ? 12'd2250 : 12'd0;
+               default:
+                  waste_cycles <= 12'd250;                                       /* Scaled for 50MHz: 250 cycles * 20 ns = +5 us */
+            endcase
+
+         flush_to_ram:
+            /* These opcodes need to write to memory, set WE high so the value gets written. */
+            case (IR[17:13])
+               i_dac, i_dap, i_dip, i_dio, i_dzm, i_idx, i_cal, i_jda, i_isp:
+                  WRITE_ENABLE <= 1'b1;
+               // Non-memory-write instructions: no action needed
+               // Added by Jelena Kovacevic for HDL best practices compliance
+               default: ;
+            endcase
+
+         cleanup:
+            begin
+               typewriter_strobe_ack <= 1'b0;
+               typewriter_strobe_out <= 1'b0;
+               send_next_tape_char <= 1'b0;
+               WRITE_ENABLE <= 1'b0;
+               PC <= PC + 1'b1;
+               cpu_state <= initial_state;
+               // Debug: Count instructions executed
+               debug_instr_count <= debug_instr_count + 1'b1;
+            end
+
+         // FIX BUG 6: The default case was resetting cpu_state for ALL states not
+         // explicitly listed, including valid "transit" states 1-30, 32-50, etc.
+         // This caused the CPU to get stuck because the state counter couldn't
+         // advance through transit states.
+         //
+         // Transit states between explicit states are normal operation - the state
+         // counter just increments through them. Only truly invalid states (e.g.,
+         // after cleanup which is 254, before wrapping back to initial_state)
+         // should trigger recovery.
+         //
+         // REMOVED: The dangerous default case that broke the state machine.
+         // The state machine now relies on lines 816-826 for state advancement,
+         // which is the original intended behavior.
+         //
+         // Note: State 255 (cleanup+1) is handled explicitly in lines 822-823:
+         //       else if (cpu_state == cleanup + 1'b1) cpu_state <= initial_state;
+         default: ;  // Do nothing - state counter handles advancement
+      endcase
+   end
+
+   // FIX BUG 15 (final): One-shot PC forcing
+   // When counter hits 100 and we haven't forced yet, force PC and mark as done
+   if (w_force_pc_now) begin
+      PC <= start_address;
+      cpu_state <= poweron_state;
+      r_pc_forced <= 1'b1;  // Prevent future forcing
+   end
+
+   end  // FIX BUG 11: closing else for async reset
+end
+
+endmodule

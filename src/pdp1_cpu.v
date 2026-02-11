@@ -1,5 +1,5 @@
 /*
- * PDP-1 CPU - ECP5 Compatible Version
+ * PDP-1 CPU - ECP5 Compatible Version (ORIGINAL - without ADC)
  *
  * Original cpu.v from fpg1 project, adapted for ULX3S/ECP5.
  * Uses pdp1_cpu_alu_div module (behavioral divider).
@@ -11,6 +11,9 @@
  * Author: Jelena Horvat, REGOC team (port)
  * Original Author: norbert@bul.co.uk (fpg1 project)
  * Task: TASK-213 CPU Integration
+ *
+ * NOTE: This is the ORIGINAL version WITHOUT ADC/oscilloscope support.
+ *       For oscilloscope support, use pdp1_cpu_osc.v
  */
 
 module pdp1_cpu (
@@ -73,11 +76,7 @@ module pdp1_cpu (
    output reg  [31:0] debug_pixel_count,           /* Total pixels sent (32-bit counter) */
    output wire [9:0]  debug_pixel_x,               /* Last pixel X coordinate */
    output wire [9:0]  debug_pixel_y,               /* Last pixel Y coordinate */
-   output wire [2:0]  debug_pixel_brightness,      /* Last pixel brightness (0-7) */
-
-   /* External IO interface (ADC oscilloscope) */
-   input       [17:0] external_io_data,            /* External IO data (ADC) */
-   input              external_io_valid            /* External device has data */
+   output wire [2:0]  debug_pixel_brightness       /* Last pixel brightness (0-7) */
    );
 
 
@@ -528,11 +527,7 @@ begin
          cks_iosta_check:
             IO[17:12] <= { IOSTA[0], IOSTA[1], IOSTA[2], IOSTA[3], IOSTA[4], IOSTA[5] };
 
-         6'd60:  // Device 074 octal - ADC reader for oscilloscope
-         begin
-            if (external_io_valid)
-               IO <= external_io_data;
-         end
+         // NOTE: Device 6'd60 (ADC reader) removed - this is the ORIGINAL version without oscilloscope support
 
          endcase
       end

@@ -110,9 +110,9 @@ PDP1_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
 # PDP-1 SystemVerilog source files
 PDP1_SV_FILES    := $(SRC_DIR)/ecp5pll.sv
 
-# PDP-1 Verilog source files (BASIC - without ESP32 OSD)
+# PDP-1 Verilog source files (BASIC - without ESP32 OSD, without ADC)
 # TASK-213: Added pdp1_cpu.v and pdp1_main_ram.v
-# ADC MAX11123 for oscilloscope support
+# NOTE: ADC removed - use oscilloscope target for ADC support
 PDP1_V_FILES     := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
                     $(SRC_DIR)/top_pdp1.v \
                     $(SRC_DIR)/clock_domain.v \
@@ -122,6 +122,37 @@ PDP1_V_FILES     := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
                     $(SRC_DIR)/line_shift_register.v \
                     $(SRC_DIR)/pixel_ring_buffer.v \
                     $(SRC_DIR)/pdp1_cpu.v \
+                    $(SRC_DIR)/pdp1_main_ram.v \
+                    $(SRC_DIR)/pdp1_cpu_alu_div.v \
+                    $(SRC_DIR)/pdp1_terminal_fb.v \
+                    $(SRC_DIR)/pdp1_terminal_charset.v \
+                    $(SRC_DIR)/test_animation.v \
+                    $(SRC_DIR)/test_sinus.v \
+                    $(SRC_DIR)/serial_debug.v \
+                    $(SRC_DIR)/vga2dvid.v \
+                    $(SRC_DIR)/tmds_encoder.v \
+                    $(EMARD_VIDEO)/fake_differential.v
+
+# =============================================================================
+# OSCILLOSCOPE CONFIGURATION (with ADC MAX11123)
+# =============================================================================
+OSC_PROJECT      := oscilloscope
+OSC_TOP_MODULE   := top_oscilloscope
+OSC_JSON_FILE    := $(BUILD_DIR)/$(OSC_PROJECT).json
+OSC_CONFIG_FILE  := $(BUILD_DIR)/$(OSC_PROJECT).config
+OSC_BIT_FILE     := $(BUILD_DIR)/$(OSC_PROJECT).bit
+OSC_LPF_FILE     := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
+
+# Oscilloscope Verilog source files (uses pdp1_cpu_osc.v instead of pdp1_cpu.v)
+OSC_V_FILES      := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
+                    $(SRC_DIR)/top_oscilloscope.v \
+                    $(SRC_DIR)/clock_domain.v \
+                    $(SRC_DIR)/ulx3s_input.v \
+                    $(SRC_DIR)/pdp1_vga_crt.v \
+                    $(SRC_DIR)/pdp1_vga_rowbuffer.v \
+                    $(SRC_DIR)/line_shift_register.v \
+                    $(SRC_DIR)/pixel_ring_buffer.v \
+                    $(SRC_DIR)/pdp1_cpu_osc.v \
                     $(SRC_DIR)/pdp1_main_ram.v \
                     $(SRC_DIR)/pdp1_cpu_alu_div.v \
                     $(SRC_DIR)/pdp1_terminal_fb.v \
@@ -190,6 +221,7 @@ VHDL_FILES       := $(EMARD_VIDEO)/tmds_encoder.vhd \
 .PHONY: all synth pnr bit prog prog_flash clean info help
 .PHONY: test test_synth test_pnr test_bit test_prog
 .PHONY: pdp1 pdp1_synth pdp1_pnr pdp1_bit pdp1_prog pdp1_prog_flash
+.PHONY: oscilloscope osc_synth osc_pnr osc_bit osc_prog osc_prog_flash
 
 # Default target
 all: bit
@@ -363,6 +395,85 @@ pdp1_prog: $(PDP1_BIT_FILE)
 pdp1_prog_flash: $(PDP1_BIT_FILE)
 	@echo "========================================"
 	@echo "UPLOAD PDP-1 (FLASH)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) -f $<
+
+# =============================================================================
+# OSCILLOSCOPE TARGETS (with ADC MAX11123)
+# =============================================================================
+# Build flow for PDP-1 oscilloscope with external ADC input
+
+# Complete oscilloscope build
+oscilloscope: osc_bit
+	@echo "========================================"
+	@echo "Oscilloscope build completed!"
+	@echo "Bitstream: $(OSC_BIT_FILE)"
+	@echo "To upload: make osc_prog"
+	@echo "========================================"
+
+# Oscilloscope synthesis
+osc_synth: $(OSC_JSON_FILE)
+
+$(OSC_JSON_FILE): $(PDP1_SV_FILES) $(OSC_V_FILES) | $(BUILD_DIR)
+	@echo "========================================"
+	@echo "SYNTHESIS: $(OSC_PROJECT) (Oscilloscope with ADC)"
+	@echo "========================================"
+	@echo "SystemVerilog: $(PDP1_SV_FILES)"
+	@echo "Verilog: $(OSC_V_FILES)"
+	@echo "Defines: $(DEFINES)"
+	@echo "========================================"
+	$(YOSYS) -p "\
+		read_verilog -sv $(PDP1_SV_FILES); \
+		read_verilog $(DEFINES) -I$(SRC_DIR) $(OSC_V_FILES); \
+		hierarchy -top $(OSC_TOP_MODULE); \
+		synth_ecp5 $(YOSYS_FLAGS) -json $@" \
+		2>&1 | tee $(BUILD_DIR)/osc_synth.log
+	@echo "Synthesis completed: $@"
+
+# Oscilloscope place & route
+osc_pnr: $(OSC_CONFIG_FILE)
+
+$(OSC_CONFIG_FILE): $(OSC_JSON_FILE) $(OSC_LPF_FILE)
+	@echo "========================================"
+	@echo "PLACE & ROUTE: $(OSC_PROJECT)"
+	@echo "========================================"
+	$(NEXTPNR) \
+		--$(FPGA_SIZE) \
+		--package $(FPGA_PACKAGE) \
+		--speed $(FPGA_SPEED) \
+		--json $(OSC_JSON_FILE) \
+		--lpf $(OSC_LPF_FILE) \
+		--textcfg $@ \
+		$(NEXTPNR_FLAGS) \
+		2>&1 | tee $(BUILD_DIR)/osc_pnr.log
+	@echo "Place & Route completed: $@"
+
+# Oscilloscope bitstream
+osc_bit: $(OSC_BIT_FILE)
+
+$(OSC_BIT_FILE): $(OSC_CONFIG_FILE)
+	@echo "========================================"
+	@echo "BITSTREAM: $(OSC_PROJECT)"
+	@echo "========================================"
+	$(ECPPACK) \
+		--idcode $(FPGA_IDCODE) \
+		--input $< \
+		--bit $@ \
+		$(ECPPACK_FLAGS)
+	@echo "Bitstream generated: $@"
+	@ls -lh $@
+
+# Oscilloscope upload (SRAM)
+osc_prog: $(OSC_BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD Oscilloscope (SRAM)"
+	@echo "========================================"
+	$(PROGRAMMER) -b $(BOARD) $<
+
+# Oscilloscope upload (FLASH)
+osc_prog_flash: $(OSC_BIT_FILE)
+	@echo "========================================"
+	@echo "UPLOAD Oscilloscope (FLASH)"
 	@echo "========================================"
 	$(PROGRAMMER) -b $(BOARD) -f $<
 
