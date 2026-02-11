@@ -241,7 +241,7 @@ restart,
 	jmp rr
 
 rl,
-	law 2
+	law 7				/ Changed from 2 to 7 for faster ball
 	cma
 	dac dx
 
@@ -250,7 +250,7 @@ rl,
 
 	jmp ckret
 rr,
-	law 2
+	law 7				/ Changed from 2 to 7 for faster ball
 	dac dx
 
 	sub offscrn
@@ -346,8 +346,8 @@ cyret, jmp .
 x,		000500
 y,		000000
 
-dx,		777775
-dy,		000003
+dx,		777771		/ Changed from 777775 (-3) to 777771 (-7) for faster ball
+dy,		000007		/ Changed from 000003 (3) to 000007 (7) for faster ball
 
 iter,		000000
 
@@ -374,7 +374,7 @@ maxright,  	000764
 maxdown,   	000600
 
 offscrn,	000500
-dymask,		000003
+dymask,		000007		/ Changed from 000003 (0-3) to 000007 (0-7) for more dy variation
 ymask,		000577
 
 limitup,	000420
