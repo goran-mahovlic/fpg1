@@ -73,7 +73,11 @@ module pdp1_cpu (
    output reg  [31:0] debug_pixel_count,           /* Total pixels sent (32-bit counter) */
    output wire [9:0]  debug_pixel_x,               /* Last pixel X coordinate */
    output wire [9:0]  debug_pixel_y,               /* Last pixel Y coordinate */
-   output wire [2:0]  debug_pixel_brightness       /* Last pixel brightness (0-7) */
+   output wire [2:0]  debug_pixel_brightness,      /* Last pixel brightness (0-7) */
+
+   /* External IO interface (ADC oscilloscope) */
+   input       [17:0] external_io_data,            /* External IO data (ADC) */
+   input              external_io_valid            /* External device has data */
    );
 
 
@@ -523,6 +527,12 @@ begin
 
          cks_iosta_check:
             IO[17:12] <= { IOSTA[0], IOSTA[1], IOSTA[2], IOSTA[3], IOSTA[4], IOSTA[5] };
+
+         6'd60:  // Device 074 octal - ADC reader for oscilloscope
+         begin
+            if (external_io_valid)
+               IO <= external_io_data;
+         end
 
          endcase
       end

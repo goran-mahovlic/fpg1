@@ -163,6 +163,21 @@ FREQUENCY PORT "clk_25mhz" 25 MHZ;
 # BLOCK PATH FROM CELL "*vid_vblank*" TO CELL "*cpu_vblank*";
 
 # =============================================================================
+# GPIO PINS FOR ADC MAX11123 (OSCILLOSCOPE)
+# =============================================================================
+# ADC SPI interface on GPIO 14-15 (directly on ADC pins on ULX3S)
+# =============================================================================
+LOCATE COMP "gp14" SITE "U18";   # ADC CSN (chip select, active low)
+LOCATE COMP "gn14" SITE "U17";   # ADC MOSI (master out)
+LOCATE COMP "gp15" SITE "N17";   # ADC SCLK (SPI clock)
+LOCATE COMP "gn15" SITE "P16";   # ADC MISO (master in)
+
+IOBUF PORT "gp14" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gn14" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gp15" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gn15" PULLMODE=UP IO_TYPE=LVCMOS33;
+
+# =============================================================================
 # END OF CONSTRAINT FILE
 # =============================================================================
 # =============================================================================

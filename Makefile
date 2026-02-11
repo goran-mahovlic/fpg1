@@ -112,6 +112,7 @@ PDP1_SV_FILES    := $(SRC_DIR)/ecp5pll.sv
 
 # PDP-1 Verilog source files (BASIC - without ESP32 OSD)
 # TASK-213: Added pdp1_cpu.v and pdp1_main_ram.v
+# ADC MAX11123 for oscilloscope support
 PDP1_V_FILES     := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
                     $(SRC_DIR)/top_pdp1.v \
                     $(SRC_DIR)/clock_domain.v \
@@ -128,6 +129,7 @@ PDP1_V_FILES     := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
                     $(SRC_DIR)/test_animation.v \
                     $(SRC_DIR)/test_sinus.v \
                     $(SRC_DIR)/serial_debug.v \
+                    $(SRC_DIR)/adc_max11123.v \
                     $(SRC_DIR)/vga2dvid.v \
                     $(SRC_DIR)/tmds_encoder.v \
                     $(EMARD_VIDEO)/fake_differential.v
