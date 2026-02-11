@@ -234,6 +234,7 @@ module top_pdp1
     wire [7:0] w_led_input_feedback;
     wire       w_p2_mode_active;
     wire       w_single_player;
+    wire [6:0] w_btn_direct;          // Direct debounced buttons for Pong
 
     ulx3s_input #(
         .CLK_FREQ    (C_PIXEL_CLK_FREQ),  // 51 MHz pixel clock
@@ -246,7 +247,8 @@ module top_pdp1
         .o_joystick_emu   (w_joystick_emu),
         .o_led_feedback   (w_led_input_feedback),
         .o_p2_mode_active (w_p2_mode_active),
-        .o_single_player  (w_single_player)
+        .o_single_player  (w_single_player),
+        .o_btn_direct     (w_btn_direct)      // Direct buttons for Pong (no SW[0] mode)
     );
 
     // =========================================================================
@@ -349,27 +351,39 @@ module top_pdp1
     // NOTE: ADC MAX11123 Interface moved to top_oscilloscope.v
 
     // -------------------------------------------------------------------------
-    // Gamepad input mapping for Spacewar! (active-high signals)
+    // Gamepad input mapping for Spacewar! AND Pong (active-high signals)
     // -------------------------------------------------------------------------
-    // PDP-1 gamepad format: bits 17-14 and 3-0 are used
+    // PDP-1 gamepad format: bits 17-14 and 3-0 are used for Spacewar!
     // Player 1: bits 17-14 (CW, CCW, thrust, fire)
     // Player 2: bits 3-0 (CW, CCW, thrust, fire)
     //
-    // w_joystick_emu[7:0] from ulx3s_input module:
-    //   [0]=P1 fire, [1]=P1 CCW(left), [2]=P1 thrust, [3]=P1 CW(right)
-    //   [4]=P2 fire, [5]=P2 CCW(left), [6]=P2 thrust, [7]=P2 CW(right)
+    // Pong uses DIFFERENT bits (via IOT 11):
+    //   bit 14 = P1 UP (rghtup = 100000 octal)
+    //   bit 13 = P1 DOWN (rghtdown = 040000 octal) <-- WAS HARDCODED 0!
+    //   bit 1  = P2 UP (leftup = 000002 octal)
+    //   bit 0  = P2 DOWN (leftdown = 000001 octal)
+    //
+    // w_joystick_emu[7:0] from ulx3s_input (Spacewar mode with SW[0]):
+    //   [0]=P1 fire, [1]=P1 CCW, [2]=P1 thrust, [3]=P1 CW
+    //   [4]=P2 fire, [5]=P2 CCW, [6]=P2 thrust, [7]=P2 CW
+    //
+    // w_btn_direct[6:0] = direct debounced buttons (no SW[0] mode):
+    //   [1]=UP, [2]=DOWN, [3]=LEFT, [4]=RIGHT, [5]=F1, [6]=F2
+    //
+    // Combined mapping: Spacewar via joystick_emu, Pong via btn_direct
     // -------------------------------------------------------------------------
     wire [17:0] w_gamepad_in;
     assign w_gamepad_in = {
-        w_joystick_emu[3],   // bit 17 - P1 CW (rotate right)
-        w_joystick_emu[1],   // bit 16 - P1 CCW (rotate left)
-        w_joystick_emu[2],   // bit 15 - P1 thrust
-        w_joystick_emu[0],   // bit 14 - P1 fire
-        10'b0,               // bits 13-4 unused
-        w_joystick_emu[7],   // bit 3 - P2 CW (rotate right)
-        w_joystick_emu[5],   // bit 2 - P2 CCW (rotate left)
-        w_joystick_emu[6],   // bit 1 - P2 thrust
-        w_joystick_emu[4]    // bit 0 - P2 fire
+        w_joystick_emu[3],                        // bit 17 - P1 CW (Spacewar)
+        w_joystick_emu[1],                        // bit 16 - P1 CCW (Spacewar)
+        w_joystick_emu[2],                        // bit 15 - P1 thrust (Spacewar)
+        w_joystick_emu[0] | w_btn_direct[1],      // bit 14 - P1 fire (Spacewar) | UP (Pong P1 UP)
+        w_btn_direct[2],                          // bit 13 - DOWN (Pong P1 DOWN) - WAS HARDCODED 0!
+        9'b0,                                     // bits 12-4 unused
+        w_joystick_emu[7],                        // bit 3 - P2 CW (Spacewar)
+        w_joystick_emu[5],                        // bit 2 - P2 CCW (Spacewar)
+        w_joystick_emu[6] | w_btn_direct[5],      // bit 1 - P2 thrust (Spacewar) | F1 (Pong P2 UP)
+        w_joystick_emu[4] | w_btn_direct[6]       // bit 0 - P2 fire (Spacewar) | F2 (Pong P2 DOWN)
     };
 
     // -------------------------------------------------------------------------

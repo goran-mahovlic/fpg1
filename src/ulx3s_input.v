@@ -55,7 +55,7 @@
 `default_nettype none
 
 module ulx3s_input #(
-    parameter CLK_FREQ    = 51_000_000, // Clock frequency in Hz
+    parameter CLK_FREQ    = 25_000_000, // Clock frequency in Hz
     parameter DEBOUNCE_MS = 10          // Debounce time in milliseconds
 )(
     // Clock and Reset
@@ -74,7 +74,12 @@ module ulx3s_input #(
 
     // Mode Indicators
     output wire        o_p2_mode_active,// Player 2 mode active (SW[0])
-    output wire        o_single_player  // Single player mode (SW[1])
+    output wire        o_single_player, // Single player mode (SW[1])
+
+    // Direct Button Access (for Pong compatibility)
+    // Active HIGH, debounced, no mode modifier applied
+    // BTN[0]=PWR, BTN[1]=UP, BTN[2]=DOWN, BTN[3]=LEFT, BTN[4]=RIGHT, BTN[5]=F1, BTN[6]=F2
+    output wire [6:0]  o_btn_direct     // Direct debounced button state
 );
 
 //============================================================================
@@ -89,7 +94,7 @@ localparam CNT_WIDTH      = $clog2(DEBOUNCE_COUNT + 1);
 //============================================================================
 // Active-high button signal (inverted from active-low input)
 wire [6:0] w_btn_raw;
-assign w_btn_raw = i_btn_n;
+assign w_btn_raw = ~i_btn_n;
 
 // CDC synchronizer registers (2-FF for metastability protection)
 (* ASYNC_REG = "TRUE" *) reg [6:0] r_btn_meta;   // First FF (may be metastable)
@@ -191,14 +196,14 @@ always @(posedge i_clk or negedge i_rst_n) begin
     if (!i_rst_n) begin
         o_joystick_emu <= 8'b0;
     end else begin
-        o_joystick_emu[7] <= w_p1_fire;    // P1 fire
-        o_joystick_emu[6] <= w_p1_ccw;     // P1 left (CCW)
-        o_joystick_emu[5] <= w_p1_thrust;  // P1 thrust
-        o_joystick_emu[4] <= w_p1_cw;      // P1 right (CW)
-        o_joystick_emu[3] <= w_p2_fire;    // P2 fire
-        o_joystick_emu[2] <= w_p2_ccw;     // P2 left (CCW)
-        o_joystick_emu[1] <= w_p2_thrust;  // P2 thrust
-        o_joystick_emu[0] <= w_p2_cw;      // P2 right (CW)
+        o_joystick_emu[0] <= w_p1_fire;    // P1 fire
+        o_joystick_emu[1] <= w_p1_ccw;     // P1 left (CCW)
+        o_joystick_emu[2] <= w_p1_thrust;  // P1 thrust
+        o_joystick_emu[3] <= w_p1_cw;      // P1 right (CW)
+        o_joystick_emu[4] <= w_p2_fire;    // P2 fire
+        o_joystick_emu[5] <= w_p2_ccw;     // P2 left (CCW)
+        o_joystick_emu[6] <= w_p2_thrust;  // P2 thrust
+        o_joystick_emu[7] <= w_p2_cw;      // P2 right (CW)
     end
 end
 
@@ -208,6 +213,13 @@ end
 // Lower 4 LEDs = Player 1, Upper 4 LEDs = Player 2
 //============================================================================
 assign o_led_feedback = o_joystick_emu;
+
+//============================================================================
+// Direct Button Output (for Pong compatibility)
+// No SW[0] mode modifier - buttons directly accessible
+// Pong needs: BTN[1]=P1 UP, BTN[2]=P1 DOWN, BTN[5]=P2 UP, BTN[6]=P2 DOWN
+//============================================================================
+assign o_btn_direct = r_btn_debounced;
 
 endmodule
 
