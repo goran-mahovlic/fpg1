@@ -382,8 +382,8 @@ module top_pdp1
         9'b0,                                     // bits 12-4 unused
         w_joystick_emu[7],                        // bit 3 - P2 CW (Spacewar)
         w_joystick_emu[5],                        // bit 2 - P2 CCW (Spacewar)
-        w_joystick_emu[6] | w_btn_direct[5],      // bit 1 - P2 thrust (Spacewar) | F1 (Pong P2 UP)
-        w_joystick_emu[4] | w_btn_direct[6]       // bit 0 - P2 fire (Spacewar) | F2 (Pong P2 DOWN)
+        w_btn_direct[5],      // bit 1 - P2 thrust (Spacewar) | F1 (Pong P2 UP)
+        w_btn_direct[6]       // bit 0 - P2 fire (Spacewar) | F2 (Pong P2 DOWN)
     };
 
     // -------------------------------------------------------------------------
