@@ -8,6 +8,11 @@
 # - Added gc.collect() for memory management
 # - Fixed CS pin logic to match emard's osd.py
 #
+# FIXED 2026-02-13: Continuous CS transfer by Jelena Kovacevic
+# - Problem: CS was deactivated after each chunk, causing FSM reset
+# - Solution: Single CS cycle for entire file transfer
+# - CMD_FILE_TX_DATA (0x54) sent ONCE at start, then raw data bytes
+#
 # Usage:
 #   import ld_pdp1
 #   ld = ld_pdp1.ld_pdp1(spi, cs)
@@ -111,14 +116,63 @@ class ld_pdp1:
         self._cs_inactive()
 
     def file_tx_data(self, data):
-        """Send file data bytes"""
+        """Send file data bytes (legacy - CS per chunk)
+
+        NOTE: For better performance, use start_file_transfer() /
+        send_file_chunk() / end_file_transfer() for continuous transfer.
+        """
         self._cs_active()
         self.spi.write(bytearray([CMD_FILE_TX_DATA]))
         self.spi.write(data)
         self._cs_inactive()
 
+    # =========================================================================
+    # Continuous File Transfer API (FIXED 2026-02-13)
+    # =========================================================================
+    # These methods keep CS active during entire file transfer.
+    # This prevents FSM reset between chunks in esp32_osd.v
+    # =========================================================================
+
+    def start_file_transfer(self):
+        """Start continuous file transfer - CS stays active
+
+        Must call end_file_transfer() when done!
+        """
+        self._cs_active()
+        self.spi.write(bytearray([CMD_FILE_TX_DATA]))  # Command ONCE
+        self._transfer_active = True
+
+    def send_file_chunk(self, data):
+        """Send raw data chunk during active transfer
+
+        Args:
+            data: bytes/bytearray to send (NO command prefix!)
+
+        Raises:
+            RuntimeError: if start_file_transfer() not called
+        """
+        if not getattr(self, '_transfer_active', False):
+            raise RuntimeError("Call start_file_transfer() first")
+        self.spi.write(data)
+
+    def end_file_transfer(self):
+        """End continuous file transfer - deactivates CS"""
+        self._cs_inactive()
+        self._transfer_active = False
+
     def load(self, filename, verbose=True):
-        """Load RIM paper tape file to PDP-1"""
+        """Load RIM paper tape file to PDP-1
+
+        FIXED 2026-02-13: Uses continuous CS transfer.
+        Previous version deactivated CS after each chunk, which caused
+        the FSM in esp32_osd.v to reset to IDLE state, losing file_download.
+
+        Now uses single CS cycle for entire file:
+        1. CS active
+        2. Send CMD_FILE_TX_DATA (0x54) ONCE
+        3. Stream all data bytes (no command prefix per chunk)
+        4. CS inactive
+        """
 
         # Check file exists
         try:
@@ -141,33 +195,41 @@ class ld_pdp1:
         # Set file index for RIM type
         self.file_index(FILE_INDEX_RIM)
 
-        # Enable file transfer
+        # Enable file transfer mode in FPGA
         self.file_tx_enable(True)
 
-        # Stream file in chunks
+        # Stream file with CONTINUOUS CS (FIXED!)
         CHUNK_SIZE = 256
         total_sent = 0
+
+        # Start continuous transfer - CS active, command sent ONCE
+        self.start_file_transfer()
 
         try:
             while True:
                 chunk = f.read(CHUNK_SIZE)
                 if not chunk:
                     break
-                self.file_tx_data(chunk)
+                # Send raw data - NO command prefix per chunk!
+                self.send_file_chunk(chunk)
                 total_sent += len(chunk)
                 if verbose and total_sent % 1024 == 0:
                     print("  {}/{} bytes".format(total_sent, filesize))
-                    gc.collect()  # Prevent memory fragmentation
+
         except Exception as e:
             print("Error during transfer: {}".format(e))
+            self.end_file_transfer()  # Deactivate CS on error
             f.close()
             self.file_tx_enable(False)
             gc.collect()
             return False
 
+        # End transfer (deactivate CS) - MUST be after all data sent
+        self.end_file_transfer()
+
         f.close()
 
-        # Disable file transfer
+        # Disable file transfer mode
         self.file_tx_enable(False)
 
         if verbose:
