@@ -92,9 +92,13 @@ localparam CNT_WIDTH      = $clog2(DEBOUNCE_COUNT + 1);
 //============================================================================
 // Signal Declarations
 //============================================================================
-// Active-high button signal (inverted from active-low input)
+// Button input handling:
+// FIXED 2026-02-13: ULX3S v3.1.7 buttons are active HIGH with pull-down!
+// - BTN[0] = PWR - has pull-up, active low (special case)
+// - BTN[1-6] = User buttons - have pull-down, active high
+// No inversion needed for BTN[1-6], only for BTN[0]
 wire [6:0] w_btn_raw;
-assign w_btn_raw = ~i_btn_n;
+assign w_btn_raw = {i_btn_n[6:1], ~i_btn_n[0]};  // Only invert BTN[0] (PWR)
 
 // CDC synchronizer registers (2-FF for metastability protection)
 (* ASYNC_REG = "TRUE" *) reg [6:0] r_btn_meta;   // First FF (may be metastable)

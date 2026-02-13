@@ -139,28 +139,41 @@ module esp32_spi_slave (
     reg [7:0] tx_shift;
     reg       tx_loaded;  // Flag to track if TX data was loaded
 
+    // =========================================================================
+    // TX Shift Register - FIXED 2026-02-13 by Emard
+    // =========================================================================
+    // ROOT CAUSE: Previous implementation had (tx_load && !busy) but busy=cs_active,
+    // so TX data could NEVER be loaded during an active transaction.
+    //
+    // FIX: Load TX data immediately when tx_load asserts, regardless of busy state.
+    // The command decoder in esp32_osd.v sets tx_load when it receives a read command.
+    // We need the data loaded BEFORE the ESP32 starts clocking out the response byte.
+    //
+    // TIMING: tx_load is asserted on spi_rx_valid (after command byte received).
+    // ESP32 will then clock 8 more bits for the response. We have time to load
+    // because tx_load is processed on clk_sys (50 MHz) which is much faster than
+    // SPI clock (3 MHz).
+    // =========================================================================
+
     always @(posedge clk_sys or negedge rst_n) begin
         if (!rst_n) begin
             tx_shift  <= 8'h00;
             tx_loaded <= 1'b0;
         end
         else if (!cs_active) begin
-            // Load TX data when CS goes inactive (prepare for next transaction)
+            // Reset TX shift register when CS goes inactive
             tx_shift  <= 8'h00;
             tx_loaded <= 1'b0;
         end
-        else if (tx_load && !busy) begin
-            // Load new TX data when requested and not busy
+        else if (tx_load) begin
+            // FIX: Load TX data immediately when requested, even during transaction!
+            // This is triggered by esp32_osd when it receives a read command.
             tx_shift  <= tx_data;
             tx_loaded <= 1'b1;
         end
-        else if (cs_rising_edge && tx_loaded) begin
-            // TX data already loaded, keep it
-            tx_shift <= tx_shift;
-        end
-        else if (cs_rising_edge && !tx_loaded) begin
-            // Load TX data at start of transaction if not already loaded
-            tx_shift <= tx_data;
+        else if (byte_complete && tx_loaded) begin
+            // After a byte is complete, prepare for next byte if more data loaded
+            // Keep tx_shift as-is, it will be shifted out on next SPI clocks
         end
         else if (spi_clk_falling && cs_active) begin
             // Shift out on falling edge (Mode 0: data changes on falling edge)
@@ -170,6 +183,7 @@ module esp32_spi_slave (
 
     //=========================================================================
     // MISO Output - MSB first, update on falling edge
+    // FIXED 2026-02-13 by Emard: Also update on tx_load for immediate response
     //=========================================================================
 
     always @(posedge clk_sys or negedge rst_n) begin
@@ -177,6 +191,8 @@ module esp32_spi_slave (
             spi_miso <= 1'b0;
         else if (!cs_active)
             spi_miso <= 1'b0;  // Tri-state equivalent (drive low when inactive)
+        else if (tx_load)
+            spi_miso <= tx_data[7];  // IMMEDIATE: When new data loaded, output MSB
         else if (cs_rising_edge)
             spi_miso <= tx_shift[7];  // Output MSB at start
         else if (spi_clk_falling)

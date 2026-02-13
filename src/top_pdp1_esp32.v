@@ -77,7 +77,7 @@ module top_pdp1_esp32
     input  wire [3:0]  sw,             // SW[3:0] active-high
 
     // ==== LED Indicators ====
-    output wire [7:0]  led,            // LED[7:0] active-high
+    output reg [7:0]  led,             // LED[7:0] active-high (reg for debug in always block)
 
     // ==== HDMI Output (GPDI differential pairs) ====
     output wire [3:0]  gpdi_dp,        // TMDS positive (active)
@@ -430,24 +430,81 @@ module top_pdp1_esp32
     (* ASYNC_REG = "TRUE" *) reg [2:0] r_osd_status_sync_meta, r_osd_status_sync;
     reg [2:0] r_osd_status_prev;  // For edge detection
 
+    // -------------------------------------------------------------------------
+    // LED Debug: Sticky signals for visual debugging
+    // -------------------------------------------------------------------------
+    // Fast SPI signals are latched so they stay ON long enough to see.
+    // Clear on button press (btn[6]) for manual reset.
+    // NOTE: w_debug_* signals are connected later in esp32_osd instance
+    // -------------------------------------------------------------------------
+    reg r_spi_cs_seen;        // CS# went LOW at least once
+    reg r_spi_activity_seen;  // SPI clock toggled while CS active
+    reg r_osd_enable_seen;    // OSD enable command received (sticky)
+    reg r_osd_write_seen;     // OSD buffer write occurred (sticky)
+    reg r_spi_rx_seen;        // SPI RX valid seen (sticky)
+    reg [23:0] r_led_blink;   // Blink counter for heartbeat
+
     always @(posedge clk_cpu) begin
         if (~rst_cpu_n) begin
             r_osd_status_sync_meta <= 3'b0;
             r_osd_status_sync      <= 3'b0;
             r_osd_status_prev      <= 3'b0;
+            r_spi_cs_seen          <= 1'b0;
+            r_spi_activity_seen    <= 1'b0;
+            r_osd_enable_seen      <= 1'b0;
+            r_osd_write_seen       <= 1'b0;
+            r_spi_rx_seen          <= 1'b0;
+            r_led_blink            <= 24'd0;
+            led                    <= 8'b0;
         end else begin
             // 2-stage synchronizer for status bits [2:0]
             r_osd_status_sync_meta <= w_osd_status[2:0];
             r_osd_status_sync      <= r_osd_status_sync_meta;
             r_osd_status_prev      <= r_osd_status_sync;
-            led[0] <= esp32_spi_clk;
-            led[1] <= esp32_spi_mosi;
-            led[2] <= esp32_spi_miso;
-            led[3] <= esp32_spi_cs_n;
-            led[4] <= esp32_osd_irq;
-            led[5] <= esp32_ready;
-            led[6] <= w_ioctl_download;
-            led[7] <= w_ioctl_wr;            
+
+            // Blink counter for heartbeat (shows FPGA is running)
+            r_led_blink <= r_led_blink + 1'b1;
+
+            // Sticky debug signals - latch when event occurs
+            // NOTE: These check RAW pins before synchronizers
+            if (~esp32_spi_cs_n)
+                r_spi_cs_seen <= 1'b1;
+            if (~esp32_spi_cs_n && esp32_spi_clk)
+                r_spi_activity_seen <= 1'b1;
+            // Check synchronized signals from SPI slave module
+            if (w_debug_spi_rx_valid)
+                r_spi_rx_seen <= 1'b1;
+            if (w_debug_osd_enable)
+                r_osd_enable_seen <= 1'b1;
+            if (w_debug_osd_wr_en)
+                r_osd_write_seen <= 1'b1;
+
+            // Clear sticky flags on btn[6] press (active-low, directly from hardware)
+            if (~btn[6]) begin
+                r_spi_cs_seen       <= 1'b0;
+                r_spi_activity_seen <= 1'b0;
+                r_osd_enable_seen   <= 1'b0;
+                r_osd_write_seen    <= 1'b0;
+                r_spi_rx_seen       <= 1'b0;
+            end
+
+            // LED mapping for OSD debug (active-high = ON):
+            // LED[0] = Heartbeat (blink ~3Hz shows FPGA is running)
+            // LED[1] = SPI CS# seen (sticky - goes ON when CS goes LOW)
+            // LED[2] = SPI activity seen (sticky - CLK toggled while CS active)
+            // LED[3] = CS# current state (inverted - ON when CS active)
+            // LED[4] = OSD IRQ pending
+            // LED[5] = ESP32 ready signal
+            // LED[6] = File download active (ioctl_download)
+            // LED[7] = File write strobe (ioctl_wr) - blinks during file transfer
+            led[0] <= r_led_blink[23];   // Heartbeat ~3Hz
+            led[1] <= r_spi_cs_seen;      // CS# went active at least once
+            led[2] <= r_spi_activity_seen; // SPI clock activity detected
+            led[3] <= ~esp32_spi_cs_n;    // CS# current (inverted for ON=active)
+            led[4] <= esp32_osd_irq;      // OSD IRQ to ESP32
+            led[5] <= esp32_ready;        // ESP32 ready
+            led[6] <= w_ioctl_download;   // RIM download in progress
+            led[7] <= w_ioctl_wr;         // Write strobe to RIM loader
         end
     end
 
@@ -914,6 +971,11 @@ module top_pdp1_esp32
     wire        w_rim_char_available;
     wire [17:0] w_rim_tape_word;
 
+    // Debug signals from ESP32 OSD module
+    wire        w_debug_osd_enable;
+    wire        w_debug_osd_wr_en;
+    wire        w_debug_spi_rx_valid;
+
     esp32_osd #(
         .OSD_COLOR    (3'd4),       // Blue OSD color
         .OSD_X_OFFSET (12'd384),    // Centered for 1024x768
@@ -953,8 +1015,35 @@ module top_pdp1_esp32
         .ioctl_wr       (w_ioctl_wr),
         .ioctl_addr     (w_ioctl_addr),
         .ioctl_dout     (w_ioctl_dout),
-        .ioctl_wait     (w_ioctl_wait)
+        .ioctl_wait     (w_ioctl_wait),
+        // Debug outputs
+        .debug_osd_enable   (w_debug_osd_enable),
+        .debug_osd_wr_en    (w_debug_osd_wr_en),
+        .debug_spi_rx_valid (w_debug_spi_rx_valid),
+        // Fallback OSD enable via DIP switch SW[2]
+        // When SW[2]=ON, OSD is always visible (for testing without SPI)
+        .ext_osd_enable     (sw[2])
     );
+
+    // -------------------------------------------------------------------------
+    // LED Debug: Sticky OSD signals (clk_cpu domain)
+    // -------------------------------------------------------------------------
+    // Update sticky signals based on debug outputs from esp32_osd.
+    // This block runs in clk_cpu domain, same as esp32_osd.clk_sys.
+    // -------------------------------------------------------------------------
+    always @(posedge clk_cpu) begin
+        if (~rst_cpu_n) begin
+            // Reset handled in main LED always block above
+        end else begin
+            // Latch OSD debug signals (sticky)
+            if (w_debug_osd_enable)
+                r_osd_enable_seen <= 1'b1;
+            if (w_debug_osd_wr_en)
+                r_osd_write_seen <= 1'b1;
+            if (w_debug_spi_rx_valid)
+                r_spi_rx_seen <= 1'b1;
+        end
+    end
 
     // =========================================================================
     // RIM PAPER TAPE LOADER FSM (clk_cpu domain)
@@ -1249,10 +1338,16 @@ module top_pdp1_esp32
     // LED[5] = CPU reset active (should be 0 during normal operation)
     // LED[6] = cpu_running from CPU debug
     // LED[7] = PLL locked
+    //
+    // NOTE: When ESP32_OSD is defined, LEDs are driven by the ESP32 debug
+    // always block above. These assigns are only active when ESP32_OSD
+    // is NOT defined but ENABLE_LED_DEBUG IS defined.
+`ifndef ESP32_OSD
     assign led[4:0] = w_cpu_debug_state[4:0];
     assign led[5] = ~rst_cpu_n;  // 1 = reset active
     assign led[6] = w_cpu_debug_running;
     assign led[7] = w_pll_locked;
+`endif
 //`else
     // LED DEBUG disabled - all LEDs off
     //assign led = 8'b0;

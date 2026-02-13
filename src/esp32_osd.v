@@ -73,7 +73,16 @@ module esp32_osd #(
     output        ioctl_wr,
     output [24:0] ioctl_addr,
     output  [7:0] ioctl_dout,
-    input         ioctl_wait
+    input         ioctl_wait,
+
+    // Debug outputs (active-high indicators)
+    output        debug_osd_enable,   // OSD enable register state
+    output        debug_osd_wr_en,    // OSD buffer write enable (pulse)
+    output        debug_spi_rx_valid, // SPI received valid byte (pulse)
+
+    // Fallback OSD enable (OR'd with SPI-controlled enable)
+    // Use this with a DIP switch to test OSD without SPI
+    input         ext_osd_enable
 );
 
     // =========================================================================
@@ -209,6 +218,9 @@ module esp32_osd #(
     // =========================================================================
     // Clock Domain Crossing: osd_enable (clk_sys -> clk_video)
     // =========================================================================
+    // osd_enable_combined = SPI-controlled OR external (fallback) enable
+    wire osd_enable_combined = osd_enable | ext_osd_enable;
+
     reg [2:0] osd_enable_sync_reg;
     wire      osd_enable_sync = osd_enable_sync_reg[2];
 
@@ -216,7 +228,7 @@ module esp32_osd #(
         if (!rst_n)
             osd_enable_sync_reg <= 3'b000;
         else
-            osd_enable_sync_reg <= {osd_enable_sync_reg[1:0], osd_enable};
+            osd_enable_sync_reg <= {osd_enable_sync_reg[1:0], osd_enable_combined};
     end
 
     // =========================================================================
@@ -257,7 +269,7 @@ module esp32_osd #(
             current_cmd    <= 8'h00;
             osd_line_num   <= 4'd0;
             osd_char_cnt   <= 5'd0;
-            osd_enable     <= 1'b0;
+            osd_enable     <= 1'b0;  // Will be set by SPI command or fallback timer
             osd_wr_addr    <= 12'd0;
             osd_wr_data    <= 8'd0;
             osd_wr_en      <= 1'b0;
@@ -548,5 +560,10 @@ module esp32_osd #(
 
     // IRQ output
     assign osd_irq = irq_pending;
+
+    // Debug outputs
+    assign debug_osd_enable   = osd_enable;
+    assign debug_osd_wr_en    = osd_wr_en;
+    assign debug_spi_rx_valid = spi_rx_valid;
 
 endmodule
