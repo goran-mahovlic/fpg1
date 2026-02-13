@@ -1,0 +1,287 @@
+# =============================================================================
+# ULX3S v3.1.7 Constraint File for PDP-1 Emulator
+# =============================================================================
+# TASK-196: Pin Assignment for ULX3S v3.1.7
+# Author: Kosjenka Vukovic, REGOC team
+# Date: 2026-01-31
+# HDL Best Practices Audit: Kosjenka/REGOC team
+#
+# HARDWARE: ULX3S v3.1.7 (LFE5U-85F-6BG381C)
+# Reference: https://github.com/emard/ulx3s
+# =============================================================================
+
+# Block async and reset paths for timing analysis
+BLOCK RESETPATHS;
+BLOCK ASYNCPATHS;
+
+# =============================================================================
+# SYSTEM CLOCK
+# =============================================================================
+# 25 MHz onboard oscillator
+LOCATE COMP "clk_25mhz" SITE "G2";
+IOBUF  PORT "clk_25mhz" PULLMODE=NONE IO_TYPE=LVCMOS33;
+FREQUENCY PORT "clk_25mhz" 25 MHZ;
+
+# =============================================================================
+# SPI FLASH & CONFIGURATION
+# =============================================================================
+SYSCONFIG CONFIG_IOVOLTAGE=3.3 COMPRESS_CONFIG=ON MCCLK_FREQ=62
+          SLAVE_SPI_PORT=DISABLE MASTER_SPI_PORT=ENABLE
+          SLAVE_PARALLEL_PORT=DISABLE;
+
+# =============================================================================
+# PUSHBUTTONS (active low on board)
+# =============================================================================
+# BTN[0] = PWR (under FPGA, directly affects ESP32)
+# BTN[1-6] = User buttons
+LOCATE COMP "btn[0]" SITE "D6";   # BTN_PWRn (active low)
+LOCATE COMP "btn[1]" SITE "R1";   # UP / FIRE1
+LOCATE COMP "btn[2]" SITE "T1";   # DOWN / FIRE2
+LOCATE COMP "btn[3]" SITE "R18";  # LEFT
+LOCATE COMP "btn[4]" SITE "V1";   # RIGHT / DOWN orig
+LOCATE COMP "btn[5]" SITE "U1";   # F1 / LEFT orig
+LOCATE COMP "btn[6]" SITE "H16";  # F2 / RIGHT orig
+
+IOBUF PORT "btn[0]" PULLMODE=UP IO_TYPE=LVCMOS33;
+IOBUF PORT "btn[1]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+IOBUF PORT "btn[2]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+IOBUF PORT "btn[3]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+IOBUF PORT "btn[4]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+IOBUF PORT "btn[5]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+IOBUF PORT "btn[6]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+
+# =============================================================================
+# DIP SWITCHES
+# =============================================================================
+# SW[0] = Player 2 mode modifier
+# SW[1] = Single player mode
+# SW[2] = Reserved
+# SW[3] = CRT/Test pattern select
+LOCATE COMP "sw[0]" SITE "E8";    # SW1
+LOCATE COMP "sw[1]" SITE "D8";    # SW2
+LOCATE COMP "sw[2]" SITE "D7";    # SW3
+LOCATE COMP "sw[3]" SITE "E7";    # SW4
+
+IOBUF PORT "sw[0]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+IOBUF PORT "sw[1]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+IOBUF PORT "sw[2]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+IOBUF PORT "sw[3]" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+
+# =============================================================================
+# LED INDICATORS
+# =============================================================================
+# LED[7] = PLL locked
+# LED[6] = Single player mode
+# LED[5] = P2 mode active
+# LED[4] = Test pattern mode
+# LED[3:0] = Player controls feedback
+LOCATE COMP "led[7]" SITE "H3";
+LOCATE COMP "led[6]" SITE "E1";
+LOCATE COMP "led[5]" SITE "E2";
+LOCATE COMP "led[4]" SITE "D1";
+LOCATE COMP "led[3]" SITE "D2";
+LOCATE COMP "led[2]" SITE "C1";
+LOCATE COMP "led[1]" SITE "C2";
+LOCATE COMP "led[0]" SITE "B2";
+
+IOBUF PORT "led[0]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[1]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[2]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[3]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[4]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[5]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[6]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[7]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+
+# =============================================================================
+# HDMI/GPDI OUTPUT (Digital Video Interface)
+# =============================================================================
+# TMDS differential pairs for DVI/HDMI output
+# Format: [3]=Clock, [2]=Red, [1]=Green, [0]=Blue
+LOCATE COMP "gpdi_dp[0]" SITE "A16";  # Blue +
+LOCATE COMP "gpdi_dn[0]" SITE "B16";  # Blue -
+LOCATE COMP "gpdi_dp[1]" SITE "A14";  # Green +
+LOCATE COMP "gpdi_dn[1]" SITE "C14";  # Green -
+LOCATE COMP "gpdi_dp[2]" SITE "A12";  # Red +
+LOCATE COMP "gpdi_dn[2]" SITE "A13";  # Red -
+LOCATE COMP "gpdi_dp[3]" SITE "A17";  # Clock +
+LOCATE COMP "gpdi_dn[3]" SITE "B18";  # Clock -
+
+IOBUF PORT "gpdi_dp[0]" IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gpdi_dn[0]" IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gpdi_dp[1]" IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gpdi_dn[1]" IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gpdi_dp[2]" IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gpdi_dn[2]" IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gpdi_dp[3]" IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gpdi_dn[3]" IO_TYPE=LVCMOS33 DRIVE=4;
+
+# =============================================================================
+# GPDI Control Pins (HDMI HPD workaround) - TASK-214, TASK-215
+# =============================================================================
+# gpdi_scl = I2C DDC SCL - drive HIGH for HPD workaround
+# Some monitors use DDC activity as wake-up indication
+LOCATE COMP "gpdi_scl" SITE "E12";
+IOBUF PORT "gpdi_scl" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;
+
+# gpdi_hpd = HDMI Hot Plug Detect (TASK-216 FIX)
+# Pin B20 is the actual HPD pin on ULX3S GPDI connector
+# HPD is INPUT - monitor pulls HIGH when connected, FPGA reads it
+# PULLMODE=DOWN so HPD=0 when monitor not connected, HPD=1 when connected
+LOCATE COMP "gpdi_hpd" SITE "B20";
+IOBUF PORT "gpdi_hpd" IO_TYPE=LVCMOS33 PULLMODE=DOWN;
+
+# =============================================================================
+# WIFI/ESP32 CONTROL
+# =============================================================================
+# wifi_gpio0=1 keeps ESP32 from rebooting the FPGA
+LOCATE COMP "wifi_gpio0" SITE "L2";
+IOBUF PORT "wifi_gpio0" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;
+
+# =============================================================================
+# WIFI SERIAL (ESP32 UART PASSTHROUGH)
+# =============================================================================
+# wifi_rxd = FPGA transmits to ESP32 (K3)
+# wifi_txd = FPGA receives from ESP32 (K4)
+# Used for WebREPL access via USB FTDI
+LOCATE COMP "wifi_rxd" SITE "K3";
+LOCATE COMP "wifi_txd" SITE "K4";
+IOBUF PORT "wifi_rxd" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "wifi_txd" PULLMODE=UP IO_TYPE=LVCMOS33;
+
+# =============================================================================
+# FTDI UART (Debug Serial Output + Serial Loader Input)
+# =============================================================================
+# FPGA TX -> FTDI RX -> PC (serial output)
+# FPGA RX <- FTDI TX <- PC (serial input for loader)
+# Pin L4 is FTDI_RXD on ULX3S v3.1.7 (FPGA transmits)
+# Pin M1 is FTDI_TXD on ULX3S v3.1.7 (FPGA receives)
+LOCATE COMP "ftdi_rxd" SITE "L4";
+IOBUF PORT "ftdi_rxd" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+
+# FTDI TXD - FPGA receives from PC (for serial loader)
+# Used when SERIAL_LOADER is enabled
+LOCATE COMP "ftdi_txd" SITE "M1";
+IOBUF PORT "ftdi_txd" PULLMODE=UP IO_TYPE=LVCMOS33;
+
+# =============================================================================
+# TIMING CONSTRAINTS
+# =============================================================================
+# Primary clock: 25 MHz input
+FREQUENCY PORT "clk_25mhz" 25 MHZ;
+
+# Generated clocks (for reference, actual timing comes from PLL)
+# - clk_shift: 375 MHz (HDMI DDR mode)
+# - clk_pixel: 75 MHz (1280x1024 @ ~50Hz)
+# - clk_cpu: 50 MHz (PDP-1 base clock)
+
+# False paths for CDC (clock domain crossing) signals
+# These are handled by synchronizers in clock_domain.v
+# BLOCK PATH FROM CELL "*cpu_fb_*" TO CELL "*vid_fb_*";
+# BLOCK PATH FROM CELL "*vid_vblank*" TO CELL "*cpu_vblank*";
+
+# =============================================================================
+# GPIO PINS FOR ADC MAX11123 (OSCILLOSCOPE)
+# =============================================================================
+# ADC SPI interface on GPIO 14-15 (directly on ADC pins on ULX3S)
+# =============================================================================
+LOCATE COMP "gp14" SITE "U18";   # ADC CSN (chip select, active low)
+LOCATE COMP "gn14" SITE "U17";   # ADC MOSI (master out)
+LOCATE COMP "gp15" SITE "N17";   # ADC SCLK (SPI clock)
+LOCATE COMP "gn15" SITE "P16";   # ADC MISO (master in)
+
+IOBUF PORT "gp14" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gn14" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gp15" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gn15" PULLMODE=UP IO_TYPE=LVCMOS33;
+
+# =============================================================================
+# END OF CONSTRAINT FILE
+# =============================================================================
+# =============================================================================
+# ULX3S v3.1.7 ESP32 SPI Pin Constraints for OSD
+# =============================================================================
+# TASK-208: ESP32 SPI Pin Assignment for OSD integration
+# Author: Kosjenka Vukovic, REGOC team
+# Date: 2026-01-31
+# Fixed: 2026-02-12 by EMARD agent - corrected to use direct wifi_gpio pins
+#
+# HARDWARE: ULX3S v3.1.7 (LFE5U-85F-6BG381C)
+# Reference: https://github.com/emard/ulx3s
+#
+# ESP32 SPI communication for OSD (On-Screen Display)
+# Uses DIRECT wifi_gpio pins (PCB-wired, no external cables needed!)
+#
+# ESP32 GPIO -> FPGA Site mapping for ULX3S v3.1.7:
+#   GPIO 19 (CS)   -> N4 (wifi_gpio19)
+#   GPIO 26 (SCK)  -> L1 (wifi_gpio26)
+#   GPIO 4  (MOSI) -> H1 (sd_d1_irq, shared with SD card)
+#   GPIO 12 (MISO) -> K1 (sd_d2, shared with SD card)
+#
+# NOTE: GPIO 4 and 12 are shared with SD card. The ESP32 releases SD pins
+#       before SPI OSD operations (see release_sd_pins() in ld_pdp1.py)
+# =============================================================================
+
+# =============================================================================
+# ESP32 SPI Interface for OSD (Direct wifi_gpio pins)
+# =============================================================================
+# SPI Mode 0 (CPOL=0, CPHA=0)
+# Max SPI clock: 3 MHz (reduced for stability over shared pins)
+# =============================================================================
+
+# ESP32 SPI Clock (GPIO 26 -> FPGA L1)
+# Direct wifi_gpio26 connection on ULX3S v3.1.7
+LOCATE COMP "esp32_spi_clk"  SITE "L1";   # wifi_gpio26 (direct PCB connection)
+IOBUF  PORT "esp32_spi_clk"  PULLMODE=DOWN IO_TYPE=LVCMOS33;
+
+# ESP32 SPI MOSI (GPIO 4 -> FPGA H1)
+# Shared with SD card d1/irq - must release SD before use
+LOCATE COMP "esp32_spi_mosi" SITE "H1";   # wifi_gpio4 / sd_d1_irq
+IOBUF  PORT "esp32_spi_mosi" PULLMODE=DOWN IO_TYPE=LVCMOS33;
+
+# ESP32 SPI MISO (GPIO 12 -> FPGA K1)
+# Shared with SD card d2 - must release SD before use
+LOCATE COMP "esp32_spi_miso" SITE "K1";   # wifi_gpio12 / sd_d2
+IOBUF  PORT "esp32_spi_miso" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=8;
+
+# ESP32 SPI Chip Select (GPIO 19 -> FPGA N4)
+# Direct wifi_gpio19 connection on ULX3S v3.1.7
+LOCATE COMP "esp32_spi_cs_n" SITE "N4";   # wifi_gpio19 (direct PCB connection)
+IOBUF  PORT "esp32_spi_cs_n" PULLMODE=UP IO_TYPE=LVCMOS33;
+
+# ESP32 OSD IRQ - FPGA output to ESP32
+# Using wifi_gpio25 (E9) for interrupt
+LOCATE COMP "esp32_osd_irq"  SITE "E9";   # wifi_gpio25
+IOBUF  PORT "esp32_osd_irq"  PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=8;
+
+# ESP32 Ready Signal - ESP32 input to FPGA
+# Using wifi_gpio27 (N3) for handshake
+LOCATE COMP "esp32_ready"    SITE "N3";   # wifi_gpio27
+IOBUF  PORT "esp32_ready"    PULLMODE=DOWN IO_TYPE=LVCMOS33;
+
+# =============================================================================
+# Timing Constraints for ESP32 SPI
+# =============================================================================
+# SPI clock is asynchronous to system clock
+# Max frequency: 3 MHz from ESP32 (reduced for stability)
+# =============================================================================
+
+# Note: SPI clock is treated as asynchronous
+# CDC (Clock Domain Crossing) handled in esp32_spi_slave.v with synchronizers
+
+# =============================================================================
+# Pin Assignment Summary (Direct wifi_gpio pins):
+# =============================================================================
+#   Signal          | Site | ESP32 GPIO | Direction | Description
+#   ----------------|------|------------|-----------|----------------------------
+#   esp32_spi_clk   | L1   | GPIO 26    | Input     | SPI clock from ESP32
+#   esp32_spi_mosi  | H1   | GPIO 4     | Input     | Data from ESP32 (SD shared)
+#   esp32_spi_miso  | K1   | GPIO 12    | Output    | Data to ESP32 (SD shared)
+#   esp32_spi_cs_n  | N4   | GPIO 19    | Input     | Chip select (active low)
+#   esp32_osd_irq   | E9   | GPIO 25    | Output    | Interrupt to ESP32
+#   esp32_ready     | N3   | GPIO 27    | Input     | Handshake from ESP32
+# =============================================================================
+
+# =============================================================================
+# END OF ESP32 CONSTRAINT FILE
+# =============================================================================

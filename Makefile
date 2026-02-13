@@ -185,12 +185,15 @@ PDP1_ANIM_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
 # =============================================================================
 # PDP-1 + ESP32 OSD CONFIGURATION
 # =============================================================================
+# Uses dedicated top_pdp1_esp32.v module and ulx3s_v317_pdp1_esp32.lpf
+# for ESP32 SPI OSD and RIM file loading support
+# =============================================================================
 PDP1_ESP32_PROJECT     := pdp1_esp32
-PDP1_ESP32_TOP_MODULE  := top_pdp1
+PDP1_ESP32_TOP_MODULE  := top_pdp1_esp32
 PDP1_ESP32_JSON_FILE   := $(BUILD_DIR)/$(PDP1_ESP32_PROJECT).json
 PDP1_ESP32_CONFIG_FILE := $(BUILD_DIR)/$(PDP1_ESP32_PROJECT).config
 PDP1_ESP32_BIT_FILE    := $(BUILD_DIR)/$(PDP1_ESP32_PROJECT).bit
-PDP1_ESP32_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1.lpf
+PDP1_ESP32_LPF_FILE    := $(SRC_DIR)/ulx3s_v317_pdp1_esp32.lpf
 
 # ESP32 OSD modules
 ESP32_OSD_FILES  := $(SRC_DIR)/esp32_spi_slave.v \
@@ -198,8 +201,11 @@ ESP32_OSD_FILES  := $(SRC_DIR)/esp32_spi_slave.v \
                     $(SRC_DIR)/esp32_osd_renderer.v \
                     $(SRC_DIR)/esp32_osd.v
 
-# PDP-1 + ESP32 - all Verilog source files
-PDP1_ESP32_V_FILES := $(PDP1_V_FILES) $(ESP32_OSD_FILES)
+# PDP-1 + ESP32 - uses top_pdp1_esp32.v instead of top_pdp1.v
+# NOTE: Excludes top_pdp1.v from PDP1_V_FILES, adds top_pdp1_esp32.v
+PDP1_ESP32_V_FILES := $(filter-out $(SRC_DIR)/top_pdp1.v,$(PDP1_V_FILES)) \
+                      $(SRC_DIR)/top_pdp1_esp32.v \
+                      $(ESP32_OSD_FILES)
 
 # =============================================================================
 # TEST PATTERN CONFIGURATION (TASK-125)
@@ -605,7 +611,7 @@ $(PDP1_ESP32_JSON_FILE): $(PDP1_SV_FILES) $(PDP1_ESP32_V_FILES) | $(BUILD_DIR)
 	@echo "========================================"
 	$(YOSYS) -p "\
 		read_verilog -sv $(PDP1_SV_FILES); \
-		read_verilog -DESP32_OSD -I$(SRC_DIR) $(PDP1_ESP32_V_FILES); \
+		read_verilog $(DEFINES) -I$(SRC_DIR) $(PDP1_ESP32_V_FILES); \
 		hierarchy -top $(PDP1_ESP32_TOP_MODULE); \
 		synth_ecp5 $(YOSYS_FLAGS) -json $@" \
 		2>&1 | tee $(BUILD_DIR)/pdp1_esp32_synth.log
