@@ -254,7 +254,7 @@ def test():
         ld._cs_active()
         spi.write(bytearray([CMD_OSD_ENABLE]))
         ld._cs_inactive()
-        time.sleep_ms(500)
+        time.sleep_ms(5000)
 
         ld._cs_active()
         spi.write(bytearray([CMD_OSD_DISABLE]))

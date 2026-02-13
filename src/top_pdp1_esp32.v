@@ -446,6 +446,8 @@ module top_pdp1_esp32
             led[3] <= esp32_spi_cs_n;
             led[4] <= esp32_osd_irq;
             led[5] <= esp32_ready;
+            led[6] <= w_ioctl_download;
+            led[7] <= w_ioctl_wr;            
         end
     end
 
@@ -1249,9 +1251,9 @@ module top_pdp1_esp32
     assign led[5] = ~rst_cpu_n;  // 1 = reset active
     assign led[6] = w_cpu_debug_running;
     assign led[7] = w_pll_locked;
-`else
+//`else
     // LED DEBUG disabled - all LEDs off
-    assign led = 8'b0;
+    //assign led = 8'b0;
 `endif
 
     // =========================================================================

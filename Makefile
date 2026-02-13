@@ -99,7 +99,8 @@ ECPPACK_FLAGS := --compress --freq 62.0
 # Uncomment lines below to enable debug features:
 # DEFINES += -DENABLE_UART_DEBUG
 # DEFINES += -DENABLE_LED_DEBUG
-DEFINES += -DSERIAL_LOADER
+# DEFINES += -DSERIAL_LOADER
+DEFINES += -DESP32_OSD
 # =============================================================================
 
 # =============================================================================
