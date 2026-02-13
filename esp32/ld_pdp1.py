@@ -8,16 +8,6 @@
 # - Added gc.collect() for memory management
 # - Fixed CS pin logic to match emard's osd.py
 #
-# FIXED 2026-02-13: Continuous CS transfer by Jelena Kovacevic
-# - Problem: CS was deactivated after each chunk, causing FSM reset
-# - Solution: Single CS cycle for entire file transfer
-# - CMD_FILE_TX_DATA (0x54) sent ONCE at start, then raw data bytes
-#
-# ADDED 2026-02-13: IRQ support by Jelena Kovacevic
-# - FPGA raises IRQ on GPIO25 when button state changes
-# - ESP32 IRQ handler reads button status via CMD_READ_BTN (0xFB)
-# - OSD menu can react to button presses
-#
 # Usage:
 #   import ld_pdp1
 #   ld = ld_pdp1.ld_pdp1(spi, cs)
@@ -61,8 +51,31 @@ CMD_READ_IRQ     = const(0xF1)  # Read IRQ flags
 CMD_OSD_WRITE    = const(0x20)  # Write OSD line (0x20-0x2F for lines 0-15)
 
 # IRQ pin from FPGA (wifi_gpio25 = E9 on ULX3S v3.1.7)
-# Check LPF: esp32_osd_irq is on site E9 which maps to ESP32 GPIO25
 gpio_irq = const(25)
+
+# =============================================================================
+# Button Bit Masks (ACTIVE-HIGH after FPGA debounce)
+# =============================================================================
+# ULX3S button mapping from ulx3s_input.v:
+#   BTN[0] = PWR (DO NOT USE - it's RESET!)
+#   BTN[1] = UP
+#   BTN[2] = DOWN
+#   BTN[3] = LEFT
+#   BTN[4] = RIGHT
+#   BTN[5] = F1
+#   BTN[6] = F2
+# =============================================================================
+BTN_UP    = const(0x02)  # btn[1]
+BTN_DOWN  = const(0x04)  # btn[2]
+BTN_LEFT  = const(0x08)  # btn[3]
+BTN_RIGHT = const(0x10)  # btn[4]
+BTN_F1    = const(0x20)  # btn[5]
+BTN_F2    = const(0x40)  # btn[6]
+
+# OSD toggle combo: ALL buttons EXCEPT PWR (btn[0])
+# Press UP+DOWN+LEFT+RIGHT+F1+F2 simultaneously to toggle OSD
+OSD_COMBO = const(BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT | BTN_F1 | BTN_F2)
+# = 0x7E (binary: 01111110)
 
 # File type index for RIM files
 FILE_INDEX_RIM = const(1)
@@ -128,63 +141,14 @@ class ld_pdp1:
         self._cs_inactive()
 
     def file_tx_data(self, data):
-        """Send file data bytes (legacy - CS per chunk)
-
-        NOTE: For better performance, use start_file_transfer() /
-        send_file_chunk() / end_file_transfer() for continuous transfer.
-        """
+        """Send file data bytes"""
         self._cs_active()
         self.spi.write(bytearray([CMD_FILE_TX_DATA]))
         self.spi.write(data)
         self._cs_inactive()
 
-    # =========================================================================
-    # Continuous File Transfer API (FIXED 2026-02-13)
-    # =========================================================================
-    # These methods keep CS active during entire file transfer.
-    # This prevents FSM reset between chunks in esp32_osd.v
-    # =========================================================================
-
-    def start_file_transfer(self):
-        """Start continuous file transfer - CS stays active
-
-        Must call end_file_transfer() when done!
-        """
-        self._cs_active()
-        self.spi.write(bytearray([CMD_FILE_TX_DATA]))  # Command ONCE
-        self._transfer_active = True
-
-    def send_file_chunk(self, data):
-        """Send raw data chunk during active transfer
-
-        Args:
-            data: bytes/bytearray to send (NO command prefix!)
-
-        Raises:
-            RuntimeError: if start_file_transfer() not called
-        """
-        if not getattr(self, '_transfer_active', False):
-            raise RuntimeError("Call start_file_transfer() first")
-        self.spi.write(data)
-
-    def end_file_transfer(self):
-        """End continuous file transfer - deactivates CS"""
-        self._cs_inactive()
-        self._transfer_active = False
-
     def load(self, filename, verbose=True):
-        """Load RIM paper tape file to PDP-1
-
-        FIXED 2026-02-13: Uses continuous CS transfer.
-        Previous version deactivated CS after each chunk, which caused
-        the FSM in esp32_osd.v to reset to IDLE state, losing file_download.
-
-        Now uses single CS cycle for entire file:
-        1. CS active
-        2. Send CMD_FILE_TX_DATA (0x54) ONCE
-        3. Stream all data bytes (no command prefix per chunk)
-        4. CS inactive
-        """
+        """Load RIM paper tape file to PDP-1"""
 
         # Check file exists
         try:
@@ -207,41 +171,33 @@ class ld_pdp1:
         # Set file index for RIM type
         self.file_index(FILE_INDEX_RIM)
 
-        # Enable file transfer mode in FPGA
+        # Enable file transfer
         self.file_tx_enable(True)
 
-        # Stream file with CONTINUOUS CS (FIXED!)
+        # Stream file in chunks
         CHUNK_SIZE = 256
         total_sent = 0
-
-        # Start continuous transfer - CS active, command sent ONCE
-        self.start_file_transfer()
 
         try:
             while True:
                 chunk = f.read(CHUNK_SIZE)
                 if not chunk:
                     break
-                # Send raw data - NO command prefix per chunk!
-                self.send_file_chunk(chunk)
+                self.file_tx_data(chunk)
                 total_sent += len(chunk)
                 if verbose and total_sent % 1024 == 0:
                     print("  {}/{} bytes".format(total_sent, filesize))
-
+                    gc.collect()  # Prevent memory fragmentation
         except Exception as e:
             print("Error during transfer: {}".format(e))
-            self.end_file_transfer()  # Deactivate CS on error
             f.close()
             self.file_tx_enable(False)
             gc.collect()
             return False
 
-        # End transfer (deactivate CS) - MUST be after all data sent
-        self.end_file_transfer()
-
         f.close()
 
-        # Disable file transfer mode
+        # Disable file transfer
         self.file_tx_enable(False)
 
         if verbose:
@@ -360,17 +316,21 @@ def test_minimal():
 
 
 # =============================================================================
-# OSD Controller with IRQ Support (ADDED 2026-02-13)
+# OSD Controller with IRQ Support and COMBO Detection
 # =============================================================================
-# Provides interactive OSD menu with button handling via IRQ.
-# Based on emard's osd.py IRQ handler pattern.
+# ADDED 2026-02-13 by Jelena Kovacevic
+#
+# OSD Menu is toggled by pressing ALL buttons simultaneously:
+#   UP + DOWN + LEFT + RIGHT + F1 + F2 = "secret combo"
+#
+# BTN[0] (PWR) is NOT used because it's the RESET button!
 # =============================================================================
 
 class OsdController:
-    """OSD Controller with IRQ-driven button handling"""
+    """OSD Controller with IRQ-driven button handling and combo detection"""
 
     def __init__(self, spi=None, cs=None):
-        """Initialize OSD controller with optional existing SPI/CS"""
+        """Initialize OSD controller"""
         if spi is None or cs is None:
             self.spi, self.cs = init_spi()
         else:
@@ -398,15 +358,13 @@ class OsdController:
     # =========================================================================
 
     def setup_irq(self):
-        """Setup IRQ handler for FPGA button events
-
-        Call this to enable automatic button handling via interrupts.
-        """
+        """Setup IRQ handler for FPGA button events"""
         try:
             self.irq_pin = Pin(gpio_irq, Pin.IN, Pin.PULL_DOWN)
             self.irq_pin.irq(trigger=Pin.IRQ_RISING, handler=self._irq_handler)
             self._irq_enabled = True
-            print("IRQ handler installed on GPIO{}".format(gpio_irq))
+            print("IRQ handler on GPIO{}".format(gpio_irq))
+            print("OSD combo: UP+DOWN+LEFT+RIGHT+F1+F2")
         except Exception as e:
             print("IRQ setup failed: {}".format(e))
             self._irq_enabled = False
@@ -417,7 +375,6 @@ class OsdController:
             try:
                 self.irq_pin.irq(handler=None)
                 self._irq_enabled = False
-                print("IRQ handler disabled")
             except:
                 pass
 
@@ -426,36 +383,24 @@ class OsdController:
 
         This is called in ISR context - keep it fast!
         """
-        # Read IRQ flags first
-        irq_flags = self.read_irq_flags()
+        # Read button status (also clears IRQ in FPGA)
+        btn_status = self.read_buttons()
 
-        if irq_flags & 0x80:  # Button IRQ pending
-            # Read button status (this also clears IRQ in FPGA)
-            btn_status = self.read_buttons()
-            self._handle_button(btn_status)
-
-    def _handle_button(self, btn_status):
-        """Process button press
-
-        btn_status bits (active-high):
-          bit 0 = BTN[0] (PWR) - Toggle OSD
-          bit 1 = BTN[1] (UP)  - Menu up
-          bit 2 = BTN[2] (DOWN) - Menu down
-          bit 3 = BTN[3] (LEFT) - Back
-          bit 4 = BTN[4] (RIGHT) - Enter directory
-          bit 5 = BTN[5] (F1) - Select
-          bit 6 = BTN[6] (F2) - Cancel
-        """
-        if btn_status & 0x01:  # PWR button - toggle OSD
+        # Check for OSD combo (all 6 buttons pressed except PWR)
+        if (btn_status & OSD_COMBO) == OSD_COMBO:
             self.toggle_osd()
-        elif self.osd_visible:
-            if btn_status & 0x02:  # UP
+            return  # Don't process individual buttons when combo active
+
+        # Normal button handling when OSD is visible
+        if self.osd_visible:
+            if btn_status & BTN_UP:
                 self.menu_up()
-            elif btn_status & 0x04:  # DOWN
+            elif btn_status & BTN_DOWN:
                 self.menu_down()
-            elif btn_status & 0x20:  # F1 - Select
+            elif btn_status & BTN_F1:
                 self.menu_select()
-            elif btn_status & 0x40:  # F2 - Cancel/back
+            elif btn_status & BTN_F2:
+                # F2 = close OSD
                 self.osd_enable(False)
                 self.osd_visible = False
 
@@ -464,11 +409,7 @@ class OsdController:
     # =========================================================================
 
     def read_irq_flags(self):
-        """Read IRQ flags from FPGA
-
-        Returns:
-            int: IRQ flags (bit7 = button IRQ pending)
-        """
+        """Read IRQ flags from FPGA"""
         self._cs_active()
         self.spi.write(bytearray([CMD_READ_IRQ]))
         result = bytearray(1)
@@ -477,11 +418,7 @@ class OsdController:
         return result[0]
 
     def read_buttons(self):
-        """Read button status from FPGA (also clears button IRQ)
-
-        Returns:
-            int: Button status (bit6:0 = BTN[6:0], active-high)
-        """
+        """Read button status from FPGA (also clears button IRQ)"""
         self._cs_active()
         self.spi.write(bytearray([CMD_READ_BTN]))
         result = bytearray(1)
@@ -499,20 +436,13 @@ class OsdController:
         self._cs_inactive()
 
     def osd_write_line(self, line, text):
-        """Write text to OSD line
-
-        Args:
-            line: Line number (0-15)
-            text: Text string (max 32 chars, will be padded/truncated)
-        """
+        """Write text to OSD line (0-15, max 32 chars)"""
         if line < 0 or line > 15:
             return
-
         # Pad or truncate to 32 chars
         text = text[:32].ljust(32)
-
         self._cs_active()
-        self.spi.write(bytearray([CMD_OSD_WRITE + line]))  # 0x20 + line
+        self.spi.write(bytearray([CMD_OSD_WRITE + line]))
         self.spi.write(text.encode('ascii', errors='replace'))
         self._cs_inactive()
 
@@ -540,7 +470,6 @@ class OsdController:
             ("Load Snowflake", "/sd/pdp1/snowflake.rim"),
             ("Load Spacewar", "/sd/pdp1/spacewar.rim"),
             ("Load Pong", "/sd/pdp1/pong.rim"),
-            ("Browse Files", None),
         ]
         self.menu_cursor = 0
         self._draw_menu()
@@ -554,8 +483,13 @@ class OsdController:
             marker = ">" if i == self.menu_cursor else " "
             self.osd_write_line(2 + i, "{} {}".format(marker, name))
 
+        # Instructions
+        self.osd_write_line(7, "")
+        self.osd_write_line(8, "UP/DOWN: Navigate")
+        self.osd_write_line(9, "F1: Select  F2: Close")
+
         # Clear remaining lines
-        for i in range(2 + len(self.menu_items), 16):
+        for i in range(10, 16):
             self.osd_write_line(i, "")
 
     def menu_up(self):
@@ -577,12 +511,7 @@ class OsdController:
 
         name, path = self.menu_items[self.menu_cursor]
 
-        if path is None:
-            # Browse files - not implemented yet
-            self.osd_write_line(15, "Not implemented")
-            return
-
-        # Load the selected file
+        # Show loading message
         self.osd_write_line(15, "Loading...")
         self.osd_enable(False)
         self.osd_visible = False
@@ -610,10 +539,10 @@ def start_osd():
     Usage:
         import ld_pdp1
         osd = ld_pdp1.start_osd()
-        # Press PWR button to toggle OSD menu
+        # Press UP+DOWN+LEFT+RIGHT+F1+F2 to open menu
     """
     release_sd_pins()
     osd = OsdController()
     osd.setup_irq()
-    print("OSD ready. Press PWR button to open menu.")
+    print("OSD ready. Press ALL buttons to open menu.")
     return osd
