@@ -13,6 +13,11 @@
 # - Solution: Single CS cycle for entire file transfer
 # - CMD_FILE_TX_DATA (0x54) sent ONCE at start, then raw data bytes
 #
+# ADDED 2026-02-13: IRQ support by Jelena Kovacevic
+# - FPGA raises IRQ on GPIO25 when button state changes
+# - ESP32 IRQ handler reads button status via CMD_READ_BTN (0xFB)
+# - OSD menu can react to button presses
+#
 # Usage:
 #   import ld_pdp1
 #   ld = ld_pdp1.ld_pdp1(spi, cs)
@@ -51,6 +56,13 @@ CMD_FILE_INDEX   = const(0x55)
 CMD_STATUS       = const(0x1E)
 CMD_OSD_ENABLE   = const(0x41)
 CMD_OSD_DISABLE  = const(0x40)
+CMD_READ_BTN     = const(0xFB)  # Read button status (clears IRQ)
+CMD_READ_IRQ     = const(0xF1)  # Read IRQ flags
+CMD_OSD_WRITE    = const(0x20)  # Write OSD line (0x20-0x2F for lines 0-15)
+
+# IRQ pin from FPGA (wifi_gpio25 = E9 on ULX3S v3.1.7)
+# Check LPF: esp32_osd_irq is on site E9 which maps to ESP32 GPIO25
+gpio_irq = const(25)
 
 # File type index for RIM files
 FILE_INDEX_RIM = const(1)
@@ -345,3 +357,263 @@ def test_minimal():
     except Exception as e:
         print("SPI init FAILED: {}".format(e))
         return False
+
+
+# =============================================================================
+# OSD Controller with IRQ Support (ADDED 2026-02-13)
+# =============================================================================
+# Provides interactive OSD menu with button handling via IRQ.
+# Based on emard's osd.py IRQ handler pattern.
+# =============================================================================
+
+class OsdController:
+    """OSD Controller with IRQ-driven button handling"""
+
+    def __init__(self, spi=None, cs=None):
+        """Initialize OSD controller with optional existing SPI/CS"""
+        if spi is None or cs is None:
+            self.spi, self.cs = init_spi()
+        else:
+            self.spi = spi
+            self.cs = cs
+
+        self.osd_visible = False
+        self.menu_cursor = 0
+        self.menu_items = []
+        self._irq_enabled = False
+
+        # Ensure CS starts inactive
+        self.cs.off()
+
+    def _cs_active(self):
+        """Activate CS (active low)"""
+        self.cs.on()
+
+    def _cs_inactive(self):
+        """Deactivate CS"""
+        self.cs.off()
+
+    # =========================================================================
+    # IRQ Handling
+    # =========================================================================
+
+    def setup_irq(self):
+        """Setup IRQ handler for FPGA button events
+
+        Call this to enable automatic button handling via interrupts.
+        """
+        try:
+            self.irq_pin = Pin(gpio_irq, Pin.IN, Pin.PULL_DOWN)
+            self.irq_pin.irq(trigger=Pin.IRQ_RISING, handler=self._irq_handler)
+            self._irq_enabled = True
+            print("IRQ handler installed on GPIO{}".format(gpio_irq))
+        except Exception as e:
+            print("IRQ setup failed: {}".format(e))
+            self._irq_enabled = False
+
+    def disable_irq(self):
+        """Disable IRQ handler"""
+        if self._irq_enabled:
+            try:
+                self.irq_pin.irq(handler=None)
+                self._irq_enabled = False
+                print("IRQ handler disabled")
+            except:
+                pass
+
+    def _irq_handler(self, pin):
+        """Handle IRQ from FPGA - button state changed
+
+        This is called in ISR context - keep it fast!
+        """
+        # Read IRQ flags first
+        irq_flags = self.read_irq_flags()
+
+        if irq_flags & 0x80:  # Button IRQ pending
+            # Read button status (this also clears IRQ in FPGA)
+            btn_status = self.read_buttons()
+            self._handle_button(btn_status)
+
+    def _handle_button(self, btn_status):
+        """Process button press
+
+        btn_status bits (active-high):
+          bit 0 = BTN[0] (PWR) - Toggle OSD
+          bit 1 = BTN[1] (UP)  - Menu up
+          bit 2 = BTN[2] (DOWN) - Menu down
+          bit 3 = BTN[3] (LEFT) - Back
+          bit 4 = BTN[4] (RIGHT) - Enter directory
+          bit 5 = BTN[5] (F1) - Select
+          bit 6 = BTN[6] (F2) - Cancel
+        """
+        if btn_status & 0x01:  # PWR button - toggle OSD
+            self.toggle_osd()
+        elif self.osd_visible:
+            if btn_status & 0x02:  # UP
+                self.menu_up()
+            elif btn_status & 0x04:  # DOWN
+                self.menu_down()
+            elif btn_status & 0x20:  # F1 - Select
+                self.menu_select()
+            elif btn_status & 0x40:  # F2 - Cancel/back
+                self.osd_enable(False)
+                self.osd_visible = False
+
+    # =========================================================================
+    # SPI Communication
+    # =========================================================================
+
+    def read_irq_flags(self):
+        """Read IRQ flags from FPGA
+
+        Returns:
+            int: IRQ flags (bit7 = button IRQ pending)
+        """
+        self._cs_active()
+        self.spi.write(bytearray([CMD_READ_IRQ]))
+        result = bytearray(1)
+        self.spi.readinto(result)
+        self._cs_inactive()
+        return result[0]
+
+    def read_buttons(self):
+        """Read button status from FPGA (also clears button IRQ)
+
+        Returns:
+            int: Button status (bit6:0 = BTN[6:0], active-high)
+        """
+        self._cs_active()
+        self.spi.write(bytearray([CMD_READ_BTN]))
+        result = bytearray(1)
+        self.spi.readinto(result)
+        self._cs_inactive()
+        return result[0] & 0x7F  # Mask to 7 bits
+
+    def osd_enable(self, enable):
+        """Enable or disable OSD overlay"""
+        self._cs_active()
+        if enable:
+            self.spi.write(bytearray([CMD_OSD_ENABLE]))
+        else:
+            self.spi.write(bytearray([CMD_OSD_DISABLE]))
+        self._cs_inactive()
+
+    def osd_write_line(self, line, text):
+        """Write text to OSD line
+
+        Args:
+            line: Line number (0-15)
+            text: Text string (max 32 chars, will be padded/truncated)
+        """
+        if line < 0 or line > 15:
+            return
+
+        # Pad or truncate to 32 chars
+        text = text[:32].ljust(32)
+
+        self._cs_active()
+        self.spi.write(bytearray([CMD_OSD_WRITE + line]))  # 0x20 + line
+        self.spi.write(text.encode('ascii', errors='replace'))
+        self._cs_inactive()
+
+    def osd_clear(self):
+        """Clear all OSD lines"""
+        for i in range(16):
+            self.osd_write_line(i, "")
+
+    # =========================================================================
+    # Menu System
+    # =========================================================================
+
+    def toggle_osd(self):
+        """Toggle OSD visibility"""
+        self.osd_visible = not self.osd_visible
+        if self.osd_visible:
+            self.osd_enable(True)
+            self.show_main_menu()
+        else:
+            self.osd_enable(False)
+
+    def show_main_menu(self):
+        """Display main OSD menu"""
+        self.menu_items = [
+            ("Load Snowflake", "/sd/pdp1/snowflake.rim"),
+            ("Load Spacewar", "/sd/pdp1/spacewar.rim"),
+            ("Load Pong", "/sd/pdp1/pong.rim"),
+            ("Browse Files", None),
+        ]
+        self.menu_cursor = 0
+        self._draw_menu()
+
+    def _draw_menu(self):
+        """Redraw menu with current cursor position"""
+        self.osd_write_line(0, "=== PDP-1 Menu ===")
+        self.osd_write_line(1, "")
+
+        for i, (name, _) in enumerate(self.menu_items):
+            marker = ">" if i == self.menu_cursor else " "
+            self.osd_write_line(2 + i, "{} {}".format(marker, name))
+
+        # Clear remaining lines
+        for i in range(2 + len(self.menu_items), 16):
+            self.osd_write_line(i, "")
+
+    def menu_up(self):
+        """Move menu cursor up"""
+        if self.menu_cursor > 0:
+            self.menu_cursor -= 1
+            self._draw_menu()
+
+    def menu_down(self):
+        """Move menu cursor down"""
+        if self.menu_cursor < len(self.menu_items) - 1:
+            self.menu_cursor += 1
+            self._draw_menu()
+
+    def menu_select(self):
+        """Select current menu item"""
+        if self.menu_cursor >= len(self.menu_items):
+            return
+
+        name, path = self.menu_items[self.menu_cursor]
+
+        if path is None:
+            # Browse files - not implemented yet
+            self.osd_write_line(15, "Not implemented")
+            return
+
+        # Load the selected file
+        self.osd_write_line(15, "Loading...")
+        self.osd_enable(False)
+        self.osd_visible = False
+
+        # Create loader and load file
+        loader = ld_pdp1(self.spi, self.cs)
+        result = loader.load_and_run(path, verbose=False)
+
+        if not result:
+            # Show error
+            self.osd_enable(True)
+            self.osd_visible = True
+            self.osd_write_line(15, "Load FAILED!")
+        else:
+            print("Loaded: {}".format(path))
+
+
+# =============================================================================
+# OSD Quick Start
+# =============================================================================
+
+def start_osd():
+    """Initialize and start OSD controller with IRQ support
+
+    Usage:
+        import ld_pdp1
+        osd = ld_pdp1.start_osd()
+        # Press PWR button to toggle OSD menu
+    """
+    release_sd_pins()
+    osd = OsdController()
+    osd.setup_irq()
+    print("OSD ready. Press PWR button to open menu.")
+    return osd

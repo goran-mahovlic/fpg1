@@ -43,6 +43,9 @@ module esp32_osd #(
     output        osd_irq,            // Interrupt to ESP32
     input         esp32_ready,        // ESP32 ready signal
 
+    // Button inputs for IRQ generation (active-high after debounce)
+    input   [6:0] btn_state,          // BTN[6:0] from ULX3S
+
     // Video Input (from core)
     input  [23:0] video_in,
     input         de_in,
@@ -84,6 +87,8 @@ module esp32_osd #(
     localparam CMD_FILE_TX_EN     = 8'h53;
     localparam CMD_FILE_TX_DATA   = 8'h54;
     localparam CMD_FILE_INDEX     = 8'h55;
+    localparam CMD_READ_BTN       = 8'hFB;  // Read button status (clears IRQ)
+    localparam CMD_READ_IRQ       = 8'hF1;  // Read IRQ flags
 
     // =========================================================================
     // Command Decoder States
@@ -101,6 +106,8 @@ module esp32_osd #(
     localparam ST_FILE_EN    = 4'd10;
     localparam ST_FILE_DATA  = 4'd11;
     localparam ST_FILE_INDEX = 4'd12;
+    localparam ST_READ_BTN   = 4'd13;
+    localparam ST_READ_IRQ   = 4'd14;
 
     // =========================================================================
     // Internal Signals
@@ -145,6 +152,16 @@ module esp32_osd #(
 
     // IRQ generation
     reg         irq_pending;
+
+    // =========================================================================
+    // Button State Tracking for IRQ (ADDED 2026-02-13 by Jelena)
+    // =========================================================================
+    // Detects button changes and raises IRQ to notify ESP32.
+    // ESP32 reads button state via CMD_READ_BTN (0xFB) which clears IRQ.
+    // =========================================================================
+    reg   [6:0] r_btn_prev;           // Previous button state
+    reg   [6:0] r_btn_latched;        // Latched button state for ESP32 read
+    reg         r_btn_changed;        // Button change detected flag
 
     // =========================================================================
     // SPI Slave Instance
@@ -207,6 +224,38 @@ module esp32_osd #(
     end
 
     // =========================================================================
+    // Button Change Detection and IRQ Generation (ADDED 2026-02-13)
+    // =========================================================================
+    // Monitors btn_state for changes, raises irq_pending when any button
+    // changes state. IRQ is cleared when ESP32 reads via CMD_READ_BTN.
+    // =========================================================================
+    always @(posedge clk_sys or negedge rst_n) begin
+        if (!rst_n) begin
+            r_btn_prev     <= 7'b0;
+            r_btn_latched  <= 7'b0;
+            r_btn_changed  <= 1'b0;
+            irq_pending    <= 1'b0;
+        end else begin
+            // Sample previous button state
+            r_btn_prev <= btn_state;
+
+            // Detect any button change (rising or falling edge)
+            if (btn_state != r_btn_prev) begin
+                r_btn_changed  <= 1'b1;
+                r_btn_latched  <= btn_state;  // Latch current state for ESP32
+                irq_pending    <= 1'b1;       // Raise IRQ
+            end
+
+            // Clear IRQ and change flag when ESP32 reads button status
+            // This happens in FSM when CMD_READ_BTN is received
+            if (spi_rx_valid && spi_rx_data == CMD_READ_BTN && cmd_state == ST_IDLE) begin
+                irq_pending   <= 1'b0;
+                r_btn_changed <= 1'b0;
+            end
+        end
+    end
+
+    // =========================================================================
     // Command Decoder FSM
     // =========================================================================
     always @(posedge clk_sys or negedge rst_n) begin
@@ -229,7 +278,7 @@ module esp32_osd #(
             file_data      <= 8'd0;
             spi_tx_data    <= 8'h00;
             spi_tx_load    <= 1'b0;
-            irq_pending    <= 1'b0;
+            // NOTE: irq_pending managed in separate button tracking always block
         end else begin
             // Default: clear single-cycle signals
             osd_wr_en   <= 1'b0;
@@ -275,6 +324,23 @@ module esp32_osd #(
 
                             CMD_FILE_INDEX: begin
                                 cmd_state <= ST_FILE_INDEX;
+                            end
+
+                            CMD_READ_BTN: begin
+                                // ESP32 reading button status - prepare response
+                                // IRQ cleared in separate always block above
+                                spi_tx_data <= {1'b0, r_btn_latched}; // bit7=0, bit6:0=buttons
+                                spi_tx_load <= 1'b1;
+                                cmd_state   <= ST_READ_BTN;
+                            end
+
+                            CMD_READ_IRQ: begin
+                                // ESP32 reading IRQ flags
+                                // bit7 = button IRQ pending
+                                // bit6:0 = reserved for future IRQ sources
+                                spi_tx_data <= {irq_pending, 7'b0};
+                                spi_tx_load <= 1'b1;
+                                cmd_state   <= ST_READ_IRQ;
                             end
 
                             default: begin
@@ -367,6 +433,17 @@ module esp32_osd #(
                     ST_FILE_INDEX: begin
                         file_index <= spi_rx_data;
                         cmd_state  <= ST_IDLE;
+                    end
+
+                    ST_READ_BTN: begin
+                        // Dummy read - ESP32 clocks out button data
+                        // Stay here for additional reads if needed
+                        cmd_state <= ST_IDLE;
+                    end
+
+                    ST_READ_IRQ: begin
+                        // Dummy read - ESP32 clocks out IRQ flags
+                        cmd_state <= ST_IDLE;
                     end
 
                     default: begin

@@ -929,6 +929,8 @@ module top_pdp1_esp32
         .spi_cs_n     (esp32_spi_cs_n),
         .osd_irq      (esp32_osd_irq),
         .esp32_ready  (esp32_ready),
+        // Button inputs for IRQ generation (debounced, active-high)
+        .btn_state    (w_btn_direct),
         // Video input (clk_pixel domain)
         .video_in     (w_crt_video_in),
         .de_in        (w_vga_de),
