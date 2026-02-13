@@ -121,6 +121,21 @@ module top_pdp1
     // wifi_gpio0=HIGH prevents ESP32 reboot when button pressed.
     assign wifi_gpio0 = btn[0];
 
+    // =========================================================================
+    // WIFI SERIAL PASSTHROUGH (FTDI <-> ESP32)
+    // =========================================================================
+    // Enables WebREPL/serial access to ESP32 via USB FTDI.
+    // ftdi_txd (PC TX) -> wifi_rxd (ESP32 RX)
+    // wifi_txd (ESP32 TX) -> ftdi_rxd (PC RX)
+    //
+    // NOTE: ftdi_rxd driver priority:
+    //   1. ENABLE_UART_DEBUG defined: serial_debug drives ftdi_rxd
+    //   2. Otherwise: wifi_txd passthrough (for ESP32 WebREPL)
+    // The assignment is at the end of this file to avoid duplicate drivers.
+    // -------------------------------------------------------------------------
+    
+    assign wifi_rxd = ftdi_txd;   // PC TX -> ESP32 RX (always active)
+
     // -------------------------------------------------------------------------
     // Internal signal naming convention (HDL Guidelines 01_NAMING_CONVENTIONS):
     //   r_  = Register (clocked, sequential logic)

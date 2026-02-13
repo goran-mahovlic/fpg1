@@ -112,6 +112,14 @@ module top_pdp1_esp32
 `endif
 );
 
+
+    assign led[0] = esp32_spi_clk;
+    assign led[1] = esp32_spi_mosi;
+    assign led[2] = esp32_spi_mosi;
+    assign led[3] = esp32_spi_cs_n;
+    assign led[4] = esp32_osd_irq;
+    assign led[5] = esp32_ready;
+
     // =========================================================================
     // PARAMETERS (HDL Guidelines: UPPER_CASE for constants)
     // =========================================================================

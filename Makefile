@@ -201,11 +201,28 @@ ESP32_OSD_FILES  := $(SRC_DIR)/esp32_spi_slave.v \
                     $(SRC_DIR)/esp32_osd_renderer.v \
                     $(SRC_DIR)/esp32_osd.v
 
-# PDP-1 + ESP32 - uses top_pdp1_esp32.v instead of top_pdp1.v
-# NOTE: Excludes top_pdp1.v from PDP1_V_FILES, adds top_pdp1_esp32.v
-PDP1_ESP32_V_FILES := $(filter-out $(SRC_DIR)/top_pdp1.v,$(PDP1_V_FILES)) \
+PDP1_ESP32_V_FILES := $(SRC_DIR)/clk_25_shift_pixel_cpu.v \
                       $(SRC_DIR)/top_pdp1_esp32.v \
-                      $(ESP32_OSD_FILES)
+                      $(SRC_DIR)/clock_domain.v \
+                      $(SRC_DIR)/ulx3s_input.v \
+                      $(SRC_DIR)/pdp1_vga_crt.v \
+                      $(SRC_DIR)/pdp1_vga_rowbuffer.v \
+                      $(SRC_DIR)/line_shift_register.v \
+                      $(SRC_DIR)/pixel_ring_buffer.v \
+                      $(SRC_DIR)/pdp1_cpu.v \
+                      $(SRC_DIR)/pdp1_main_ram.v \
+                      $(SRC_DIR)/pdp1_cpu_alu_div.v \
+                      $(SRC_DIR)/pdp1_terminal_fb.v \
+                      $(SRC_DIR)/pdp1_terminal_charset.v \
+                      $(SRC_DIR)/test_animation.v \
+                      $(SRC_DIR)/test_sinus.v \
+                      $(SRC_DIR)/serial_debug.v \
+                      $(SRC_DIR)/uart_rx.v \
+                      $(SRC_DIR)/serial_loader.v \
+                      $(SRC_DIR)/vga2dvid.v \
+                      $(SRC_DIR)/tmds_encoder.v \
+                      $(EMARD_VIDEO)/fake_differential.v \
+					  $(ESP32_OSD_FILES)
 
 # =============================================================================
 # TEST PATTERN CONFIGURATION (TASK-125)
