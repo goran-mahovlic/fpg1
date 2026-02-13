@@ -112,14 +112,6 @@ module top_pdp1_esp32
 `endif
 );
 
-
-    assign led[0] = esp32_spi_clk;
-    assign led[1] = esp32_spi_mosi;
-    assign led[2] = esp32_spi_mosi;
-    assign led[3] = esp32_spi_cs_n;
-    assign led[4] = esp32_osd_irq;
-    assign led[5] = esp32_ready;
-
     // =========================================================================
     // PARAMETERS (HDL Guidelines: UPPER_CASE for constants)
     // =========================================================================
@@ -448,6 +440,12 @@ module top_pdp1_esp32
             r_osd_status_sync_meta <= w_osd_status[2:0];
             r_osd_status_sync      <= r_osd_status_sync_meta;
             r_osd_status_prev      <= r_osd_status_sync;
+            led[0] <= esp32_spi_clk;
+            led[1] <= esp32_spi_mosi;
+            led[2] <= esp32_spi_miso;
+            led[3] <= esp32_spi_cs_n;
+            led[4] <= esp32_osd_irq;
+            led[5] <= esp32_ready;
         end
     end
 
