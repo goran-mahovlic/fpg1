@@ -17,11 +17,23 @@
 #   import ld_pdp1
 #   ld_pdp1.load("/sd/pdp1/snowflake.rim")
 
-from machine import SPI, Pin
+from machine import SPI, Pin, WDT, reset
 from micropython import const, alloc_emergency_exception_buf
 import time
 import os
 import gc
+
+# =============================================================================
+# RETRY + WATCHDOG CONFIGURATION - Added 2026-02-14 by Jelena
+# =============================================================================
+# Robustna zaštita za RIM file upload:
+# - MAX_UPLOAD_RETRIES: Broj pokušaja prije ESP32 reseta
+# - RETRY_DELAY_MS: Pauza između pokušaja (milisekunde)
+# - WDT_TIMEOUT_MS: Watchdog timeout - ako upload visi, ESP32 se resetira
+# =============================================================================
+MAX_UPLOAD_RETRIES = const(2)     # 2 pokušaja
+RETRY_DELAY_MS = const(500)       # 500ms pauza između pokušaja
+WDT_TIMEOUT_MS = const(30000)     # 30 sekundi watchdog timeout
 
 # CRITICAL: Allocate emergency exception buffer for ISR safety
 # This MUST be called before any SPI operations on ESP32
@@ -93,13 +105,17 @@ FILE_INDEX_RIM = const(1)
 
 
 def init_spi():
-    """Initialize SPI and CS pin with correct settings"""
-    global spi, cs
+    """Initialize SPI and CS pin with correct settings
+
+    FIXED 2026-02-14: Sprema globalnu referencu za kasniji deinit.
+    """
+    global spi, cs, _spi_instance
     spi = SPI(spi_channel, baudrate=spi_freq, polarity=0, phase=0,
               bits=8, firstbit=SPI.MSB,
               sck=Pin(gpio_sck), mosi=Pin(gpio_mosi), miso=Pin(gpio_miso))
     cs = Pin(gpio_cs, Pin.OUT)
     cs.on()  # CS inactive = HIGH = on()  (FIXED 2026-02-13)
+    _spi_instance = spi  # Save global reference for deinit
     return spi, cs
 
 
@@ -226,9 +242,12 @@ class ld_pdp1:
 
         ADDED 2026-02-13: Allows loading from pre-read file data,
         solving SD/SPI pin conflict by reading file before SPI init.
+
+        FIXED 2026-02-14 by Jelena: Added internal transfer function
+        for retry logic support.
         """
         if verbose:
-            print("Sending {} bytes to FPGA...".format(len(data)))
+            print("[RIM] Step 1: Preparing transfer ({} bytes)".format(len(data)))
 
         # Set file index for RIM type
         self.file_index(FILE_INDEX_RIM)
@@ -242,16 +261,18 @@ class ld_pdp1:
         offset = 0
 
         try:
+            if verbose:
+                print("[RIM] Step 2: Streaming data to FPGA...")
             while offset < len(data):
                 chunk = data[offset:offset + CHUNK_SIZE]
                 self.file_tx_data(chunk)
                 total_sent += len(chunk)
                 offset += CHUNK_SIZE
                 if verbose and total_sent % 1024 == 0:
-                    print("  {}/{} bytes".format(total_sent, len(data)))
+                    print("[RIM]   {}/{} bytes".format(total_sent, len(data)))
                     gc.collect()  # Prevent memory fragmentation
         except Exception as e:
-            print("Error during transfer: {}".format(e))
+            print("[RIM ERROR] Transfer failed at byte {}: {}".format(total_sent, e))
             self.file_tx_enable(False)
             gc.collect()
             return False
@@ -260,7 +281,7 @@ class ld_pdp1:
         self.file_tx_enable(False)
 
         if verbose:
-            print("Done. Sent {} bytes.".format(total_sent))
+            print("[RIM] Step 3: Transfer complete - {} bytes sent".format(total_sent))
 
         gc.collect()
         return True
@@ -291,49 +312,247 @@ class ld_pdp1:
             return True
         return False
 
-    def load_and_run_from_bytes(self, data, verbose=True):
+    def load_and_run_from_bytes(self, data, verbose=True, use_watchdog=True):
         """Load RIM data from bytes and start execution
 
         ADDED 2026-02-13: Companion to load_from_bytes for pre-read data.
+
+        FIXED 2026-02-14 by Jelena: Added RETRY + WATCHDOG protection!
+        - 2 pokušaja za upload
+        - Watchdog timer (30s) - ako upload visi, ESP32 se resetira
+        - ESP32 hard reset ako oba pokušaja propadnu
+
+        Args:
+            data: RIM file data (bytes)
+            verbose: Print debug info
+            use_watchdog: Enable watchdog protection (default True)
+
+        Returns:
+            True if successful, False if failed (before reset)
         """
-        # Halt CPU before loading
-        if verbose:
-            print("Halting CPU...")
-        self.cpu_halt()
-        time.sleep_ms(50)
+        print("=" * 50)
+        print("[RIM] UPLOAD START - {} bytes".format(len(data)))
+        print("[RIM] Retry: {} attempts | Watchdog: {}s".format(
+            MAX_UPLOAD_RETRIES, WDT_TIMEOUT_MS // 1000))
+        print("=" * 50)
 
-        # Reset CPU
-        if verbose:
-            print("Resetting CPU...")
-        self.cpu_reset()
-        time.sleep_ms(50)
+        # Initialize watchdog if enabled
+        wdt = None
+        if use_watchdog:
+            try:
+                wdt = WDT(timeout=WDT_TIMEOUT_MS)
+                print("[RIM] Watchdog ARMED ({}s timeout)".format(WDT_TIMEOUT_MS // 1000))
+            except Exception as e:
+                print("[RIM WARNING] Watchdog init failed: {}".format(e))
+                print("[RIM WARNING] Continuing WITHOUT watchdog protection!")
 
-        # Load from bytes
-        if self.load_from_bytes(data, verbose):
-            time.sleep_ms(100)  # Wait for FPGA to process
+        # Retry loop
+        last_error = None
+        for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
+            print("\n[RIM] ========== Attempt {}/{} ==========".format(
+                attempt, MAX_UPLOAD_RETRIES))
 
-            # Start CPU
-            if verbose:
-                print("Starting CPU...")
-            self.cpu_run()
-            gc.collect()
-            return True
+            # Feed watchdog at start of attempt
+            if wdt:
+                wdt.feed()
+                print("[RIM] Watchdog FED")
+
+            try:
+                # Halt CPU before loading
+                print("[RIM] Halting CPU...")
+                self.cpu_halt()
+                time.sleep_ms(50)
+
+                # Feed watchdog
+                if wdt:
+                    wdt.feed()
+
+                # Reset CPU
+                print("[RIM] Resetting CPU...")
+                self.cpu_reset()
+                time.sleep_ms(50)
+
+                # Feed watchdog
+                if wdt:
+                    wdt.feed()
+
+                # Load from bytes - this is where errors usually happen
+                print("[RIM] Starting data transfer...")
+                success = self.load_from_bytes(data, verbose)
+
+                # Feed watchdog after transfer
+                if wdt:
+                    wdt.feed()
+
+                if success:
+                    time.sleep_ms(100)  # Wait for FPGA to process
+
+                    # Start CPU
+                    print("[RIM] Starting CPU...")
+                    self.cpu_run()
+                    gc.collect()
+
+                    print("\n" + "=" * 50)
+                    print("[RIM] UPLOAD SUCCESS on attempt {}!".format(attempt))
+                    print("=" * 50)
+                    return True
+                else:
+                    last_error = "load_from_bytes returned False"
+                    print("[RIM ERROR] Transfer failed (attempt {})".format(attempt))
+
+            except Exception as e:
+                last_error = str(e)
+                print("[RIM ERROR] Exception on attempt {}: {}".format(attempt, e))
+
+            # If not last attempt, wait before retry
+            if attempt < MAX_UPLOAD_RETRIES:
+                print("[RIM] Waiting {}ms before retry...".format(RETRY_DELAY_MS))
+                time.sleep_ms(RETRY_DELAY_MS)
+
+                # Feed watchdog during wait
+                if wdt:
+                    wdt.feed()
+
+        # All retries failed - ESP32 RESET!
+        print("\n" + "!" * 50)
+        print("[RIM FATAL] ALL {} ATTEMPTS FAILED!".format(MAX_UPLOAD_RETRIES))
+        print("[RIM FATAL] Last error: {}".format(last_error))
+        print("[RIM FATAL] RESETTING ESP32 IN 2 SECONDS...")
+        print("!" * 50)
+
+        gc.collect()
+        time.sleep_ms(2000)  # Give user time to see message
+
+        # HARD RESET ESP32
+        reset()
+
+        # This line should never execute (reset() doesn't return)
         return False
 
 
-# Release SD card pins to allow SPI access
+# =============================================================================
+# SD CARD MANAGEMENT - FIXED 2026-02-14 per Emard's patterns
+# =============================================================================
+# KRITIČNO: GPIO 4 (MOSI) i GPIO 12 (MISO) su DIJELJENI između SD i SPI!
+# Sekvenca za pristup SD kartici:
+# 1. spi.deinit() - oslobodi SPI pinove
+# 2. release_sd_pins() - postavi sve SD pinove u high-Z
+# 3. Mountiraj SD
+# 4. Čitaj/piši
+# 5. Unmountiraj ili ostavi za kasnije
+# 6. init_spi() - reinicijaliziraj SPI
+# =============================================================================
+
+# Global SPI reference for deinit
+_spi_instance = None
+
 def release_sd_pins():
-    """Put SD card pins in high-impedance mode"""
-    # SD pins that need to be released: 2, 4, 12, 13, 14, 15
-    sd_pins = [2, 4, 12, 13, 14, 15]
-    for p in sd_pins:
+    """Put SD card pins in high-impedance mode - Emard pattern
+
+    KRITIČNO: Moramo otpustiti pinove TOČNO kao Emard:
+    - Pročitaj vrijednost pina (forcing high-Z read)
+    - Obriši referencu
+    """
+    global _spi_instance
+
+    # FIRST: Deinit SPI if active - KRITIČNO!
+    if _spi_instance is not None:
         try:
-            pin = Pin(p, Pin.IN)  # Set as input (high-Z)
-            del pin
+            _spi_instance.deinit()
+            print("SPI deinit OK")
         except:
             pass
-    print("SD pins released")
+        _spi_instance = None
+
+    # SD pins that need to be released: 2, 4, 12, 13, 14, 15
+    # Per Emard: create Pin as INPUT, read value, delete
+    for i in bytearray([2, 4, 12, 13, 14, 15]):
+        try:
+            p = Pin(i, Pin.IN)
+            a = p.value()  # Force read to release driver
+            del p, a
+        except:
+            pass
+
     gc.collect()
+    print("SD pins released")
+
+
+def mount_sd_with_retry(mount_point="/sd", max_retries=3):
+    """Mount SD card with retry logic - ROBUST!
+
+    KRITIČNO: Koristi slot=3 za SPI mode na ESP32!
+    slot=1 je SDIO mode koji NE RADI s dijeljenim pinovima.
+
+    Returns:
+        True if mounted successfully, False otherwise
+    """
+    from machine import SDCard
+
+    # First, try to unmount if already mounted
+    try:
+        os.umount(mount_point)
+    except:
+        pass
+
+    gc.collect()
+
+    for attempt in range(max_retries):
+        try:
+            # slot=3 = SPI mode (OBAVEZNO za ESP32 s dijeljenim pinovima!)
+            sd = SDCard(slot=3)
+            os.mount(sd, mount_point)
+            print("SD mounted at {} (attempt {})".format(mount_point, attempt + 1))
+            gc.collect()
+            return True
+        except Exception as e:
+            print("SD mount attempt {} failed: {}".format(attempt + 1, e))
+            gc.collect()
+            time.sleep_ms(100)  # Wait before retry
+
+    print("SD mount FAILED after {} attempts".format(max_retries))
+    return False
+
+
+def remount_sd():
+    """Full SD remount sequence - use when SD becomes unstable
+
+    Sequence:
+    1. Deinit SPI (releases shared pins)
+    2. Release all SD pins
+    3. Wait for hardware settle
+    4. Remount with retry
+
+    Returns:
+        True if remounted successfully, False otherwise
+    """
+    global _spi_instance
+
+    print("=== SD Remount Sequence ===")
+
+    # Step 1: Release SPI and pins
+    release_sd_pins()
+
+    # Step 2: Unmount if mounted
+    try:
+        os.umount("/sd")
+        print("SD unmounted")
+    except:
+        pass
+
+    # Step 3: Wait for hardware to settle
+    time.sleep_ms(200)
+    gc.collect()
+
+    # Step 4: Remount with retry
+    result = mount_sd_with_retry("/sd", max_retries=3)
+
+    if result:
+        print("=== SD Remount SUCCESS ===")
+    else:
+        print("=== SD Remount FAILED ===")
+
+    return result
 
 
 # Convenience function for interactive use
@@ -344,42 +563,57 @@ def load(filename):
     GPIO 4 (MOSI) and GPIO 12 (MISO) are shared between SD and SPI.
     Previous code released SD pins first, which unmounted SD card.
 
+    FIXED 2026-02-14 by Jelena: Added RETRY + WATCHDOG protection!
+    - 2 pokušaja za upload
+    - Watchdog timer (30s) - ako upload visi, ESP32 se resetira
+    - ESP32 hard reset ako oba pokušaja propadnu
+
     New sequence:
     1. Read file into memory (SD still works)
     2. Release SD pins (unmounts SD but we have data in RAM)
-    3. Init SPI and send data to FPGA
+    3. Init SPI and send data to FPGA (with retry + watchdog)
     """
+    print("[RIM] ========================================")
+    print("[RIM] load() - Quick Load Function")
+    print("[RIM] File: {}".format(filename))
+    print("[RIM] ========================================")
+
     # Step 1: Read file into memory while SD is still accessible
+    print("[RIM] Step 1: Checking file...")
     try:
         stat = os.stat(filename)
         filesize = stat[6]
     except OSError as e:
-        print("Error: File not found: {} ({})".format(filename, e))
+        print("[RIM ERROR] File not found: {} ({})".format(filename, e))
         return False
 
-    print("Reading {} ({} bytes) into memory...".format(filename, filesize))
+    print("[RIM] Step 2: Reading {} bytes into memory...".format(filesize))
 
     try:
         with open(filename, "rb") as f:
             file_data = f.read()
     except OSError as e:
-        print("Error: Cannot read file: {}".format(e))
+        print("[RIM ERROR] Cannot read file: {}".format(e))
         return False
 
     gc.collect()
-    print("File loaded into RAM ({} bytes)".format(len(file_data)))
+    print("[RIM] File loaded into RAM ({} bytes)".format(len(file_data)))
 
     # Step 2: Now release SD pins and initialize SPI
     # NOTE: Commented out - SPI works without releasing SD pins on ULX3S v3.1.7
     # release_sd_pins()
 
     # Initialize SPI with correct settings (1 MHz for stability)
+    print("[RIM] Step 3: Initializing SPI...")
     spi, cs = init_spi()
+    print("[RIM] SPI ready")
 
     ld = ld_pdp1(spi, cs)
 
-    # Step 3: Send data to FPGA using modified load_from_bytes method
-    result = ld.load_and_run_from_bytes(file_data, verbose=True)
+    # Step 4: Send data to FPGA with RETRY + WATCHDOG protection!
+    # NOTE: If all retries fail, ESP32 will reset automatically!
+    print("[RIM] Step 4: Starting FPGA transfer (with retry + watchdog)...")
+    result = ld.load_and_run_from_bytes(file_data, verbose=True, use_watchdog=True)
     gc.collect()
     return result
 
@@ -664,26 +898,58 @@ class OsdController:
     # =========================================================================
 
     def init_fb(self):
-        """Initialize file browser state"""
+        """Initialize file browser state
+
+        FIXED 2026-02-14: NE BRIŠE direntries cache!
+        Cache se briše samo eksplicitno kroz read_dir().
+        """
         self.fb_topitem = 0
         self.fb_cursor = 0
         self.fb_selected = -1
-        self.cwd = "/"
-        self.direntries = []
+        # FIXED: Ne postavljaj cwd na "/" ako već postoji
+        if not hasattr(self, 'cwd') or self.cwd is None:
+            self.cwd = "/"
+        # FIXED: Ne briši direntries cache!
+        if not hasattr(self, 'direntries'):
+            self.direntries = []
         self.screen_y = 14  # OSD lines for directory display (lines 1-14)
 
-    def read_dir(self):
-        """Read directory contents - C64 style
+    def read_dir(self, force_remount=False):
+        """Read directory contents with SD recovery
+
+        FIXED 2026-02-14: Robustniji pristup s recovery opcijom.
+
+        Args:
+            force_remount: If True, remount SD before reading (for recovery)
 
         NOTE: SD card pins (GPIO 4, 12) are shared with SPI. When SPI is active,
         SD card may not be accessible. If directory read fails, keep existing
         cached entries.
         """
         if not hasattr(self, 'cwd'):
-            self.init_fb()
+            self.cwd = "/"
+        if not hasattr(self, 'direntries'):
+            self.direntries = []
+
+        # If force_remount, do full SD recovery
+        if force_remount:
+            print("read_dir: Force remount requested")
+            # Save SPI state
+            old_spi = self.spi
+            old_cs = self.cs
+
+            # Remount SD
+            if remount_sd():
+                # Reinit SPI after SD remount
+                self.spi, self.cs = init_spi()
+            else:
+                print("read_dir: Remount failed, using cache")
+                return
 
         # Try to read directory, but don't clear existing cache if it fails
         new_entries = []
+        read_ok = False
+
         try:
             ls = sorted(os.listdir(self.cwd))
             for fname in ls:
@@ -699,11 +965,143 @@ class OsdController:
                 except:
                     pass
                 gc.collect()
+
             # Only update if we got entries (SD was accessible)
-            if new_entries:
+            if new_entries or len(ls) == 0:
                 self.direntries = new_entries
+                read_ok = True
+                print("read_dir: {} entries".format(len(new_entries)))
+
+        except OSError as e:
+            # Error 0x107 = SD read error
+            if "107" in str(e) or "ETIMEDOUT" in str(e):
+                print("read_dir: SD error, attempting recovery...")
+                # Try one remount if not already forcing
+                if not force_remount:
+                    self.read_dir(force_remount=True)
+                    return
+            print("read_dir: SD not accessible ({}), using cache".format(e))
+
         except Exception as e:
-            print("read_dir: SD not accessible, using cache")
+            print("read_dir: Error {}, using cache".format(e))
+
+    def read_dir_safe(self):
+        """Read directory with SPI deactivation - SAFE for OSD mode
+
+        CRITICAL: Must deinit SPI before SD access, GPIO 4/12 are shared!
+
+        FIXED 2026-02-14: Error 0x107 fix - UVIJEK remountaj SD s slot=3!
+
+        Root cause: SD driver koristi SDMMC mode umjesto SPI mode.
+        Na ULX3S v3.1.7, GPIO 4 (MOSI) i GPIO 12 (MISO) su dijeljeni.
+        MORA se koristiti SDCard(slot=3) za SPI mode!
+
+        Sekvenca (Emard pattern):
+        1. Deinit SPI (oslobodi GPIO 4, 12)
+        2. Release SD pins (high-Z)
+        3. Unmount SD
+        4. Pauza za hardware settle
+        5. Remount SD s slot=3 (SPI mode - KRITIČNO!)
+        6. Citaj direktorij
+        7. Reinit SPI
+        """
+        global _spi_instance
+
+        print(">>> read_dir_safe START")
+        print("    cwd={}".format(self.cwd))
+
+        # Step 1: Deinit SPI to release GPIO 4, 12
+        print(">>> Step 1: Deinit SPI...")
+        if self.spi:
+            try:
+                self.spi.deinit()
+                print("    self.spi.deinit() OK")
+            except Exception as e:
+                print("    self.spi.deinit() error: {}".format(e))
+            self.spi = None
+        if _spi_instance:
+            try:
+                _spi_instance.deinit()
+                print("    _spi_instance.deinit() OK")
+            except Exception as e:
+                print("    _spi_instance.deinit() error: {}".format(e))
+            _spi_instance = None
+
+        # Step 2: Release SD pins to high-Z (Emard pattern)
+        print(">>> Step 2: Release SD pins to high-Z...")
+        for i in bytearray([2, 4, 12, 13, 14, 15]):
+            try:
+                p = Pin(i, Pin.IN)
+                a = p.value()
+                del p, a
+            except:
+                pass
+
+        # Step 3: Unmount SD (KRITIČNO - mora se unmountat prije remount!)
+        print(">>> Step 3: Unmount SD...")
+        try:
+            os.umount("/sd")
+            print("    Unmount OK")
+        except Exception as e:
+            print("    Unmount: {} (OK if not mounted)".format(e))
+
+        # Step 4: Wait for hardware settle
+        print(">>> Step 4: Hardware settle 150ms...")
+        time.sleep_ms(150)
+        gc.collect()
+
+        # Step 5: Mount SD with slot=3 (SPI MODE - KRITIČNO!)
+        print(">>> Step 5: Mount SD with slot=3 (SPI mode)...")
+        from machine import SDCard
+        sd_ok = False
+        for attempt in range(3):
+            try:
+                sd = SDCard(slot=3)  # SPI mode, NE SDMMC!
+                os.mount(sd, "/sd")
+                print("    Mount OK (attempt {})".format(attempt + 1))
+                sd_ok = True
+                break
+            except Exception as e:
+                print("    Mount attempt {} failed: {}".format(attempt + 1, e))
+                time.sleep_ms(100)
+
+        if not sd_ok:
+            print(">>> SD mount FAILED, using cached entries")
+            self.spi, self.cs = init_spi()
+            return
+
+        # Step 6: Read directory (SD now properly mounted in SPI mode)
+        print(">>> Step 6: Reading directory {}...".format(self.cwd))
+        new_entries = []
+        try:
+            ls = sorted(os.listdir(self.cwd))
+            print("    Found {} items".format(len(ls)))
+            for fname in ls:
+                try:
+                    fullpath = self.fullpath(fname)
+                    stat = os.stat(fullpath)
+                    if stat[0] & 0o170000 == 0o040000:
+                        new_entries.append([fname, 1, 0])  # directory
+                    else:
+                        # Filter: only show .rim, .bin, .bit files
+                        if fname.endswith('.rim') or fname.endswith('.bin') or fname.endswith('.bit'):
+                            new_entries.append([fname, 0, stat[6]])  # file
+                except Exception as e:
+                    print("    stat error {}: {}".format(fname, e))
+                gc.collect()
+            self.direntries = new_entries
+            print(">>> Step 6 OK: {} entries".format(len(new_entries)))
+        except Exception as e:
+            print(">>> Step 6 ERROR: {}".format(e))
+            print("    Keeping {} cached entries".format(len(self.direntries)))
+
+        # Step 7: Reinit SPI for OSD communication
+        print(">>> Step 7: Reinit SPI...")
+        self.spi, self.cs = init_spi()
+        print("    SPI reinit OK")
+
+        gc.collect()
+        print(">>> read_dir_safe DONE")
 
     def fullpath(self, fname):
         """Get full path for filename"""
@@ -761,15 +1159,21 @@ class OsdController:
         self.osd_write_line(y + 1, line)
 
     def refresh_dir(self):
-        """Refresh directory listing - ADDED 2026-02-14
+        """Refresh directory listing with SD remount - FIXED 2026-02-14
 
-        Called on F1 press. Attempts to re-read SD card directory.
-        NOTE: This may fail if SD pins are held by SPI. In that case,
-        we keep the cached listing and show a message.
+        Called on F1 press. Does FULL SD remount sequence using read_dir_safe().
+        This is the ROBUST way to recover from SD errors!
+
+        DEBUG 2026-02-14: Koristi read_dir_safe() umjesto read_dir(force_remount)
         """
+        print("=== refresh_dir() CALLED ===")
         self.osd_write_line(15, "Refreshing...")
         old_count = len(self.direntries)
-        self.read_dir()  # Will use cache if SD not accessible
+
+        # Clear cache and use read_dir_safe (deinits SPI, remounts if needed)
+        self.direntries = []
+        self.read_dir_safe()
+
         new_count = len(self.direntries)
 
         if new_count != old_count:
@@ -778,7 +1182,11 @@ class OsdController:
             self.fb_topitem = 0
 
         self.show_dir()
-        self.osd_write_line(15, "FIRE1:Refresh {} files".format(new_count))
+        if new_count > 0:
+            self.osd_write_line(15, "OK: {} files".format(new_count))
+        else:
+            self.osd_write_line(15, "SD ERROR - press FIRE1")
+        print("=== refresh_dir() DONE ===")
 
     def move_dir_cursor(self, step):
         """Move cursor in directory - C64 style"""
@@ -809,29 +1217,59 @@ class OsdController:
                         self.show_dir()
 
     def select_entry(self):
-        """Select current entry - directory or file"""
+        """Select current entry - directory or file
+
+        FIXED 2026-02-14: Sprema cwd PRIJE init_fb() jer init_fb() sada ne briše.
+        DEBUG 2026-02-14: Dodani ispisi za provjeru poziva read_dir_safe()
+        """
+        print("=== select_entry() CALLED ===")
+        print("    direntries count: {}".format(len(self.direntries) if self.direntries else 0))
+        print("    fb_cursor: {}".format(self.fb_cursor))
+
         if not self.direntries or self.fb_cursor >= len(self.direntries):
+            print("    ERROR: No entry at cursor position!")
             return
 
         entry = self.direntries[self.fb_cursor]
+        print("    Selected: {} (is_dir={})".format(entry[0], entry[1]))
+
         if entry[1]:  # Directory
             oldselected = self.fb_selected - self.fb_topitem
             self.fb_selected = self.fb_cursor
-            try:
-                self.cwd = self.fullpath(entry[0])
-            except:
-                self.fb_selected = -1
+
+            # Izracunaj novi cwd PRIJE reset-a
+            new_cwd = self.fullpath(entry[0])
+            print("    Entering directory: {}".format(new_cwd))
+
             self.show_dir_line(oldselected)
             self.show_dir_line(self.fb_cursor - self.fb_topitem)
-            self.init_fb()
-            self.cwd = self.fullpath(entry[0]) if entry[1] else self.cwd
-            self.read_dir()
+
+            # Reset browser state (cursor position)
+            self.fb_topitem = 0
+            self.fb_cursor = 0
+            self.fb_selected = -1
+
+            # Postavi novi cwd i citaj direktorij
+            self.cwd = new_cwd
+            self.direntries = []  # Eksplicitno brisi stari cache
+            print("    Calling read_dir_safe()...")
+            self.read_dir_safe()  # FIXED 2026-02-14: Deinit SPI prije SD citanja!
+            print("    read_dir_safe() returned, showing dir...")
             self.show_dir()
+            print("=== select_entry() DONE ===")
         else:  # File
+            print("    Loading file: {}".format(entry[0]))
             self.load_file(entry[0])
 
     def updir(self):
-        """Go up one directory level"""
+        """Go up one directory level
+
+        FIXED 2026-02-14: Eksplicitno brise cache i postavlja cwd.
+        DEBUG 2026-02-14: Dodani ispisi za provjeru poziva read_dir_safe()
+        """
+        print("=== updir() CALLED ===")
+        print("    Current cwd: {}".format(self.cwd))
+
         if len(self.cwd) < 2:
             self.cwd = "/"
         else:
@@ -840,25 +1278,95 @@ class OsdController:
             if not self.cwd:
                 self.cwd = "/"
 
-        self.init_fb()
-        self.read_dir()
+        print("    New cwd: {}".format(self.cwd))
+
+        # Reset browser state
+        self.fb_topitem = 0
+        self.fb_cursor = 0
+        self.fb_selected = -1
+        self.direntries = []  # Eksplicitno brisi stari cache
+
+        print("    Calling read_dir_safe()...")
+        self.read_dir_safe()  # FIXED 2026-02-14: Deinit SPI prije SD citanja!
+        print("    read_dir_safe() returned, showing dir...")
         self.show_dir()
+        print("=== updir() DONE ===")
 
     def load_file(self, fname):
         """Load selected file
 
+        FIXED 2026-02-14: Mora remountati SD s slot=3 prije citanja!
+
         IMPORTANT: GPIO 4 (MOSI) and GPIO 12 (MISO) are shared between SD
-        and SPI. To load a file, we must:
-        1. Read file into memory (while SD is accessible)
-        2. Close SD access
-        3. Release SD pins
-        4. Reinit SPI
-        5. Send data to FPGA
+        and SPI. Sekvenca:
+        1. Deinit SPI
+        2. Release SD pins
+        3. Mount SD s slot=3 (SPI mode)
+        4. Read file into memory
+        5. Unmount SD
+        6. Release SD pins
+        7. Reinit SPI
+        8. Send data to FPGA
         """
+        global _spi_instance
         fullpath = self.fullpath(fname)
 
         # Show loading message
         self.osd_write_line(15, "Loading {}...".format(fname[:20]))
+
+        # Step 1: Deinit SPI to release GPIO 4, 12
+        print("load_file: Deinit SPI...")
+        if self.spi:
+            try:
+                self.spi.deinit()
+            except:
+                pass
+            self.spi = None
+        if _spi_instance:
+            try:
+                _spi_instance.deinit()
+            except:
+                pass
+            _spi_instance = None
+
+        # Step 2: Release SD pins to high-Z
+        for i in bytearray([2, 4, 12, 13, 14, 15]):
+            try:
+                p = Pin(i, Pin.IN)
+                a = p.value()
+                del p, a
+            except:
+                pass
+
+        # Step 3: Mount SD with slot=3 (SPI mode)
+        print("load_file: Mount SD slot=3...")
+        from machine import SDCard
+        try:
+            os.umount("/sd")
+        except:
+            pass
+        time.sleep_ms(100)
+
+        sd_ok = False
+        for attempt in range(3):
+            try:
+                sd = SDCard(slot=3)
+                os.mount(sd, "/sd")
+                print("load_file: SD mount OK")
+                sd_ok = True
+                break
+            except Exception as e:
+                print("load_file: SD mount attempt {} failed: {}".format(attempt + 1, e))
+                time.sleep_ms(100)
+
+        if not sd_ok:
+            print("load_file: SD mount FAILED!")
+            self.spi, self.cs = init_spi()
+            self._osd_enable_hw(1)
+            self.enable[0] = 1
+            self.osd_visible = True
+            self.osd_write_line(15, "SD ERROR!")
+            return
 
         # Handle different file types
         if fname.endswith('.bit'):
@@ -871,6 +1379,10 @@ class OsdController:
                 ecp5.prog(fullpath)
                 print("Loaded bitstream: {}".format(fullpath))
                 # Reinit SPI after ecp5.prog()
+                try:
+                    os.umount("/sd")
+                except:
+                    pass
                 release_sd_pins()
                 self.spi, self.cs = init_spi()
             except Exception as e:
@@ -880,45 +1392,71 @@ class OsdController:
                 self.osd_write_line(15, "LOAD ERROR!")
                 return
         elif fname.endswith('.rim') or fname.endswith('.bin'):
-            # PDP-1 tape file - MUST read into memory first!
+            # PDP-1 tape file - read into memory, then send via SPI
+            # FIXED 2026-02-14 by Jelena: Added retry + watchdog protection!
+            print("[RIM] ========================================")
+            print("[RIM] Loading RIM/BIN file: {}".format(fname))
+            print("[RIM] ========================================")
+
             self._osd_enable_hw(0)
             self.enable[0] = 0
             self.osd_visible = False
 
-            # Step 1: Read file into memory while SD is still accessible
+            # Step 4: Read file into memory (SD is now mounted with slot=3)
+            print("[RIM] Step 4: Reading file from SD...")
             try:
                 with open(fullpath, "rb") as f:
                     file_data = f.read()
-                print("Read {} bytes into memory".format(len(file_data)))
+                print("[RIM] File read OK: {} bytes".format(len(file_data)))
             except Exception as e:
-                print("File read error: {}".format(e))
+                print("[RIM ERROR] File read failed: {}".format(e))
                 self._osd_enable_hw(1)
                 self.enable[0] = 1
                 self.osd_visible = True
                 self.osd_write_line(15, "READ FAILED!")
+                self.spi, self.cs = init_spi()
                 return
 
             gc.collect()
 
-            # Step 2: Release SD pins to allow clean SPI access
+            # Step 5: Unmount SD
+            print("[RIM] Step 5: Unmounting SD...")
+            try:
+                os.umount("/sd")
+                print("[RIM] SD unmounted")
+            except:
+                pass
+
+            # Step 6: Release SD pins to allow clean SPI access
+            print("[RIM] Step 6: Releasing SD pins...")
             release_sd_pins()
 
-            # Step 3: Reinitialize SPI (pins now free from SD)
+            # Step 7: Reinitialize SPI (pins now free from SD)
+            print("[RIM] Step 7: Reinitializing SPI...")
             self.spi, self.cs = init_spi()
+            print("[RIM] SPI ready")
 
-            # Step 4: Send data to FPGA using load_from_bytes
+            # Step 8: Send data to FPGA with RETRY + WATCHDOG protection!
+            # FIXED 2026-02-14 by Jelena: verbose=True for debug output
+            print("[RIM] Step 8: Starting FPGA transfer (with retry + watchdog)...")
             loader = ld_pdp1(self.spi, self.cs)
-            result = loader.load_and_run_from_bytes(file_data, verbose=False)
+            result = loader.load_and_run_from_bytes(file_data, verbose=True, use_watchdog=True)
 
             gc.collect()
 
+            # NOTE: If all retries fail, load_and_run_from_bytes() will
+            # reset ESP32, so we won't reach this code in failure case!
             if not result:
+                # This should not happen (reset before reaching here)
+                print("[RIM ERROR] Upload returned False (should have reset!)")
                 self._osd_enable_hw(1)
                 self.enable[0] = 1
                 self.osd_visible = True
                 self.osd_write_line(15, "LOAD FAILED!")
             else:
-                print("Loaded: {}".format(fullpath))
+                print("[RIM] ========================================")
+                print("[RIM] SUCCESS: {}".format(fullpath))
+                print("[RIM] ========================================")
 
     def menu_up(self):
         """Move menu cursor up"""
@@ -934,7 +1472,7 @@ class OsdController:
 # =============================================================================
 
 def start_osd(mount_sd=True):
-    """Initialize and start OSD controller with IRQ support - C64 style
+    """Initialize and start OSD controller with IRQ support - FIXED 2026-02-14
 
     Usage:
         import ld_pdp1
@@ -946,23 +1484,20 @@ def start_osd(mount_sd=True):
 
     IMPORTANT: GPIO 4 (MOSI) and GPIO 12 (MISO) are shared between SD card
     and SPI. SD card must be unmounted and pins released before SPI works!
+
+    FIXED 2026-02-14: Koristi mount_sd_with_retry za robustnost!
     """
-    # Mount SD card like C64 does
-    if mount_sd:
-        try:
-            from machine import SDCard
-            os.mount(SDCard(slot=3), "/sd")
-            print("SD card mounted at /sd")
-        except Exception as e:
-            print("SD mount: {}".format(e))
-
-    # Initialize OSD controller
-    # CRITICAL: OsdController.init_spi() will configure GPIO 12 for SPI MISO
-    # But SD card may still hold these pins. We need to release them first!
-
-    # Step 1: Read directory listing into memory while SD is accessible
-    direntries_cache = []
     cwd_start = "/sd"
+    direntries_cache = []
+
+    # Step 1: Mount SD card with retry logic
+    if mount_sd:
+        if mount_sd_with_retry("/sd", max_retries=3):
+            print("SD ready")
+        else:
+            print("WARNING: SD mount failed, file browser may be empty")
+
+    # Step 2: Read directory listing into memory while SD is accessible
     try:
         ls = sorted(os.listdir(cwd_start))
         for fname in ls:
@@ -976,20 +1511,20 @@ def start_osd(mount_sd=True):
                         direntries_cache.append([fname, 0, stat[6]])  # file
             except:
                 pass
-        gc.collect()
+            gc.collect()  # GC after each file like Emard!
+        print("Cached {} entries".format(len(direntries_cache)))
     except Exception as e:
         print("read_dir error: {}".format(e))
 
-    # Step 2: Unmount SD and release pins for SPI
-    # NOTE: Commented out for now - keep SD mounted for file loading
-    # try:
-    #     os.umount("/sd")
-    #     print("SD unmounted for SPI")
-    # except:
-    #     pass
-
-    # Step 3: Release SD pins to allow SPI access
-    # CRITICAL: This releases GPIO 4 and 12 from SD card controller
+    # Step 3: Unmount SD and release pins for SPI access
+    # FIXED 2026-02-14: Eksplicitno unmountiraj SD PRIJE release_sd_pins()!
+    # Ako ostavimo SD "mountiran" a pinovi su u high-Z, sljedeci pristup
+    # ce failati s error 0x107 jer driver misli da je SD dostupan ali nije.
+    try:
+        os.umount("/sd")
+        print("SD unmounted for SPI mode")
+    except:
+        pass
     release_sd_pins()
 
     # Step 4: Initialize OSD controller (will init SPI)
@@ -1009,10 +1544,10 @@ def start_osd(mount_sd=True):
     osd._irq_handler(0)
 
     print("=" * 40)
-    print("OSD Ready - C64 style")
-    print("Combo: Press UP+DOWN+LEFT+RIGHT")
-    print("Navigate: UP/DOWN")
-    print("Select: RIGHT  |  Back: LEFT")
+    print("OSD Ready")
+    print("Combo: UP+DOWN+LEFT+RIGHT to toggle")
+    print("Navigate: UP/DOWN | Back: LEFT | Select: RIGHT")
+    print("FIRE1: Remount SD (recovery)")
     print("=" * 40)
 
     return osd
@@ -1239,3 +1774,144 @@ def spi_diag():
         print("SPI appears to be working!")
         print("IRQ flags: 0x{:02X}, Buttons: 0x{:02X}".format(irq_val, btn_val))
         return True
+
+
+def test_sd_recovery():
+    """Test SD card remount recovery sequence
+
+    Usage:
+        import ld_pdp1
+        ld_pdp1.test_sd_recovery()
+
+    This tests the full SD recovery sequence:
+    1. Mount SD
+    2. Read directory
+    3. Release pins
+    4. Init SPI
+    5. Remount SD
+    6. Read directory again
+    """
+    print("=" * 50)
+    print("SD RECOVERY TEST")
+    print("=" * 50)
+
+    # Step 1: Initial mount
+    print("\n1. Initial SD mount...")
+    if mount_sd_with_retry("/sd", max_retries=3):
+        print("   OK: SD mounted")
+    else:
+        print("   FAILED: SD mount")
+        return False
+
+    # Step 2: Read directory
+    print("\n2. Reading /sd directory...")
+    try:
+        entries = os.listdir("/sd")
+        print("   OK: {} entries".format(len(entries)))
+        for e in entries[:5]:
+            print("      - {}".format(e))
+        if len(entries) > 5:
+            print("      ... and {} more".format(len(entries) - 5))
+    except Exception as e:
+        print("   ERROR: {}".format(e))
+        return False
+
+    # Step 3: Init SPI (simulates OSD usage)
+    print("\n3. Initializing SPI (simulates OSD)...")
+    spi, cs = init_spi()
+    print("   OK: SPI initialized")
+
+    # Step 4: Read directory again (should fail or use cache)
+    print("\n4. Reading /sd directory again (with SPI active)...")
+    try:
+        entries = os.listdir("/sd")
+        print("   OK: {} entries (SD still accessible)".format(len(entries)))
+    except Exception as e:
+        print("   Expected: SD not accessible while SPI active ({})".format(e))
+
+    # Step 5: Full remount sequence
+    print("\n5. Full SD remount sequence...")
+    if remount_sd():
+        print("   OK: SD remounted")
+    else:
+        print("   FAILED: SD remount")
+        return False
+
+    # Step 6: Read directory after remount
+    print("\n6. Reading /sd directory after remount...")
+    try:
+        entries = os.listdir("/sd")
+        print("   OK: {} entries".format(len(entries)))
+    except Exception as e:
+        print("   ERROR: {}".format(e))
+        return False
+
+    # Step 7: Reinit SPI for OSD
+    print("\n7. Reinitializing SPI...")
+    spi, cs = init_spi()
+    print("   OK: SPI reinitialized")
+
+    print("\n" + "=" * 50)
+    print("SD RECOVERY TEST PASSED!")
+    print("=" * 50)
+    gc.collect()
+    return True
+
+
+def test_read_dir_safe():
+    """Test read_dir_safe() directly - DEBUG function
+
+    Usage:
+        import ld_pdp1
+        ld_pdp1.test_read_dir_safe()
+
+    This simulates what happens when user navigates directories:
+    1. Start OSD (mounts SD, inits SPI)
+    2. Call read_dir_safe() to change directory
+    3. Check if directory is readable
+    """
+    print("=" * 50)
+    print("TEST: read_dir_safe()")
+    print("=" * 50)
+
+    # Step 1: Start OSD normally
+    print("\n1. Starting OSD...")
+    osd = start_osd(mount_sd=True)
+    print("   OSD started, cwd={}".format(osd.cwd))
+    print("   Initial entries: {}".format(len(osd.direntries)))
+
+    # Step 2: Show current directory
+    print("\n2. Current directory listing:")
+    for i, e in enumerate(osd.direntries[:10]):
+        print("   [{:2d}] {} {}".format(i, "DIR" if e[1] else "   ", e[0]))
+    if len(osd.direntries) > 10:
+        print("   ... and {} more".format(len(osd.direntries) - 10))
+
+    # Step 3: Try to enter first directory
+    dirs = [e for e in osd.direntries if e[1]]
+    if dirs:
+        print("\n3. Entering first directory: {}".format(dirs[0][0]))
+        osd.fb_cursor = osd.direntries.index(dirs[0])
+        osd.select_entry()  # This calls read_dir_safe()
+        print("   After select_entry:")
+        print("   cwd={}".format(osd.cwd))
+        print("   entries={}".format(len(osd.direntries)))
+    else:
+        print("\n3. No directories to enter, testing read_dir_safe() directly...")
+        osd.cwd = "/sd"
+        osd.direntries = []
+        osd.read_dir_safe()
+        print("   entries={}".format(len(osd.direntries)))
+
+    # Step 4: Try updir
+    print("\n4. Testing updir()...")
+    osd.updir()
+    print("   After updir:")
+    print("   cwd={}".format(osd.cwd))
+    print("   entries={}".format(len(osd.direntries)))
+
+    print("\n" + "=" * 50)
+    print("TEST COMPLETE")
+    print("=" * 50)
+    gc.collect()
+    return osd
