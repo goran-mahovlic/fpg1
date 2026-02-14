@@ -523,7 +523,7 @@ module top_pdp1_esp32
     // 2. ESP32 RUN command (status[0] rising edge)
     // 3. RIM load completion (auto-start with new address)
     always @(posedge clk_cpu) begin
-        if (~rst_cpu_n) begin
+        if (~rst_cpu_n | w_esp32_reset_edge) begin
             r_start_pulse_counter <= 8'd5;  // Initial auto-start
         end else if (w_esp32_run_edge | w_rim_load_complete) begin
             r_start_pulse_counter <= 8'd5;  // Trigger start pulse
