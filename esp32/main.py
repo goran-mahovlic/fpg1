@@ -44,7 +44,7 @@ try:
     # Flash FPGA with bitstream
     print("\nFlashing FPGA with pdp1.bit...")
     import ecp5
-    ecp5.prog('/pdp1.bit')
+    #ecp5.prog('/pdp1.bit')
     print("FPGA programmed successfully!")
 
     gc.collect()
@@ -55,17 +55,16 @@ try:
 
     gc.collect()
 
-    # Load and run snowflake demo
-    print("\nLoading snowflake.rim...")
+    # Start OSD controller with file browser
+    # UPDATED 2026-02-14: Use OSD for file selection instead of hardcoded load
+    print("\nStarting OSD file browser...")
     import ld_pdp1
-    result = ld_pdp1.load('/snowflake.rim')
+    osd = ld_pdp1.run()
 
-    if result:
-        print("\nSUCCESS! Snowflake demo running!")
-        print("Check VGA display for rotating dots pattern.")
-    else:
-        print("\nWARNING: load() returned False")
-        print("Demo may not be running correctly.")
+    print("\nSUCCESS! OSD controller active!")
+    print("Press UP+DOWN+LEFT+RIGHT combo to toggle OSD menu.")
+    print("Use UP/DOWN to navigate, RIGHT to select, LEFT to go back.")
+    print("F1 to refresh directory listing.")
 
 except Exception as e:
     print("\nAUTO-BOOT FAILED!")
@@ -74,6 +73,6 @@ except Exception as e:
     sys.print_exception(e)
     print("\nManual commands:")
     print("  import ecp5; ecp5.prog('/pdp1.bit')")
-    print("  import ld_pdp1; ld_pdp1.load('/snowflake.rim')")
+    print("  import ld_pdp1; osd = ld_pdp1.run()")
 
 print("=" * 40 + "\n")

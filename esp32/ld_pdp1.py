@@ -59,37 +59,34 @@ gpio_irq = const(22)
 # =============================================================================
 # Button Bit Masks (ACTIVE-HIGH after FPGA debounce)
 # =============================================================================
-# ULX3S button mapping from ulx3s_input.v:
+# ULX3S button mapping (UPDATED 2026-02-14):
 #   BTN[0] = PWR (DO NOT USE - it's RESET!)
-#   BTN[1] = UP
-#   BTN[2] = DOWN
-#   BTN[3] = LEFT
-#   BTN[4] = RIGHT
-#   BTN[5] = F1
-#   BTN[6] = F2
+#   BTN[1] = FIRE1 = 0x02
+#   BTN[2] = FIRE2 = 0x04
+#   BTN[3] = UP    = 0x08
+#   BTN[4] = DOWN  = 0x10
+#   BTN[5] = LEFT  = 0x20
+#   BTN[6] = RIGHT = 0x40
 # =============================================================================
-BTN_UP    = const(0x02)  # btn[1]
-BTN_DOWN  = const(0x04)  # btn[2]
-BTN_LEFT  = const(0x08)  # btn[3]
-BTN_RIGHT = const(0x10)  # btn[4]
-BTN_F1    = const(0x20)  # btn[5]
-BTN_F2    = const(0x40)  # btn[6]
+BTN_FIRE1 = const(0x02)  # btn[1] - FIRE1
+BTN_FIRE2 = const(0x04)  # btn[2] - FIRE2
+BTN_UP    = const(0x08)  # btn[3]
+BTN_DOWN  = const(0x10)  # btn[4]
+BTN_LEFT  = const(0x20)  # btn[5]
+BTN_RIGHT = const(0x40)  # btn[6]
 
 # =============================================================================
-# OSD COMBO - VERIFIED 2026-02-14 via debug_buttons()
+# OSD COMBO - UPDATED 2026-02-14 for new button mapping
 # =============================================================================
-# ULX3S button mapping (from ulx3s_input.v):
-#   BTN[1] = UP    = 0x02
-#   BTN[2] = DOWN  = 0x04
-#   BTN[3] = LEFT  = 0x08
-#   BTN[4] = RIGHT = 0x10
+# New button mapping:
+#   BTN[3] = UP    = 0x08
+#   BTN[4] = DOWN  = 0x10
+#   BTN[5] = LEFT  = 0x20
+#   BTN[6] = RIGHT = 0x40
 #
-# Cursor combo = UP+DOWN+LEFT+RIGHT = 0x02+0x04+0x08+0x10 = 0x1E
-#
-# NOTE: C64 uses 0x78 because C64 has different button mapping.
-# Our PDP-1 port uses ULX3S native mapping, so we use 0x1E.
+# Cursor combo = UP+DOWN+LEFT+RIGHT = 0x08+0x10+0x20+0x40 = 0x78
 # =============================================================================
-OSD_CURSOR_COMBO = const(0x1E)  # ULX3S cursor combo: UP+DOWN+LEFT+RIGHT
+OSD_CURSOR_COMBO = const(0x78)  # Cursor combo: UP+DOWN+LEFT+RIGHT
 
 # File type index for RIM files
 FILE_INDEX_RIM = const(1)
@@ -576,8 +573,8 @@ class OsdController:
             if btn == 1:  # btn == 1, NE btn <= 1 per Emard!
                 self.enable[0] &= 1  # Clear wait bit
         else:
-            # Check for cursor combo: 0x1E (ULX3S mapping: UP+DOWN+LEFT+RIGHT)
-            if (btn & 0x1E) == 0x1E:  # VERIFIED via debug_buttons()
+            # Check for cursor combo: 0x78 (UP+DOWN+LEFT+RIGHT)
+            if (btn & 0x78) == 0x78:
                 self.enable[0] = (self.enable[0] ^ 1) | 2  # Toggle OSD, set wait
                 self._osd_enable_hw(self.enable[0] & 1)
                 self.osd_visible = bool(self.enable[0] & 1)
@@ -598,8 +595,8 @@ class OsdController:
                     self.updir()
                 elif btn_only == BTN_RIGHT:
                     self.select_entry()
-                elif btn_only == BTN_F1:
-                    # F1 = refresh directory listing
+                elif btn_only == BTN_FIRE1:
+                    # FIRE1 = refresh directory listing
                     self.refresh_dir()
 
     # =========================================================================
@@ -628,21 +625,19 @@ class OsdController:
         return spi_result[6]  # FIXED: Position 6 per Emard!
 
     def _osd_enable_hw(self, en):
-        """Low-level OSD enable/disable - FIXED 2026-02-14 per Emardov pristup
+        """Low-level OSD enable/disable - MiSTer compatible (0x41=ON, 0x40=OFF)
 
-        Emard koristi 6-byte format: [0, 0xFE, 0, 0, 0, en]
-        Ovo osigurava kompatibilnost s esp32_osd.v firmware.
+        FIXED 2026-02-14: esp32_osd.v expects MiSTer format - single byte command.
+        0x41 = OSD enable, 0x40 = OSD disable
         """
         self._cs_active()
-        # FIXED: Use Emard's 6-byte format for OSD enable
-        self.spi.write(bytearray([0, 0xFE, 0, 0, 0, 1 if en else 0]))
+        self.spi.write(bytearray([0x41 if en else 0x40]))
         self._cs_inactive()
 
     def osd_enable(self, enable):
-        """Enable or disable OSD overlay - FIXED 2026-02-14 per Emardov pristup"""
+        """Enable or disable OSD overlay - MiSTer compatible (0x41=ON, 0x40=OFF)"""
         self._cs_active()
-        # FIXED: Use Emard's 6-byte format for OSD enable
-        self.spi.write(bytearray([0, 0xFE, 0, 0, 0, 1 if enable else 0]))
+        self.spi.write(bytearray([0x41 if enable else 0x40]))
         self._cs_inactive()
 
     def osd_write_line(self, line, text):
@@ -727,7 +722,7 @@ class OsdController:
             self.show_dir_line(i)
 
         # Footer with instructions
-        self.osd_write_line(15, "U/D:Nav L:Bk R:Sel F1:Rfsh")
+        self.osd_write_line(15, "U/D:Nav L:Bk R:Sel FIRE1:Rfsh")
 
     def show_dir_line(self, y):
         """Show single directory line - C64 style"""
@@ -783,7 +778,7 @@ class OsdController:
             self.fb_topitem = 0
 
         self.show_dir()
-        self.osd_write_line(15, "F1:Refresh {} files".format(new_count))
+        self.osd_write_line(15, "FIRE1:Refresh {} files".format(new_count))
 
     def move_dir_cursor(self, step):
         """Move cursor in directory - C64 style"""
@@ -1002,6 +997,12 @@ def start_osd(mount_sd=True):
     osd.init_fb()  # Initialize file browser
     osd.cwd = cwd_start
     osd.direntries = direntries_cache  # Use cached directory
+
+    # FORCE OSD OFF at startup - ignores SW1 position
+    osd._osd_enable_hw(0)  # Disable OSD hardware
+    osd.enable[0] = 0      # Clear enable state
+    osd.osd_visible = False
+
     osd.setup_irq()
 
     # Handle any pending IRQ
@@ -1030,8 +1031,14 @@ def run():
     # Disable IRQ - koristimo polling umjesto toga
     osd.disable_irq()
 
+    # FORCE OSD OFF - override SW1 position
+    osd._osd_enable_hw(0)
+    osd.enable[0] = 0
+    osd.osd_visible = False
+
     print("OSD Running - DIRECT POLLING mode")
-    print("Combo: UP+DOWN+LEFT+RIGHT to toggle OSD")
+    print("SW1 position ignored - OSD starts DISABLED")
+    print("Combo: UP+DOWN+LEFT+RIGHT (0x78) to toggle OSD")
     print("Press Ctrl+C to exit")
 
     last_btn = 0
@@ -1091,7 +1098,7 @@ def debug_buttons(duration_sec=30):
     print("BUTTON DEBUG MODE - ULX3S")
     print("=" * 50)
     print("Reading byte 6 (per Emard)")
-    print("OSD Combo: (btn & 0x1E) == 0x1E (ULX3S mapping)")
+    print("OSD Combo: (btn & 0x78) == 0x78 (UP+DOWN+LEFT+RIGHT)")
     print("Wait for release: btn == 1")
     print("Press Ctrl+C to exit")
     print("=" * 50)
@@ -1125,17 +1132,17 @@ def debug_buttons(duration_sec=30):
             # Only print when something changes or IRQ detected
             if btn != last_btn or (irq_flags & 0x80):
                 parts = []
+                if btn & BTN_FIRE1: parts.append("FIRE1")
+                if btn & BTN_FIRE2: parts.append("FIRE2")
                 if btn & BTN_UP:    parts.append("UP")
                 if btn & BTN_DOWN:  parts.append("DOWN")
                 if btn & BTN_LEFT:  parts.append("LEFT")
                 if btn & BTN_RIGHT: parts.append("RIGHT")
-                if btn & BTN_F1:    parts.append("F1")
-                if btn & BTN_F2:    parts.append("F2")
 
                 if parts:
                     msg = "+".join(parts)
-                    # Check for OSD combo (ULX3S mapping: 0x1E)
-                    if (btn & 0x1E) == 0x1E:
+                    # Check for OSD combo (0x78 = UP+DOWN+LEFT+RIGHT)
+                    if (btn & 0x78) == 0x78:
                         msg += "  <<< OSD COMBO!"
                     print("BTN: 0x{:02X} = {}  IRQ:0x{:02X}".format(btn, msg, irq_flags))
                 elif btn == 0 and last_btn != 0:
