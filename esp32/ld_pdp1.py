@@ -446,7 +446,7 @@ def test_minimal():
 #
 # CHANGES:
 # 1. Button combo: 0x1E (UP+DOWN+LEFT+RIGHT) umjesto 0x7E (sve tipke)
-# 2. IRQ: PULL_UP + IRQ_FALLING (kao C64) umjesto PULL_DOWN + IRQ_RISING
+# 2. IRQ: PULL_DOWN + IRQ_RISING (FPGA drives active-high)
 # 3. SPI read: write_readinto sa padding (kao C64 spi_read_btn)
 # 4. Enable state tracking: enable bytearray za wait-for-release
 # =============================================================================
@@ -503,14 +503,14 @@ class OsdController:
     # =========================================================================
 
     def setup_irq(self):
-        """Setup IRQ handler for FPGA button events - C64 style"""
+        """Setup IRQ handler for FPGA button events - ACTIVE HIGH from FPGA"""
         try:
-            # C64 uses: Pin.PULL_UP + IRQ_FALLING
-            self.irq_pin = Pin(gpio_irq, Pin.IN, Pin.PULL_UP)
+            # FIXED 2026-02-14: FPGA drives IRQ active-high, use PULL_DOWN + RISING
+            self.irq_pin = Pin(gpio_irq, Pin.IN, Pin.PULL_DOWN)
             self._irq_handler_ref = self._irq_handler  # Prevent GC
-            self.irq_pin.irq(trigger=Pin.IRQ_FALLING, handler=self._irq_handler_ref)
+            self.irq_pin.irq(trigger=Pin.IRQ_RISING, handler=self._irq_handler_ref)
             self._irq_enabled = True
-            print("IRQ on GPIO{} (PULL_UP, FALLING)".format(gpio_irq))
+            print("IRQ on GPIO{} (PULL_DOWN, RISING)".format(gpio_irq))
             print("OSD combo: UP+DOWN+LEFT+RIGHT (4 tipke)")
         except Exception as e:
             print("IRQ setup failed: {}".format(e))
