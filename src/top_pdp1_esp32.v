@@ -1026,10 +1026,10 @@ module top_pdp1_esp32
         // Debug outputs
         .debug_osd_enable   (w_debug_osd_enable),
         .debug_osd_wr_en    (w_debug_osd_wr_en),
-        .debug_spi_rx_valid (w_debug_spi_rx_valid),
+        .debug_spi_rx_valid (w_debug_spi_rx_valid)
         // Fallback OSD enable via DIP switch SW[2]
         // When SW[2]=ON, OSD is always visible (for testing without SPI)
-        .ext_osd_enable     (sw[2])
+        //.ext_osd_enable     (sw[2])
     );
 
     // -------------------------------------------------------------------------
