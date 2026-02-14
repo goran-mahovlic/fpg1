@@ -449,13 +449,17 @@ _spi_instance = None
 def release_sd_pins():
     """Put SD card pins in high-impedance mode - Emard pattern
 
-    KRITIČNO: Moramo otpustiti pinove TOČNO kao Emard:
-    - Pročitaj vrijednost pina (forcing high-Z read)
-    - Obriši referencu
+    FIXED 2026-02-14 by Jelena: POTPUNI SPI release s delay-em!
+
+    KRITIČNO za ESP32:
+    1. Deinit SPI (oslobodi driver)
+    2. DELAY 100ms (hardware settle - ESP32 treba vrijeme!)
+    3. Release pinovi na high-Z
+    4. GC collect
     """
     global _spi_instance
 
-    # FIRST: Deinit SPI if active - KRITIČNO!
+    # Step 1: Deinit SPI if active - KRITIČNO!
     if _spi_instance is not None:
         try:
             _spi_instance.deinit()
@@ -464,12 +468,25 @@ def release_sd_pins():
             pass
         _spi_instance = None
 
-    # SD pins that need to be released: 2, 4, 12, 13, 14, 15
+    # Step 2: DELAY za SPI hardware settle - OBAVEZNO!
+    # ESP32 SPI driver ne oslobada bus instantno!
+    time.sleep_ms(100)
+
+    # Step 3: SD pins that need to be released: 2, 4, 12, 13, 14, 15
     # Per Emard: create Pin as INPUT, read value, delete
     for i in bytearray([2, 4, 12, 13, 14, 15]):
         try:
             p = Pin(i, Pin.IN)
             a = p.value()  # Force read to release driver
+            del p, a
+        except:
+            pass
+
+    # Step 3b: Takoder oslobodi SPI pinove (mogu biti razliciti od SD)
+    for pin_num in [gpio_mosi, gpio_miso, gpio_sck]:
+        try:
+            p = Pin(pin_num, Pin.IN)
+            a = p.value()
             del p, a
         except:
             pass
@@ -1010,8 +1027,9 @@ class OsdController:
         print(">>> read_dir_safe START")
         print("    cwd={}".format(self.cwd))
 
-        # Step 1: Deinit SPI to release GPIO 4, 12
-        print(">>> Step 1: Deinit SPI...")
+        # Step 1: POTPUNI SPI deinit - KRITIČNO za ESP32!
+        # FIXED 2026-02-14 by Jelena: Delay ODMAH nakon deinit!
+        print(">>> Step 1: Deinit SPI (POTPUNO)...")
         if self.spi:
             try:
                 self.spi.deinit()
@@ -1027,6 +1045,11 @@ class OsdController:
                 print("    _spi_instance.deinit() error: {}".format(e))
             _spi_instance = None
 
+        # Step 1b: DELAY za SPI hardware settle - OBAVEZNO ODMAH!
+        # ESP32 SPI driver ne oslobada bus instantno!
+        time.sleep_ms(100)
+        print("    SPI settle delay OK")
+
         # Step 2: Release SD pins to high-Z (Emard pattern)
         print(">>> Step 2: Release SD pins to high-Z...")
         for i in bytearray([2, 4, 12, 13, 14, 15]):
@@ -1037,6 +1060,20 @@ class OsdController:
             except:
                 pass
 
+        # Step 2b: Takoder oslobodi SPI pinove (MOSI=4, MISO=12, SCK=26)
+        # Ovo je DODATNI korak jer slot=3 koristi ISTE pinove!
+        for pin_num in [gpio_mosi, gpio_miso, gpio_sck]:
+            try:
+                p = Pin(pin_num, Pin.IN)
+                a = p.value()
+                del p, a
+            except:
+                pass
+        print("    All pins released")
+
+        # Step 2c: Force GC da ukloni sve reference
+        gc.collect()
+
         # Step 3: Unmount SD (KRITIČNO - mora se unmountat prije remount!)
         print(">>> Step 3: Unmount SD...")
         try:
@@ -1045,9 +1082,9 @@ class OsdController:
         except Exception as e:
             print("    Unmount: {} (OK if not mounted)".format(e))
 
-        # Step 4: Wait for hardware settle
-        print(">>> Step 4: Hardware settle 150ms...")
-        time.sleep_ms(150)
+        # Step 4: Wait for hardware settle NAKON unmount
+        print(">>> Step 4: Hardware settle 100ms...")
+        time.sleep_ms(100)
         gc.collect()
 
         # Step 5: Mount SD with slot=3 (SPI MODE - KRITIČNO!)
@@ -1105,6 +1142,10 @@ class OsdController:
 
     def fullpath(self, fname):
         """Get full path for filename"""
+        # If fname already starts with /, it's absolute - return as is
+        if fname.startswith("/"):
+            return fname
+        # Otherwise, prepend cwd
         if self.cwd.endswith("/"):
             return self.cwd + fname
         else:
@@ -1314,37 +1355,71 @@ class OsdController:
         # Show loading message
         self.osd_write_line(15, "Loading {}...".format(fname[:20]))
 
-        # Step 1: Deinit SPI to release GPIO 4, 12
-        print("load_file: Deinit SPI...")
+        # Step 1: POTPUNI SPI deinit - KRITIČNO za ESP32!
+        # ESP32 SPI driver ne oslobada bus instantno - treba delay!
+        # FIXED 2026-02-14 by Jelena: Dodani eksplicitni deinit + delay
+        print("load_file: Deinit SPI (POTPUNO)...")
+
+        # 1a. Deinit self.spi instance
         if self.spi:
             try:
                 self.spi.deinit()
-            except:
-                pass
+                print("  self.spi.deinit() OK")
+            except Exception as e:
+                print("  self.spi.deinit() error: {}".format(e))
             self.spi = None
+
+        # 1b. Deinit global _spi_instance (KRITIČNO!)
         if _spi_instance:
             try:
                 _spi_instance.deinit()
-            except:
-                pass
+                print("  _spi_instance.deinit() OK")
+            except Exception as e:
+                print("  _spi_instance.deinit() error: {}".format(e))
             _spi_instance = None
 
-        # Step 2: Release SD pins to high-Z
+        # 1c. DELAY za SPI hardware settle - OBAVEZNO!
+        # ESP32 treba 50-100ms da potpuno oslobodi SPI bus
+        time.sleep_ms(100)
+        print("  SPI settle delay OK")
+
+        # Step 2: Release SD pins to high-Z (Emard pattern)
+        # KRITIČNO: GPIO moraju biti high-Z prije SD mount-a!
+        print("load_file: Release pins to high-Z...")
         for i in bytearray([2, 4, 12, 13, 14, 15]):
             try:
                 p = Pin(i, Pin.IN)
-                a = p.value()
+                a = p.value()  # Force read to release driver
                 del p, a
             except:
                 pass
 
+        # 2b. Takoder oslobodi SPI pinove (MOSI=4, MISO=12, SCK=26)
+        # Ovo je DODATNI korak jer slot=3 koristi ISTE pinove!
+        for pin_num in [gpio_mosi, gpio_miso, gpio_sck]:
+            try:
+                p = Pin(pin_num, Pin.IN)
+                a = p.value()
+                del p, a
+            except:
+                pass
+        print("  Pins released")
+
+        # 2c. Force garbage collection da ukloni sve reference
+        gc.collect()
+
         # Step 3: Mount SD with slot=3 (SPI mode)
         print("load_file: Mount SD slot=3...")
         from machine import SDCard
+
+        # 3a. Unmount ako je mountano
         try:
             os.umount("/sd")
+            print("  Unmount OK")
         except:
             pass
+
+        # 3b. DODATNI delay nakon unmount - hardware mora settle!
         time.sleep_ms(100)
 
         sd_ok = False
@@ -1398,7 +1473,8 @@ class OsdController:
             print("[RIM] Loading RIM/BIN file: {}".format(fname))
             print("[RIM] ========================================")
 
-            self._osd_enable_hw(0)
+            # NOTE: Can't call _osd_enable_hw() here - SPI is None!
+            # OSD will be disabled AFTER we reinit SPI (Step 7)
             self.enable[0] = 0
             self.osd_visible = False
 
@@ -1410,11 +1486,17 @@ class OsdController:
                 print("[RIM] File read OK: {} bytes".format(len(file_data)))
             except Exception as e:
                 print("[RIM ERROR] File read failed: {}".format(e))
+                # FIRST reinit SPI, THEN enable OSD
+                try:
+                    os.umount("/sd")
+                except:
+                    pass
+                release_sd_pins()
+                self.spi, self.cs = init_spi()
                 self._osd_enable_hw(1)
                 self.enable[0] = 1
                 self.osd_visible = True
                 self.osd_write_line(15, "READ FAILED!")
-                self.spi, self.cs = init_spi()
                 return
 
             gc.collect()
@@ -1435,6 +1517,9 @@ class OsdController:
             print("[RIM] Step 7: Reinitializing SPI...")
             self.spi, self.cs = init_spi()
             print("[RIM] SPI ready")
+
+            # Step 7b: NOW disable OSD (SPI is ready)
+            self._osd_enable_hw(0)
 
             # Step 8: Send data to FPGA with RETRY + WATCHDOG protection!
             # FIXED 2026-02-14 by Jelena: verbose=True for debug output
