@@ -37,7 +37,9 @@ gpio_mosi = const(4)
 
 # SPI channel and frequency - CRITICAL: use channel 2, not 1!
 spi_channel = const(2)  # VSPI on ESP32
-spi_freq = const(3000000)  # 3 MHz - stable, tested by emard
+# FIXED 2026-02-13: Changed from 3MHz to 1MHz for better timing margin
+# 3MHz caused SPI commands to fail on ULX3S v3.1.7 with ESP32 OSD bitstream
+spi_freq = const(1000000)  # 1 MHz - verified working
 
 # SPI Commands (MiSTer compatible via esp32_osd.v)
 CMD_FILE_TX_EN   = const(0x53)
@@ -224,6 +226,50 @@ class ld_pdp1:
         gc.collect()
         return True
 
+    def load_from_bytes(self, data, verbose=True):
+        """Load RIM paper tape data from bytes (already in memory)
+
+        ADDED 2026-02-13: Allows loading from pre-read file data,
+        solving SD/SPI pin conflict by reading file before SPI init.
+        """
+        if verbose:
+            print("Sending {} bytes to FPGA...".format(len(data)))
+
+        # Set file index for RIM type
+        self.file_index(FILE_INDEX_RIM)
+
+        # Enable file transfer
+        self.file_tx_enable(True)
+
+        # Stream data in chunks
+        CHUNK_SIZE = 256
+        total_sent = 0
+        offset = 0
+
+        try:
+            while offset < len(data):
+                chunk = data[offset:offset + CHUNK_SIZE]
+                self.file_tx_data(chunk)
+                total_sent += len(chunk)
+                offset += CHUNK_SIZE
+                if verbose and total_sent % 1024 == 0:
+                    print("  {}/{} bytes".format(total_sent, len(data)))
+                    gc.collect()  # Prevent memory fragmentation
+        except Exception as e:
+            print("Error during transfer: {}".format(e))
+            self.file_tx_enable(False)
+            gc.collect()
+            return False
+
+        # Disable file transfer
+        self.file_tx_enable(False)
+
+        if verbose:
+            print("Done. Sent {} bytes.".format(total_sent))
+
+        gc.collect()
+        return True
+
     def load_and_run(self, filename, verbose=True):
         """Load RIM file and start execution with proper halt/reset/run sequence"""
         # Halt CPU before loading
@@ -240,6 +286,35 @@ class ld_pdp1:
 
         # Load the file
         if self.load(filename, verbose):
+            time.sleep_ms(100)  # Wait for FPGA to process
+
+            # Start CPU
+            if verbose:
+                print("Starting CPU...")
+            self.cpu_run()
+            gc.collect()
+            return True
+        return False
+
+    def load_and_run_from_bytes(self, data, verbose=True):
+        """Load RIM data from bytes and start execution
+
+        ADDED 2026-02-13: Companion to load_from_bytes for pre-read data.
+        """
+        # Halt CPU before loading
+        if verbose:
+            print("Halting CPU...")
+        self.cpu_halt()
+        time.sleep_ms(50)
+
+        # Reset CPU
+        if verbose:
+            print("Resetting CPU...")
+        self.cpu_reset()
+        time.sleep_ms(50)
+
+        # Load from bytes
+        if self.load_from_bytes(data, verbose):
             time.sleep_ms(100)  # Wait for FPGA to process
 
             # Start CPU
@@ -268,15 +343,48 @@ def release_sd_pins():
 
 # Convenience function for interactive use
 def load(filename):
-    """Quick load function - initializes SPI and loads file"""
-    # Release SD card pins first
-    release_sd_pins()
+    """Quick load function - initializes SPI and loads file
 
-    # Initialize SPI with correct settings
+    FIXED 2026-02-13: Read file into memory BEFORE releasing SD pins!
+    GPIO 4 (MOSI) and GPIO 12 (MISO) are shared between SD and SPI.
+    Previous code released SD pins first, which unmounted SD card.
+
+    New sequence:
+    1. Read file into memory (SD still works)
+    2. Release SD pins (unmounts SD but we have data in RAM)
+    3. Init SPI and send data to FPGA
+    """
+    # Step 1: Read file into memory while SD is still accessible
+    try:
+        stat = os.stat(filename)
+        filesize = stat[6]
+    except OSError as e:
+        print("Error: File not found: {} ({})".format(filename, e))
+        return False
+
+    print("Reading {} ({} bytes) into memory...".format(filename, filesize))
+
+    try:
+        with open(filename, "rb") as f:
+            file_data = f.read()
+    except OSError as e:
+        print("Error: Cannot read file: {}".format(e))
+        return False
+
+    gc.collect()
+    print("File loaded into RAM ({} bytes)".format(len(file_data)))
+
+    # Step 2: Now release SD pins and initialize SPI
+    # NOTE: Commented out - SPI works without releasing SD pins on ULX3S v3.1.7
+    # release_sd_pins()
+
+    # Initialize SPI with correct settings (1 MHz for stability)
     spi, cs = init_spi()
 
     ld = ld_pdp1(spi, cs)
-    result = ld.load_and_run(filename)
+
+    # Step 3: Send data to FPGA using modified load_from_bytes method
+    result = ld.load_and_run_from_bytes(file_data, verbose=True)
     gc.collect()
     return result
 
@@ -414,49 +522,64 @@ class OsdController:
                 pass
 
     def _irq_handler(self, pin):
-        """Handle IRQ from FPGA - C64 style with button combo detection
+        """Handle IRQ from FPGA - button combo detection
 
-        Based on emard/ulx3s_c64/esp32/osd/osd.py irq_handler()
-        FIXED 2026-02-13: Read response at position 2, not 6.
+        ULX3S Button mapping (from ulx3s_input.v):
+          BTN[0] = PWR (not used, always 0 or 1)
+          BTN[1] = UP    = 0x02
+          BTN[2] = DOWN  = 0x04
+          BTN[3] = LEFT  = 0x08
+          BTN[4] = RIGHT = 0x10
+          BTN[5] = F1    = 0x20
+          BTN[6] = F2    = 0x40
+
+        NOTE: Button values are ACTIVE-HIGH after FPGA debounce.
+        When no buttons pressed, btn = 0x00 or 0x01 (depending on BTN[0]).
         """
         # Read IRQ flags first
         self._cs_active()
         self.spi.write_readinto(spi_read_irq, spi_result)
         self._cs_inactive()
-        btn_irq = spi_result[2]  # Position 2, not 6!
+        btn_irq = spi_result[2]  # Response at position 2
 
-        # Check if it's a button event (bit 7)
+        # Check if it's a button event (bit 7 = IRQ pending)
         if btn_irq & 0x80:
-            # Read button status
+            # Read button status (also clears IRQ)
             self._cs_active()
             self.spi.write_readinto(spi_read_btn, spi_result)
             self._cs_inactive()
-            btn = spi_result[2]  # Position 2, not 6!
+            btn = spi_result[2] & 0x7F  # Mask out bit 7, keep btn[6:0]
 
-            # State machine like C64
+            # Debug output
+            if btn > 1:
+                print("BTN: 0x{:02x}".format(btn))
+
+            # State machine
             if self.enable[0] & 2:  # Wait for all buttons released
-                if btn == 1:  # Only BTN[0] (or none) pressed
+                if btn <= 1:  # No buttons pressed (or just BTN[0])
                     self.enable[0] &= 1  # Clear wait bit
             else:
-                # Check for cursor combo: (btn & 0x1E) == 0x1E
-                # 0x1E = UP(0x02) | DOWN(0x04) | LEFT(0x08) | RIGHT(0x10)
+                # Check for cursor combo: UP+DOWN+LEFT+RIGHT = 0x1E
                 if (btn & 0x1E) == 0x1E:
-                    self.read_dir()  # Refresh directory
+                    self.read_dir()  # Refresh directory (may fail if SD busy)
                     self.enable[0] = (self.enable[0] ^ 1) | 2  # Toggle OSD, set wait
                     self._osd_enable_hw(self.enable[0] & 1)
                     self.osd_visible = bool(self.enable[0] & 1)
+                    print("OSD toggle: {}".format("ON" if self.osd_visible else "OFF"))
                     if self.osd_visible:
                         self.show_dir()
 
                 # Normal button handling when OSD visible
-                if self.enable[0] == 1:  # OSD on, not waiting
-                    if btn == 0x02 | 1:  # UP + idle
+                elif self.enable[0] == 1:  # OSD on, not waiting
+                    # Single button press detection (with BTN[0] possibly set)
+                    btn_only = btn & 0x7E  # Mask out BTN[0]
+                    if btn_only == BTN_UP:
                         self.menu_up()
-                    if btn == 0x04 | 1:  # DOWN + idle
+                    elif btn_only == BTN_DOWN:
                         self.menu_down()
-                    if btn == 0x08 | 1:  # LEFT = back/up dir
+                    elif btn_only == BTN_LEFT:
                         self.updir()
-                    if btn == 0x10 | 1:  # RIGHT = select
+                    elif btn_only == BTN_RIGHT:
                         self.select_entry()
 
     # =========================================================================
@@ -535,11 +658,17 @@ class OsdController:
         self.screen_y = 14  # OSD lines for directory display (lines 1-14)
 
     def read_dir(self):
-        """Read directory contents - C64 style"""
+        """Read directory contents - C64 style
+
+        NOTE: SD card pins (GPIO 4, 12) are shared with SPI. When SPI is active,
+        SD card may not be accessible. If directory read fails, keep existing
+        cached entries.
+        """
         if not hasattr(self, 'cwd'):
             self.init_fb()
 
-        self.direntries = []
+        # Try to read directory, but don't clear existing cache if it fails
+        new_entries = []
         try:
             ls = sorted(os.listdir(self.cwd))
             for fname in ls:
@@ -547,16 +676,19 @@ class OsdController:
                     fullpath = self.fullpath(fname)
                     stat = os.stat(fullpath)
                     if stat[0] & 0o170000 == 0o040000:
-                        self.direntries.append([fname, 1, 0])  # directory
+                        new_entries.append([fname, 1, 0])  # directory
                     else:
                         # Filter: only show .rim, .bin, .bit files
                         if fname.endswith('.rim') or fname.endswith('.bin') or fname.endswith('.bit'):
-                            self.direntries.append([fname, 0, stat[6]])  # file
+                            new_entries.append([fname, 0, stat[6]])  # file
                 except:
                     pass
                 gc.collect()
+            # Only update if we got entries (SD was accessible)
+            if new_entries:
+                self.direntries = new_entries
         except Exception as e:
-            print("read_dir error: {}".format(e))
+            print("read_dir: SD not accessible, using cache")
 
     def fullpath(self, fname):
         """Get full path for filename"""
@@ -678,7 +810,16 @@ class OsdController:
         self.show_dir()
 
     def load_file(self, fname):
-        """Load selected file"""
+        """Load selected file
+
+        IMPORTANT: GPIO 4 (MOSI) and GPIO 12 (MISO) are shared between SD
+        and SPI. To load a file, we must:
+        1. Read file into memory (while SD is accessible)
+        2. Close SD access
+        3. Release SD pins
+        4. Reinit SPI
+        5. Send data to FPGA
+        """
         fullpath = self.fullpath(fname)
 
         # Show loading message
@@ -686,13 +827,17 @@ class OsdController:
 
         # Handle different file types
         if fname.endswith('.bit'):
-            # FPGA bitstream
+            # FPGA bitstream - ecp5.prog() handles file reading internally
             self._osd_enable_hw(0)
             self.enable[0] = 0
             try:
                 import ecp5
+                # NOTE: ecp5.prog() deinits SPI, so we need to reinit after
                 ecp5.prog(fullpath)
                 print("Loaded bitstream: {}".format(fullpath))
+                # Reinit SPI after ecp5.prog()
+                release_sd_pins()
+                self.spi, self.cs = init_spi()
             except Exception as e:
                 print("Bitstream load error: {}".format(e))
                 self._osd_enable_hw(1)
@@ -700,13 +845,37 @@ class OsdController:
                 self.osd_write_line(15, "LOAD ERROR!")
                 return
         elif fname.endswith('.rim') or fname.endswith('.bin'):
-            # PDP-1 tape file
+            # PDP-1 tape file - MUST read into memory first!
             self._osd_enable_hw(0)
             self.enable[0] = 0
             self.osd_visible = False
 
+            # Step 1: Read file into memory while SD is still accessible
+            try:
+                with open(fullpath, "rb") as f:
+                    file_data = f.read()
+                print("Read {} bytes into memory".format(len(file_data)))
+            except Exception as e:
+                print("File read error: {}".format(e))
+                self._osd_enable_hw(1)
+                self.enable[0] = 1
+                self.osd_visible = True
+                self.osd_write_line(15, "READ FAILED!")
+                return
+
+            gc.collect()
+
+            # Step 2: Release SD pins to allow clean SPI access
+            release_sd_pins()
+
+            # Step 3: Reinitialize SPI (pins now free from SD)
+            self.spi, self.cs = init_spi()
+
+            # Step 4: Send data to FPGA using load_from_bytes
             loader = ld_pdp1(self.spi, self.cs)
-            result = loader.load_and_run(fullpath, verbose=False)
+            result = loader.load_and_run_from_bytes(file_data, verbose=False)
+
+            gc.collect()
 
             if not result:
                 self._osd_enable_hw(1)
@@ -739,6 +908,9 @@ def start_osd(mount_sd=True):
 
     Args:
         mount_sd: If True, mount SD card first (default)
+
+    IMPORTANT: GPIO 4 (MOSI) and GPIO 12 (MISO) are shared between SD card
+    and SPI. SD card must be unmounted and pins released before SPI works!
     """
     # Mount SD card like C64 does
     if mount_sd:
@@ -750,10 +922,46 @@ def start_osd(mount_sd=True):
             print("SD mount: {}".format(e))
 
     # Initialize OSD controller
+    # CRITICAL: OsdController.init_spi() will configure GPIO 12 for SPI MISO
+    # But SD card may still hold these pins. We need to release them first!
+
+    # Step 1: Read directory listing into memory while SD is accessible
+    direntries_cache = []
+    cwd_start = "/sd"
+    try:
+        ls = sorted(os.listdir(cwd_start))
+        for fname in ls:
+            try:
+                fullpath = cwd_start + "/" + fname
+                stat = os.stat(fullpath)
+                if stat[0] & 0o170000 == 0o040000:
+                    direntries_cache.append([fname, 1, 0])  # directory
+                else:
+                    if fname.endswith('.rim') or fname.endswith('.bin') or fname.endswith('.bit'):
+                        direntries_cache.append([fname, 0, stat[6]])  # file
+            except:
+                pass
+        gc.collect()
+    except Exception as e:
+        print("read_dir error: {}".format(e))
+
+    # Step 2: Unmount SD and release pins for SPI
+    # NOTE: Commented out for now - keep SD mounted for file loading
+    # try:
+    #     os.umount("/sd")
+    #     print("SD unmounted for SPI")
+    # except:
+    #     pass
+
+    # Step 3: Release SD pins to allow SPI access
+    # CRITICAL: This releases GPIO 4 and 12 from SD card controller
+    release_sd_pins()
+
+    # Step 4: Initialize OSD controller (will init SPI)
     osd = OsdController()
     osd.init_fb()  # Initialize file browser
-    osd.cwd = "/sd"  # Start in SD card directory
-    osd.read_dir()  # Pre-read directory
+    osd.cwd = cwd_start
+    osd.direntries = direntries_cache  # Use cached directory
     osd.setup_irq()
 
     # Handle any pending IRQ

@@ -37,6 +37,7 @@ module esp32_osd #(
     input         spi_clk,
     input         spi_mosi,
     output        spi_miso,
+    output        spi_miso_oe,    // Output enable for MISO tristate
     input         spi_cs_n,
 
     // Handshake signals
@@ -177,6 +178,7 @@ module esp32_osd #(
         .spi_clk   (spi_clk),
         .spi_mosi  (spi_mosi),
         .spi_miso  (spi_miso),
+        .spi_miso_oe (spi_miso_oe),
         .spi_cs_n  (spi_cs_n),
         .rx_data   (spi_rx_data),
         .rx_valid  (spi_rx_valid),
@@ -199,6 +201,23 @@ module esp32_osd #(
     );
 
     // =========================================================================
+    // Clock Domain Crossing: osd_enable (clk_sys -> clk_video)
+    // =========================================================================
+    // osd_enable_combined = SPI-controlled OR external (fallback) enable
+    // NOTE: This must be BEFORE osd_renderer instantiation!
+    wire osd_enable_combined = osd_enable | ext_osd_enable;
+
+    reg [2:0] osd_enable_sync_reg;
+    wire      osd_enable_sync = osd_enable_sync_reg[2];
+
+    always @(posedge clk_video or negedge rst_n) begin
+        if (!rst_n)
+            osd_enable_sync_reg <= 3'b000;
+        else
+            osd_enable_sync_reg <= {osd_enable_sync_reg[1:0], osd_enable_combined};
+    end
+
+    // =========================================================================
     // OSD Renderer Instance
     // =========================================================================
     esp32_osd_renderer u_osd_renderer (
@@ -216,22 +235,6 @@ module esp32_osd #(
     );
 
     // =========================================================================
-    // Clock Domain Crossing: osd_enable (clk_sys -> clk_video)
-    // =========================================================================
-    // osd_enable_combined = SPI-controlled OR external (fallback) enable
-    wire osd_enable_combined = osd_enable | ext_osd_enable;
-
-    reg [2:0] osd_enable_sync_reg;
-    wire      osd_enable_sync = osd_enable_sync_reg[2];
-
-    always @(posedge clk_video or negedge rst_n) begin
-        if (!rst_n)
-            osd_enable_sync_reg <= 3'b000;
-        else
-            osd_enable_sync_reg <= {osd_enable_sync_reg[1:0], osd_enable_combined};
-    end
-
-    // =========================================================================
     // Button Change Detection and IRQ Generation (ADDED 2026-02-13)
     // =========================================================================
     // Monitors btn_state[6:1] for changes (btn[0]=PWR is excluded).
@@ -247,10 +250,14 @@ module esp32_osd #(
             // Sample previous button state
             r_btn_prev <= btn_state;
 
+            // ALWAYS update latched state with current buttons
+            // This ensures tx_data always has fresh button state
+            r_btn_latched <= btn_state;
+
             // Detect any button change on BTN[6:1] (exclude BTN[0]=PWR)
+            // Only raise IRQ on CHANGE, but always keep state updated
             if (btn_state[6:1] != r_btn_prev[6:1]) begin
-                r_btn_latched  <= btn_state;  // Latch current state for ESP32
-                irq_pending    <= 1'b1;       // Raise IRQ
+                irq_pending <= 1'b1;  // Raise IRQ on change
             end
 
             // Clear IRQ when ESP32 reads button status
@@ -289,6 +296,10 @@ module esp32_osd #(
             osd_wr_en   <= 1'b0;
             file_wr     <= 1'b0;
             spi_tx_load <= 1'b0;
+
+            // ALWAYS keep tx_data updated with button state
+            // This allows pre-loading in SPI slave for faster response
+            spi_tx_data <= {1'b0, r_btn_latched[6:0]};
 
             if (spi_rx_valid) begin
                 case (cmd_state)

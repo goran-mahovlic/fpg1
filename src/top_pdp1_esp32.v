@@ -105,7 +105,7 @@ module top_pdp1_esp32
     ,
     input  wire        esp32_spi_clk,  // SPI clock from ESP32
     input  wire        esp32_spi_mosi, // SPI data from ESP32
-    output wire        esp32_spi_miso, // SPI data to ESP32
+    inout  wire        esp32_spi_miso, // SPI data to ESP32 (tristate!)
     input  wire        esp32_spi_cs_n, // SPI chip select (active-low)
     output wire        esp32_osd_irq,  // Interrupt to ESP32
     input  wire        esp32_ready     // ESP32 ready signal
@@ -488,23 +488,21 @@ module top_pdp1_esp32
                 r_spi_rx_seen       <= 1'b0;
             end
 
-            // LED mapping for OSD debug (active-high = ON):
+            // LED mapping for BUTTON DEBUG (temporary):
             // LED[0] = Heartbeat (blink ~3Hz shows FPGA is running)
-            // LED[1] = SPI CS# seen (sticky - goes ON when CS goes LOW)
-            // LED[2] = SPI activity seen (sticky - CLK toggled while CS active)
-            // LED[3] = CS# current state (inverted - ON when CS active)
-            // LED[4] = OSD IRQ pending
-            // LED[5] = ESP32 ready signal
-            // LED[6] = File download active (ioctl_download)
-            // LED[7] = File write strobe (ioctl_wr) - blinks during file transfer
+            // LED[1-6] = w_btn_direct[1-6] directly (button state)
+            // LED mapping for Button Debug:
+            // LED[0] = Heartbeat (shows FPGA running)
+            // LED[1-6] = Button state (BTN UP/DOWN/LEFT/RIGHT/F1/F2)
+            // LED[7] = OSD IRQ pending
             led[0] <= r_led_blink[23];   // Heartbeat ~3Hz
-            led[1] <= r_spi_cs_seen;      // CS# went active at least once
-            led[2] <= r_spi_activity_seen; // SPI clock activity detected
-            led[3] <= ~esp32_spi_cs_n;    // CS# current (inverted for ON=active)
-            led[4] <= esp32_osd_irq;      // OSD IRQ to ESP32
-            led[5] <= esp32_ready;        // ESP32 ready
-            led[6] <= w_ioctl_download;   // RIM download in progress
-            led[7] <= w_ioctl_wr;         // Write strobe to RIM loader
+            led[1] <= w_btn_direct[1];   // BTN UP
+            led[2] <= w_btn_direct[2];   // BTN DOWN
+            led[3] <= w_btn_direct[3];   // BTN LEFT
+            led[4] <= w_btn_direct[4];   // BTN RIGHT
+            led[5] <= w_btn_direct[5];   // BTN F1
+            led[6] <= w_btn_direct[6];   // BTN F2
+            led[7] <= esp32_osd_irq;     // OSD IRQ to ESP32
         end
     end
 
@@ -976,6 +974,14 @@ module top_pdp1_esp32
     wire        w_debug_osd_wr_en;
     wire        w_debug_spi_rx_valid;
 
+    // Internal MISO signals for tristate control
+    wire w_spi_miso_data;
+    wire w_spi_miso_oe;
+
+    // Tristate driver for MISO (GPIO12 is ESP32 strapping pin!)
+    // CRITICAL: Must be HIGH-Z when CS is inactive to allow ESP32 to boot properly
+    assign esp32_spi_miso = w_spi_miso_oe ? w_spi_miso_data : 1'bz;
+
     esp32_osd #(
         .OSD_COLOR    (3'd4),       // Blue OSD color
         .OSD_X_OFFSET (12'd384),    // Centered for 1024x768
@@ -987,7 +993,8 @@ module top_pdp1_esp32
         // ESP32 SPI interface (asynchronous to FPGA clocks)
         .spi_clk      (esp32_spi_clk),
         .spi_mosi     (esp32_spi_mosi),
-        .spi_miso     (esp32_spi_miso),
+        .spi_miso     (w_spi_miso_data),
+        .spi_miso_oe  (w_spi_miso_oe),
         .spi_cs_n     (esp32_spi_cs_n),
         .osd_irq      (esp32_osd_irq),
         .esp32_ready  (esp32_ready),

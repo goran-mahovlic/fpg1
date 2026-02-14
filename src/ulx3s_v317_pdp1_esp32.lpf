@@ -241,8 +241,10 @@ IOBUF  PORT "esp32_spi_mosi" PULLMODE=DOWN IO_TYPE=LVCMOS33;
 
 # ESP32 SPI MISO (GPIO 12 -> FPGA K1)
 # Shared with SD card d2 - must release SD before use
+# CRITICAL: GPIO12 is ESP32 strapping pin (MTDI)!
+# PULLMODE=DOWN so ESP32 can boot with VDD_SDIO=3.3V when MISO is HIGH-Z
 LOCATE COMP "esp32_spi_miso" SITE "K1";   # wifi_gpio12 / sd_d2
-IOBUF  PORT "esp32_spi_miso" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=8;
+IOBUF  PORT "esp32_spi_miso" PULLMODE=DOWN IO_TYPE=LVCMOS33 DRIVE=8;
 
 # ESP32 SPI Chip Select (GPIO 19 -> FPGA N4)
 # Direct wifi_gpio19 connection on ULX3S v3.1.7
