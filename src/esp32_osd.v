@@ -37,17 +37,11 @@ module esp32_osd #(
     input         spi_clk,
     input         spi_mosi,
     output        spi_miso,
-    output        spi_miso_oe,    // Output enable for MISO tristate
     input         spi_cs_n,
 
     // Handshake signals
     output        osd_irq,            // Interrupt to ESP32
     input         esp32_ready,        // ESP32 ready signal
-
-    // Button inputs for IRQ generation (active-high after debounce)
-    // BTN[0]=PWR (not used here), BTN[1]=UP, BTN[2]=DOWN, BTN[3]=LEFT,
-    // BTN[4]=RIGHT, BTN[5]=F1, BTN[6]=F2
-    input   [6:0] btn_state,
 
     // Video Input (from core)
     input  [23:0] video_in,
@@ -76,14 +70,16 @@ module esp32_osd #(
     output  [7:0] ioctl_dout,
     input         ioctl_wait,
 
-    // Debug outputs (active-high indicators)
-    output        debug_osd_enable,   // OSD enable register state
-    output        debug_osd_wr_en,    // OSD buffer write enable (pulse)
-    output        debug_spi_rx_valid, // SPI received valid byte (pulse)
+    // Debug outputs (active signals for LED sticky latching)
+    output        debug_osd_enable,
+    output        debug_osd_wr_en,
+    output        debug_spi_rx_valid,
 
-    // Fallback OSD enable (OR'd with SPI-controlled enable)
-    // Use this with a DIP switch to test OSD without SPI
-    input         ext_osd_enable
+    // Button state input (active-high, debounced from top module)
+    input   [6:0] btn_state,
+
+    // SPI MISO output enable for tristate control
+    output        spi_miso_oe
 );
 
     // =========================================================================
@@ -99,8 +95,6 @@ module esp32_osd #(
     localparam CMD_FILE_TX_EN     = 8'h53;
     localparam CMD_FILE_TX_DATA   = 8'h54;
     localparam CMD_FILE_INDEX     = 8'h55;
-    localparam CMD_READ_BTN       = 8'hFB;  // Read button status (clears IRQ)
-    localparam CMD_READ_IRQ       = 8'hF1;  // Read IRQ flags
 
     // =========================================================================
     // Command Decoder States
@@ -118,8 +112,6 @@ module esp32_osd #(
     localparam ST_FILE_EN    = 4'd10;
     localparam ST_FILE_DATA  = 4'd11;
     localparam ST_FILE_INDEX = 4'd12;
-    localparam ST_READ_BTN   = 4'd13;
-    localparam ST_READ_IRQ   = 4'd14;
 
     // =========================================================================
     // Internal Signals
@@ -165,10 +157,6 @@ module esp32_osd #(
     // IRQ generation
     reg         irq_pending;
 
-    // Button state tracking for IRQ (ADDED 2026-02-13)
-    reg   [6:0] r_btn_prev;           // Previous button state
-    reg   [6:0] r_btn_latched;        // Latched button state for ESP32 read
-
     // =========================================================================
     // SPI Slave Instance
     // =========================================================================
@@ -178,7 +166,7 @@ module esp32_osd #(
         .spi_clk   (spi_clk),
         .spi_mosi  (spi_mosi),
         .spi_miso  (spi_miso),
-        .spi_miso_oe (spi_miso_oe),
+        .spi_miso_oe (spi_miso_oe),  // Output enable for MISO tristate
         .spi_cs_n  (spi_cs_n),
         .rx_data   (spi_rx_data),
         .rx_valid  (spi_rx_valid),
@@ -201,23 +189,6 @@ module esp32_osd #(
     );
 
     // =========================================================================
-    // Clock Domain Crossing: osd_enable (clk_sys -> clk_video)
-    // =========================================================================
-    // osd_enable_combined = SPI-controlled OR external (fallback) enable
-    // NOTE: This must be BEFORE osd_renderer instantiation!
-    wire osd_enable_combined = osd_enable | ext_osd_enable;
-
-    reg [2:0] osd_enable_sync_reg;
-    wire      osd_enable_sync = osd_enable_sync_reg[2];
-
-    always @(posedge clk_video or negedge rst_n) begin
-        if (!rst_n)
-            osd_enable_sync_reg <= 3'b000;
-        else
-            osd_enable_sync_reg <= {osd_enable_sync_reg[1:0], osd_enable_combined};
-    end
-
-    // =========================================================================
     // OSD Renderer Instance
     // =========================================================================
     esp32_osd_renderer u_osd_renderer (
@@ -235,36 +206,16 @@ module esp32_osd #(
     );
 
     // =========================================================================
-    // Button Change Detection and IRQ Generation (ADDED 2026-02-13)
+    // Clock Domain Crossing: osd_enable (clk_sys -> clk_video)
     // =========================================================================
-    // Monitors btn_state[6:1] for changes (btn[0]=PWR is excluded).
-    // Raises irq_pending when any button changes state.
-    // IRQ is cleared when ESP32 reads via CMD_READ_BTN.
-    // =========================================================================
-    always @(posedge clk_sys or negedge rst_n) begin
-        if (!rst_n) begin
-            r_btn_prev     <= 7'b0;
-            r_btn_latched  <= 7'b0;
-            irq_pending    <= 1'b0;
-        end else begin
-            // Sample previous button state
-            r_btn_prev <= btn_state;
+    reg [2:0] osd_enable_sync_reg;
+    wire      osd_enable_sync = osd_enable_sync_reg[2];
 
-            // ALWAYS update latched state with current buttons
-            // This ensures tx_data always has fresh button state
-            r_btn_latched <= btn_state;
-
-            // Detect any button change on BTN[6:1] (exclude BTN[0]=PWR)
-            // Only raise IRQ on CHANGE, but always keep state updated
-            if (btn_state[6:1] != r_btn_prev[6:1]) begin
-                irq_pending <= 1'b1;  // Raise IRQ on change
-            end
-
-            // Clear IRQ when ESP32 reads button status
-            if (spi_rx_valid && spi_rx_data == CMD_READ_BTN && cmd_state == ST_IDLE) begin
-                irq_pending <= 1'b0;
-            end
-        end
+    always @(posedge clk_video or negedge rst_n) begin
+        if (!rst_n)
+            osd_enable_sync_reg <= 3'b000;
+        else
+            osd_enable_sync_reg <= {osd_enable_sync_reg[1:0], osd_enable};
     end
 
     // =========================================================================
@@ -276,7 +227,7 @@ module esp32_osd #(
             current_cmd    <= 8'h00;
             osd_line_num   <= 4'd0;
             osd_char_cnt   <= 5'd0;
-            osd_enable     <= 1'b0;  // Will be set by SPI command or fallback timer
+            osd_enable     <= 1'b0;
             osd_wr_addr    <= 12'd0;
             osd_wr_data    <= 8'd0;
             osd_wr_en      <= 1'b0;
@@ -290,16 +241,12 @@ module esp32_osd #(
             file_data      <= 8'd0;
             spi_tx_data    <= 8'h00;
             spi_tx_load    <= 1'b0;
-            // NOTE: irq_pending managed in button tracking always block
+            irq_pending    <= 1'b0;
         end else begin
             // Default: clear single-cycle signals
             osd_wr_en   <= 1'b0;
             file_wr     <= 1'b0;
             spi_tx_load <= 1'b0;
-
-            // ALWAYS keep tx_data updated with button state
-            // This allows pre-loading in SPI slave for faster response
-            spi_tx_data <= {1'b0, r_btn_latched[6:0]};
 
             if (spi_rx_valid) begin
                 case (cmd_state)
@@ -340,22 +287,6 @@ module esp32_osd #(
 
                             CMD_FILE_INDEX: begin
                                 cmd_state <= ST_FILE_INDEX;
-                            end
-
-                            CMD_READ_BTN: begin
-                                // ESP32 reading button status - prepare response
-                                // Returns btn_state[6:0], bit7=0
-                                spi_tx_data <= {1'b0, r_btn_latched[6:0]};
-                                spi_tx_load <= 1'b1;
-                                cmd_state   <= ST_READ_BTN;
-                            end
-
-                            CMD_READ_IRQ: begin
-                                // ESP32 reading IRQ flags
-                                // bit7 = button IRQ pending
-                                spi_tx_data <= {irq_pending, 7'b0};
-                                spi_tx_load <= 1'b1;
-                                cmd_state   <= ST_READ_IRQ;
                             end
 
                             default: begin
@@ -429,7 +360,7 @@ module esp32_osd #(
 
                     ST_FILE_EN: begin
                         file_download <= spi_rx_data[0];
-                        if (spi_rx_data[0]) begin
+                        if (spi_rx_data[0] && !file_download) begin
                             // Starting new transfer
                             file_addr <= 25'd0;
                         end
@@ -448,16 +379,6 @@ module esp32_osd #(
                     ST_FILE_INDEX: begin
                         file_index <= spi_rx_data;
                         cmd_state  <= ST_IDLE;
-                    end
-
-                    ST_READ_BTN: begin
-                        // ESP32 clocks out button data, return to IDLE
-                        cmd_state <= ST_IDLE;
-                    end
-
-                    ST_READ_IRQ: begin
-                        // ESP32 clocks out IRQ flags, return to IDLE
-                        cmd_state <= ST_IDLE;
                     end
 
                     default: begin
@@ -572,9 +493,14 @@ module esp32_osd #(
     // IRQ output
     assign osd_irq = irq_pending;
 
-    // Debug outputs
-    assign debug_osd_enable   = osd_enable;
-    assign debug_osd_wr_en    = osd_wr_en;
-    assign debug_spi_rx_valid = spi_rx_valid;
+    // =========================================================================
+    // Debug Signal Outputs
+    // =========================================================================
+    // These signals are active for 1 clock cycle when their event occurs.
+    // Top module uses sticky latching to make them visible on LEDs.
+    // =========================================================================
+    assign debug_osd_enable   = osd_enable;      // OSD is enabled
+    assign debug_osd_wr_en    = osd_wr_en;       // OSD buffer write strobe
+    assign debug_spi_rx_valid = spi_rx_valid;    // SPI byte received
 
 endmodule
