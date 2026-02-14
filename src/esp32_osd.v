@@ -429,7 +429,7 @@ module esp32_osd #(
 
                     ST_FILE_EN: begin
                         file_download <= spi_rx_data[0];
-                        if (spi_rx_data[0] && !file_download) begin
+                        if (spi_rx_data[0]) begin
                             // Starting new transfer
                             file_addr <= 25'd0;
                         end

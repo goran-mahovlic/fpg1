@@ -149,15 +149,15 @@ class ld_pdp1:
 
     def cpu_halt(self):
         """Halt CPU (status bit 1)"""
-        self.ctrl(2)
+        self.ctrl(2)  # bit 1 = 0b010 = 2
 
     def cpu_run(self):
-        """Start/continue CPU (status bit 0)"""
-        self.ctrl(0)
+        """Start CPU (status bit 0 rising edge)"""
+        self.ctrl(1)  # bit 0 = 0b001 = 1 (FIXED: was ctrl(0) which cleared all!)
 
     def cpu_reset(self):
-        """Reset CPU (status bit 0)"""
-        self.ctrl(1)
+        """Reset CPU (status bit 2 rising edge)"""
+        self.ctrl(4)  # bit 2 = 0b100 = 4 (FIXED: was ctrl(1) which was RUN!)
 
     def file_tx_enable(self, en=True):
         """Enable/disable file transfer mode"""
@@ -1337,9 +1337,10 @@ class OsdController:
         """Load selected file
 
         FIXED 2026-02-14: Mora remountati SD s slot=3 prije citanja!
+        FIXED 2026-02-14 by Jelena: Provjera da li je fajl na SD ili flash!
 
         IMPORTANT: GPIO 4 (MOSI) and GPIO 12 (MISO) are shared between SD
-        and SPI. Sekvenca:
+        and SPI. Sekvenca za SD fajlove:
         1. Deinit SPI
         2. Release SD pins
         3. Mount SD s slot=3 (SPI mode)
@@ -1348,9 +1349,17 @@ class OsdController:
         6. Release SD pins
         7. Reinit SPI
         8. Send data to FPGA
+
+        Za flash fajlove (ne pocinje s /sd/):
+        - Preskoči SD mount/unmount
+        - Citaj direktno s flash memorije
         """
         global _spi_instance
         fullpath = self.fullpath(fname)
+
+        # FIXED 2026-02-14: Provjeri da li je fajl na SD ili flash
+        is_sd_file = fullpath.startswith("/sd/") or fullpath.startswith("/sd")
+        print("load_file: path={} is_sd={}".format(fullpath, is_sd_file))
 
         # Show loading message
         self.osd_write_line(15, "Loading {}...".format(fname[:20]))
@@ -1383,94 +1392,121 @@ class OsdController:
         time.sleep_ms(100)
         print("  SPI settle delay OK")
 
-        # Step 2: Release SD pins to high-Z (Emard pattern)
-        # KRITIČNO: GPIO moraju biti high-Z prije SD mount-a!
-        print("load_file: Release pins to high-Z...")
-        for i in bytearray([2, 4, 12, 13, 14, 15]):
+        # FIXED 2026-02-14: Preskoči SD mount ako fajl nije na SD kartici!
+        # Fajlovi na flash memoriji (npr. /pdp1.bit) ne trebaju SD mount.
+        sd_ok = True  # Pretpostavi OK za flash fajlove
+        if is_sd_file:
+            # Step 2: Release SD pins to high-Z (Emard pattern)
+            # KRITIČNO: GPIO moraju biti high-Z prije SD mount-a!
+            print("load_file: Release pins to high-Z...")
+            for i in bytearray([2, 4, 12, 13, 14, 15]):
+                try:
+                    p = Pin(i, Pin.IN)
+                    a = p.value()  # Force read to release driver
+                    del p, a
+                except:
+                    pass
+
+            # 2b. Takoder oslobodi SPI pinove (MOSI=4, MISO=12, SCK=26)
+            # Ovo je DODATNI korak jer slot=3 koristi ISTE pinove!
+            for pin_num in [gpio_mosi, gpio_miso, gpio_sck]:
+                try:
+                    p = Pin(pin_num, Pin.IN)
+                    a = p.value()
+                    del p, a
+                except:
+                    pass
+            print("  Pins released")
+
+            # 2c. Force garbage collection da ukloni sve reference
+            gc.collect()
+
+            # Step 3: Mount SD with slot=3 (SPI mode)
+            print("load_file: Mount SD slot=3...")
+            from machine import SDCard
+
+            # 3a. Unmount ako je mountano
             try:
-                p = Pin(i, Pin.IN)
-                a = p.value()  # Force read to release driver
-                del p, a
+                os.umount("/sd")
+                print("  Unmount OK")
             except:
                 pass
 
-        # 2b. Takoder oslobodi SPI pinove (MOSI=4, MISO=12, SCK=26)
-        # Ovo je DODATNI korak jer slot=3 koristi ISTE pinove!
-        for pin_num in [gpio_mosi, gpio_miso, gpio_sck]:
-            try:
-                p = Pin(pin_num, Pin.IN)
-                a = p.value()
-                del p, a
-            except:
-                pass
-        print("  Pins released")
+            # 3b. DODATNI delay nakon unmount - hardware mora settle!
+            time.sleep_ms(100)
 
-        # 2c. Force garbage collection da ukloni sve reference
-        gc.collect()
+            sd_ok = False
+            for attempt in range(3):
+                try:
+                    sd = SDCard(slot=3)
+                    os.mount(sd, "/sd")
+                    print("load_file: SD mount OK")
+                    sd_ok = True
+                    break
+                except Exception as e:
+                    print("load_file: SD mount attempt {} failed: {}".format(attempt + 1, e))
+                    time.sleep_ms(100)
 
-        # Step 3: Mount SD with slot=3 (SPI mode)
-        print("load_file: Mount SD slot=3...")
-        from machine import SDCard
-
-        # 3a. Unmount ako je mountano
-        try:
-            os.umount("/sd")
-            print("  Unmount OK")
-        except:
-            pass
-
-        # 3b. DODATNI delay nakon unmount - hardware mora settle!
-        time.sleep_ms(100)
-
-        sd_ok = False
-        for attempt in range(3):
-            try:
-                sd = SDCard(slot=3)
-                os.mount(sd, "/sd")
-                print("load_file: SD mount OK")
-                sd_ok = True
-                break
-            except Exception as e:
-                print("load_file: SD mount attempt {} failed: {}".format(attempt + 1, e))
-                time.sleep_ms(100)
-
-        if not sd_ok:
-            print("load_file: SD mount FAILED!")
-            self.spi, self.cs = init_spi()
-            self._osd_enable_hw(1)
-            self.enable[0] = 1
-            self.osd_visible = True
-            self.osd_write_line(15, "SD ERROR!")
-            return
+            if not sd_ok:
+                print("load_file: SD mount FAILED!")
+                self.spi, self.cs = init_spi()
+                self._osd_enable_hw(1)
+                self.enable[0] = 1
+                self.osd_visible = True
+                self.osd_write_line(15, "SD ERROR!")
+                return
+        else:
+            print("load_file: Flash file - skipping SD mount")
 
         # Handle different file types
         if fname.endswith('.bit'):
             # FPGA bitstream - ecp5.prog() handles file reading internally
-            self._osd_enable_hw(0)
+            # FIXED 2026-02-14 by Jelena: NE ZOVI _osd_enable_hw() dok je SPI None!
+            # SPI je deinicijaliziran u Step 1, mora se reinicijalizirati PRIJE
+            # bilo kakvog SPI poziva.
             self.enable[0] = 0
+            self.osd_visible = False
+            # NOTE: Cannot call _osd_enable_hw(0) here - self.spi is None!
+            # ecp5.prog() handles FPGA programming directly.
             try:
                 import ecp5
-                # NOTE: ecp5.prog() deinits SPI, so we need to reinit after
+                # ecp5.prog() reads file and programs FPGA
                 ecp5.prog(fullpath)
                 print("Loaded bitstream: {}".format(fullpath))
-                # Reinit SPI after ecp5.prog()
-                try:
-                    os.umount("/sd")
-                except:
-                    pass
-                release_sd_pins()
+                # Cleanup and reinit SPI FIRST
+                # FIXED 2026-02-14: Samo unmountaj ako je SD file
+                if is_sd_file:
+                    try:
+                        os.umount("/sd")
+                    except:
+                        pass
+                    release_sd_pins()
                 self.spi, self.cs = init_spi()
+                # NOW disable OSD (SPI is ready)
+                self._osd_enable_hw(0)
             except Exception as e:
                 print("Bitstream load error: {}".format(e))
+                # Recovery: reinit SPI first, THEN enable OSD
+                # FIXED 2026-02-14: Samo unmountaj ako je SD file
+                if is_sd_file:
+                    try:
+                        os.umount("/sd")
+                    except:
+                        pass
+                    release_sd_pins()
+                self.spi, self.cs = init_spi()
                 self._osd_enable_hw(1)
                 self.enable[0] = 1
+                self.osd_visible = True
                 self.osd_write_line(15, "LOAD ERROR!")
                 return
         elif fname.endswith('.rim') or fname.endswith('.bin'):
             # PDP-1 tape file - read into memory, then send via SPI
             # FIXED 2026-02-14 by Jelena: Added retry + watchdog protection!
+            # FIXED 2026-02-14 by Jelena: Podrška za flash i SD fajlove!
             print("[RIM] ========================================")
             print("[RIM] Loading RIM/BIN file: {}".format(fname))
+            print("[RIM] Source: {}".format("SD card" if is_sd_file else "Flash"))
             print("[RIM] ========================================")
 
             # NOTE: Can't call _osd_enable_hw() here - SPI is None!
@@ -1478,8 +1514,8 @@ class OsdController:
             self.enable[0] = 0
             self.osd_visible = False
 
-            # Step 4: Read file into memory (SD is now mounted with slot=3)
-            print("[RIM] Step 4: Reading file from SD...")
+            # Step 4: Read file into memory
+            print("[RIM] Step 4: Reading file...")
             try:
                 with open(fullpath, "rb") as f:
                     file_data = f.read()
@@ -1487,11 +1523,13 @@ class OsdController:
             except Exception as e:
                 print("[RIM ERROR] File read failed: {}".format(e))
                 # FIRST reinit SPI, THEN enable OSD
-                try:
-                    os.umount("/sd")
-                except:
-                    pass
-                release_sd_pins()
+                # FIXED 2026-02-14: Samo unmountaj ako je SD file
+                if is_sd_file:
+                    try:
+                        os.umount("/sd")
+                    except:
+                        pass
+                    release_sd_pins()
                 self.spi, self.cs = init_spi()
                 self._osd_enable_hw(1)
                 self.enable[0] = 1
@@ -1501,17 +1539,21 @@ class OsdController:
 
             gc.collect()
 
-            # Step 5: Unmount SD
-            print("[RIM] Step 5: Unmounting SD...")
-            try:
-                os.umount("/sd")
-                print("[RIM] SD unmounted")
-            except:
-                pass
+            # Step 5: Unmount SD (samo ako je SD file)
+            # FIXED 2026-02-14: Preskoči za flash fajlove
+            if is_sd_file:
+                print("[RIM] Step 5: Unmounting SD...")
+                try:
+                    os.umount("/sd")
+                    print("[RIM] SD unmounted")
+                except:
+                    pass
 
-            # Step 6: Release SD pins to allow clean SPI access
-            print("[RIM] Step 6: Releasing SD pins...")
-            release_sd_pins()
+                # Step 6: Release SD pins to allow clean SPI access
+                print("[RIM] Step 6: Releasing SD pins...")
+                release_sd_pins()
+            else:
+                print("[RIM] Step 5-6: Skipped (flash file)")
 
             # Step 7: Reinitialize SPI (pins now free from SD)
             print("[RIM] Step 7: Reinitializing SPI...")

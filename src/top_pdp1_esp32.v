@@ -1105,7 +1105,7 @@ module top_pdp1_esp32
             r_rim_write_en   <= 1'b0;
             r_rim_word_ready <= 1'b0;
 
-            if (w_ioctl_download && w_ioctl_wr) begin
+            if (w_ioctl_download && w_ioctl_wr && (w_ioctl_index == 8'd1)) begin
                 // Only process bytes with bit 7 set (RIM marker)
                 if (w_ioctl_dout[7]) begin
                     r_rim_active <= 1'b1;

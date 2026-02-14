@@ -972,7 +972,8 @@ always @(posedge clk) begin
    // FIX BUG 11: Sync reset removed - async reset is now at beginning of always block
 
    if (`start_button)                      /* Pressing start button puts address set by test address switches in program counter */
-      PC <= test_address[11:0];
+      //PC <= test_address[11:0];
+      PC <= start_address; // Should fix starting address for different RIM files
 
    else if (~cpu_running && ~`power_switch) begin                 /* If CPU is stopped, enable reading and writing memory through console switches */
       WRITE_ENABLE <= `deposit_button;
