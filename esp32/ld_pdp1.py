@@ -52,8 +52,9 @@ CMD_READ_BTN     = const(0xFB)  # Read button status (clears IRQ)
 CMD_READ_IRQ     = const(0xF1)  # Read IRQ flags
 CMD_OSD_WRITE    = const(0x20)  # Write OSD line (0x20-0x2F for lines 0-15)
 
-# IRQ pin from FPGA (wifi_gpio25 = E9 on ULX3S v3.1.7)
-gpio_irq = const(25)
+# IRQ pin from FPGA - FIXED 2026-02-14: Use GPIO 22 for v3.1.7 (per Emard)
+# GPIO 25 was wrong, Emard's C64 osd.py uses GPIO 22 (wifi_gpio22)
+gpio_irq = const(22)
 
 # =============================================================================
 # Button Bit Masks (ACTIVE-HIGH after FPGA debounce)
@@ -75,23 +76,20 @@ BTN_F1    = const(0x20)  # btn[5]
 BTN_F2    = const(0x40)  # btn[6]
 
 # =============================================================================
-# OSD COMBO - FIXED 2026-02-13 by Emard Agent
+# OSD COMBO - VERIFIED 2026-02-14 via debug_buttons()
 # =============================================================================
-# STARO (prekomplicirano): 0x7E = UP+DOWN+LEFT+RIGHT+F1+F2 (6 tipki!)
-# NOVO (kao C64 osd.py): 0x78 = samo cursor tipke (4 tipke)
+# ULX3S button mapping (from ulx3s_input.v):
+#   BTN[1] = UP    = 0x02
+#   BTN[2] = DOWN  = 0x04
+#   BTN[3] = LEFT  = 0x08
+#   BTN[4] = RIGHT = 0x10
 #
-# C64 koristi: if (btn&0x78)==0x78:  # all cursor BTNs pressed
-# 0x78 = binary 01111000 = LEFT(0x08) + RIGHT(0x10) + DOWN(0x04<<1)?
+# Cursor combo = UP+DOWN+LEFT+RIGHT = 0x02+0x04+0x08+0x10 = 0x1E
 #
-# ZAPRAVO button mapping C64:
-#   btn[3:6] = cursor buttons (UP, DOWN, LEFT, RIGHT)
-#   0x78 = 0b01111000 = bits 3,4,5,6 = cursor keys
-#
-# Za ULX3S: UP=0x02, DOWN=0x04, LEFT=0x08, RIGHT=0x10
-# Cursor combo = 0x02 | 0x04 | 0x08 | 0x10 = 0x1E
+# NOTE: C64 uses 0x78 because C64 has different button mapping.
+# Our PDP-1 port uses ULX3S native mapping, so we use 0x1E.
 # =============================================================================
-OSD_CURSOR_COMBO = const(BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT)
-# = 0x1E (binary: 00011110) - samo 4 cursor tipke, LAKŠE za aktivirati!
+OSD_CURSOR_COMBO = const(0x1E)  # ULX3S cursor combo: UP+DOWN+LEFT+RIGHT
 
 # File type index for RIM files
 FILE_INDEX_RIM = const(1)
@@ -479,6 +477,12 @@ class OsdController:
         # Bit 1: Wait for all buttons released
         self.enable = bytearray(1)
 
+        # FIXED 2026-02-14: Polling mechanism for ISR safety
+        # ISR ne smije print() - samo postavlja flag, main loop procesira
+        self._pending_btn = 0
+        self._btn_event = False
+        self._osd_toggled = False  # Flag za OSD toggle event
+
         # Ensure CS starts inactive (HIGH)
         self.cs.on()  # HIGH = inactive
 
@@ -522,65 +526,81 @@ class OsdController:
                 pass
 
     def _irq_handler(self, pin):
-        """Handle IRQ from FPGA - button combo detection
+        """Handle IRQ from FPGA - MINIMAL ISR, BEZ PRINT!
 
-        ULX3S Button mapping (from ulx3s_input.v):
-          BTN[0] = PWR (not used, always 0 or 1)
-          BTN[1] = UP    = 0x02
-          BTN[2] = DOWN  = 0x04
-          BTN[3] = LEFT  = 0x08
-          BTN[4] = RIGHT = 0x10
-          BTN[5] = F1    = 0x20
-          BTN[6] = F2    = 0x40
+        FIXED 2026-02-14: ISR ne smije:
+        - print() - ZABRANJENO (I/O)
+        - .format() - ZABRANJENO (alocira memoriju)
+        - Kompleksne operacije - ZABRANJENO
 
-        NOTE: Button values are ACTIVE-HIGH after FPGA debounce.
-        When no buttons pressed, btn = 0x00 or 0x01 (depending on BTN[0]).
+        ISR samo cita SPI i postavlja flagove.
+        poll_events() procesira evente iz main loop-a.
         """
-        # Read IRQ flags first
+        # FAZA 1: Check IRQ flag (Emardov pristup)
         self._cs_active()
         self.spi.write_readinto(spi_read_irq, spi_result)
         self._cs_inactive()
-        btn_irq = spi_result[2]  # Response at position 2
+        btn_irq = spi_result[6]  # BYTE 6 per Emard!
 
         # Check if it's a button event (bit 7 = IRQ pending)
         if btn_irq & 0x80:
-            # Read button status (also clears IRQ)
+            # FAZA 2: Read button status (also clears IRQ)
             self._cs_active()
             self.spi.write_readinto(spi_read_btn, spi_result)
             self._cs_inactive()
-            btn = spi_result[2] & 0x7F  # Mask out bit 7, keep btn[6:0]
+            btn = spi_result[6]  # BYTE 6 per Emard!
 
-            # Debug output
+            # SAMO postavi flag - NEMA PRINT!
             if btn > 1:
-                print("BTN: 0x{:02x}".format(btn))
+                self._pending_btn = btn
+                self._btn_event = True
 
-            # State machine
-            if self.enable[0] & 2:  # Wait for all buttons released
-                if btn <= 1:  # No buttons pressed (or just BTN[0])
-                    self.enable[0] &= 1  # Clear wait bit
-            else:
-                # Check for cursor combo: UP+DOWN+LEFT+RIGHT = 0x1E
-                if (btn & 0x1E) == 0x1E:
-                    self.read_dir()  # Refresh directory (may fail if SD busy)
-                    self.enable[0] = (self.enable[0] ^ 1) | 2  # Toggle OSD, set wait
-                    self._osd_enable_hw(self.enable[0] & 1)
-                    self.osd_visible = bool(self.enable[0] & 1)
-                    print("OSD toggle: {}".format("ON" if self.osd_visible else "OFF"))
-                    if self.osd_visible:
-                        self.show_dir()
+    def poll_events(self):
+        """Procesira button evente - poziva se iz main loop-a
 
-                # Normal button handling when OSD visible
-                elif self.enable[0] == 1:  # OSD on, not waiting
-                    # Single button press detection (with BTN[0] possibly set)
-                    btn_only = btn & 0x7E  # Mask out BTN[0]
-                    if btn_only == BTN_UP:
-                        self.menu_up()
-                    elif btn_only == BTN_DOWN:
-                        self.menu_down()
-                    elif btn_only == BTN_LEFT:
-                        self.updir()
-                    elif btn_only == BTN_RIGHT:
-                        self.select_entry()
+        FIXED 2026-02-14: Sva logika koja koristi print() je OVDJE,
+        ne u ISR handleru. ISR samo postavlja flagove.
+        """
+        if not self._btn_event:
+            return
+
+        # Clear flag i uzmi button vrijednost
+        self._btn_event = False
+        btn = self._pending_btn
+
+        # Debug output - OVDJE JE SIGURNO jer smo izvan ISR-a
+        print("BTN: 0x{:02x}".format(btn))
+
+        # State machine (Emardov pristup)
+        if self.enable[0] & 2:  # Wait for all buttons released
+            if btn == 1:  # btn == 1, NE btn <= 1 per Emard!
+                self.enable[0] &= 1  # Clear wait bit
+        else:
+            # Check for cursor combo: 0x1E (ULX3S mapping: UP+DOWN+LEFT+RIGHT)
+            if (btn & 0x1E) == 0x1E:  # VERIFIED via debug_buttons()
+                self.enable[0] = (self.enable[0] ^ 1) | 2  # Toggle OSD, set wait
+                self._osd_enable_hw(self.enable[0] & 1)
+                self.osd_visible = bool(self.enable[0] & 1)
+                print("OSD toggle: {}".format("ON" if self.osd_visible else "OFF"))
+                if self.osd_visible:
+                    # Use cached directory listing (populated at startup)
+                    self.show_dir()
+
+            # Normal button handling when OSD visible
+            elif self.enable[0] == 1:  # OSD on, not waiting
+                # Single button press detection (with BTN[0] possibly set)
+                btn_only = btn & 0x7E  # Mask out BTN[0]
+                if btn_only == BTN_UP:
+                    self.menu_up()
+                elif btn_only == BTN_DOWN:
+                    self.menu_down()
+                elif btn_only == BTN_LEFT:
+                    self.updir()
+                elif btn_only == BTN_RIGHT:
+                    self.select_entry()
+                elif btn_only == BTN_F1:
+                    # F1 = refresh directory listing
+                    self.refresh_dir()
 
     # =========================================================================
     # SPI Communication - C64 style with write_readinto
@@ -589,40 +609,40 @@ class OsdController:
     def read_irq_flags(self):
         """Read IRQ flags from FPGA
 
-        FIXED 2026-02-13: Our FPGA returns response at position 2, not 6.
-        C64 FPGA adds 4 dummy bytes delay, ours responds immediately.
+        FIXED 2026-02-14: Use byte 6 per Emardov pristup!
+        C64 FPGA adds 4 dummy bytes delay, we must match this.
         """
         self._cs_active()
         self.spi.write_readinto(spi_read_irq, spi_result)
         self._cs_inactive()
-        return spi_result[2]  # Position 2, not 6!
+        return spi_result[6]  # FIXED: Position 6 per Emard!
 
     def read_buttons(self):
         """Read button status from FPGA (also clears button IRQ)
 
-        FIXED 2026-02-13: Our FPGA returns response at position 2, not 6.
+        FIXED 2026-02-14: Use byte 6 per Emardov pristup!
         """
         self._cs_active()
         self.spi.write_readinto(spi_read_btn, spi_result)
         self._cs_inactive()
-        return spi_result[2] & 0x7F  # Position 2, mask to 7 bits
+        return spi_result[6]  # FIXED: Position 6 per Emard!
 
     def _osd_enable_hw(self, en):
-        """Low-level OSD enable/disable"""
+        """Low-level OSD enable/disable - FIXED 2026-02-14 per Emardov pristup
+
+        Emard koristi 6-byte format: [0, 0xFE, 0, 0, 0, en]
+        Ovo osigurava kompatibilnost s esp32_osd.v firmware.
+        """
         self._cs_active()
-        if en:
-            self.spi.write(bytearray([CMD_OSD_ENABLE]))
-        else:
-            self.spi.write(bytearray([CMD_OSD_DISABLE]))
+        # FIXED: Use Emard's 6-byte format for OSD enable
+        self.spi.write(bytearray([0, 0xFE, 0, 0, 0, 1 if en else 0]))
         self._cs_inactive()
 
     def osd_enable(self, enable):
-        """Enable or disable OSD overlay"""
+        """Enable or disable OSD overlay - FIXED 2026-02-14 per Emardov pristup"""
         self._cs_active()
-        if enable:
-            self.spi.write(bytearray([CMD_OSD_ENABLE]))
-        else:
-            self.spi.write(bytearray([CMD_OSD_DISABLE]))
+        # FIXED: Use Emard's 6-byte format for OSD enable
+        self.spi.write(bytearray([0, 0xFE, 0, 0, 0, 1 if enable else 0]))
         self._cs_inactive()
 
     def osd_write_line(self, line, text):
@@ -707,7 +727,7 @@ class OsdController:
             self.show_dir_line(i)
 
         # Footer with instructions
-        self.osd_write_line(15, "U/D:Nav L:Back R:Select")
+        self.osd_write_line(15, "U/D:Nav L:Bk R:Sel F1:Rfsh")
 
     def show_dir_line(self, y):
         """Show single directory line - C64 style"""
@@ -744,6 +764,26 @@ class OsdController:
             line = "{}{:<26} {:>4}".format(smark[mark], entry[0][:26], sizestr[:4])
 
         self.osd_write_line(y + 1, line)
+
+    def refresh_dir(self):
+        """Refresh directory listing - ADDED 2026-02-14
+
+        Called on F1 press. Attempts to re-read SD card directory.
+        NOTE: This may fail if SD pins are held by SPI. In that case,
+        we keep the cached listing and show a message.
+        """
+        self.osd_write_line(15, "Refreshing...")
+        old_count = len(self.direntries)
+        self.read_dir()  # Will use cache if SD not accessible
+        new_count = len(self.direntries)
+
+        if new_count != old_count:
+            # Directory changed, reset cursor
+            self.fb_cursor = 0
+            self.fb_topitem = 0
+
+        self.show_dir()
+        self.osd_write_line(15, "F1:Refresh {} files".format(new_count))
 
     def move_dir_cursor(self, step):
         """Move cursor in directory - C64 style"""
@@ -978,9 +1018,49 @@ def start_osd(mount_sd=True):
 
 
 def run():
-    """Quick start: mount SD, init SPI, start OSD loop"""
+    """Quick start: mount SD, init SPI, start OSD with DIRECT POLLING
+
+    FIXED 2026-02-14: IRQ ne radi pouzdano na GPIO22.
+    Umjesto toga, koristimo direktni SPI polling kao debug_buttons().
+    Polling je pouzdan i verificiran - vidimo button evente!
+    """
     gc.collect()
-    return start_osd(mount_sd=True)
+    osd = start_osd(mount_sd=True)
+
+    # Disable IRQ - koristimo polling umjesto toga
+    osd.disable_irq()
+
+    print("OSD Running - DIRECT POLLING mode")
+    print("Combo: UP+DOWN+LEFT+RIGHT to toggle OSD")
+    print("Press Ctrl+C to exit")
+
+    last_btn = 0
+
+    try:
+        while True:
+            # Direktno citaj buttone preko SPI (kao debug_buttons)
+            osd._cs_active()
+            osd.spi.write_readinto(spi_read_btn, spi_result)
+            osd._cs_inactive()
+            btn = spi_result[6]
+
+            # Procesira samo kad se promijeni
+            if btn != last_btn and btn > 1:
+                osd._pending_btn = btn
+                osd._btn_event = True
+                osd.poll_events()
+            elif btn == 0 and last_btn != 0:
+                # Released - clear wait bit if needed
+                if osd.enable[0] & 2:
+                    osd.enable[0] &= 1
+
+            last_btn = btn
+            time.sleep_ms(50)
+
+    except KeyboardInterrupt:
+        print("\nExited by user")
+
+    return osd
 
 
 # =============================================================================
@@ -1008,11 +1088,11 @@ def debug_buttons(duration_sec=30):
         duration_sec: How long to run (default 30 seconds)
     """
     print("=" * 50)
-    print("BUTTON DEBUG MODE")
+    print("BUTTON DEBUG MODE - ULX3S")
     print("=" * 50)
-    print("Buttons: UP=0x02 DOWN=0x04 LEFT=0x08 RIGHT=0x10")
-    print("         F1=0x20  F2=0x40")
-    print("OSD Combo: UP+DOWN+LEFT+RIGHT = 0x1E")
+    print("Reading byte 6 (per Emard)")
+    print("OSD Combo: (btn & 0x1E) == 0x1E (ULX3S mapping)")
+    print("Wait for release: btn == 1")
     print("Press Ctrl+C to exit")
     print("=" * 50)
 
@@ -1030,17 +1110,17 @@ def debug_buttons(duration_sec=30):
 
     try:
         while time.ticks_diff(time.ticks_ms(), start) < duration_sec * 1000:
-            # Read IRQ flags
+            # FAZA 1: Read IRQ flags (Emardov pristup)
             cs.off()
             spi.write_readinto(spi_read_irq, spi_result)
             cs.on()
-            irq_flags = spi_result[2]  # Position 2, not 6!
+            irq_flags = spi_result[6]  # FIXED: Byte 6 per Emard!
 
-            # Read button status (also clears IRQ)
+            # FAZA 2: Read button status (also clears IRQ)
             cs.off()
             spi.write_readinto(spi_read_btn, spi_result)
             cs.on()
-            btn = spi_result[2] & 0x7F  # Position 2, not 6!
+            btn = spi_result[6]  # FIXED: Byte 6 per Emard!
 
             # Only print when something changes or IRQ detected
             if btn != last_btn or (irq_flags & 0x80):
@@ -1054,7 +1134,7 @@ def debug_buttons(duration_sec=30):
 
                 if parts:
                     msg = "+".join(parts)
-                    # Check for OSD combo
+                    # Check for OSD combo (ULX3S mapping: 0x1E)
                     if (btn & 0x1E) == 0x1E:
                         msg += "  <<< OSD COMBO!"
                     print("BTN: 0x{:02X} = {}  IRQ:0x{:02X}".format(btn, msg, irq_flags))
@@ -1111,26 +1191,25 @@ def spi_diag():
 
     time.sleep_ms(500)
 
-    # Test 3: Read IRQ flags
-    # FIXED 2026-02-13: Our FPGA returns response at position 2
-    print("\n3. Reading IRQ flags (0xF1)...")
+    # Test 3: Read IRQ flags (Emardov pristup: byte 6)
+    print("\n3. Reading IRQ flags (0xF1) - Emardov pristup...")
     spi_read = bytearray([1, 0xF1, 0, 0, 0, 0, 0])
     spi_result = bytearray(7)
     cs.off()
     spi.write_readinto(spi_read, spi_result)
     cs.on()
-    irq_val = spi_result[2]  # Response at position 2
-    print("   Response: {} -> IRQ flags: 0x{:02X}".format(
+    irq_val = spi_result[6]  # FIXED: Byte 6 per Emard!
+    print("   Response: {} -> IRQ flags (byte 6): 0x{:02X}".format(
         [hex(b) for b in spi_result], irq_val))
 
-    # Test 4: Read buttons
-    print("\n4. Reading buttons (0xFB)...")
+    # Test 4: Read buttons (Emardov pristup: byte 6)
+    print("\n4. Reading buttons (0xFB) - Emardov pristup...")
     spi_read = bytearray([1, 0xFB, 0, 0, 0, 0, 0])
     cs.off()
     spi.write_readinto(spi_read, spi_result)
     cs.on()
-    btn_val = spi_result[2]  # Response at position 2
-    print("   Response: {} -> Buttons: 0x{:02X}".format(
+    btn_val = spi_result[6]  # FIXED: Byte 6 per Emard!
+    print("   Response: {} -> Buttons (byte 6): 0x{:02X}".format(
         [hex(b) for b in spi_result], btn_val))
 
     # Test 5: OSD disable
