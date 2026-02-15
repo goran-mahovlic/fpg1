@@ -672,12 +672,12 @@ module top_pdp1_esp32
     // When loader is writing, it takes priority over CPU
 `ifdef ESP32_OSD
     // With ESP32 OSD: RIM loader has highest priority, then serial loader, then CPU
-    wire [11:0] w_ram_addr = r_rim_write_en ? r_rim_write_addr :
-                             w_loader_we    ? w_loader_addr    : w_cpu_mem_addr;
-    wire [17:0] w_ram_data = r_rim_write_en ? r_rim_write_data :
-                             w_loader_we    ? w_loader_data    : w_cpu_mem_data_out;
-    wire        w_ram_we   = r_rim_write_en ? 1'b1 :
-                             w_loader_we    ? 1'b1             : w_cpu_mem_we;
+    // RAM MUX: HEX > RIM > CPU priority
+    wire [11:0] w_ram_addr = r_hex_write_en ? r_hex_addr :
+                            r_rim_write_en ? r_rim_write_addr : w_cpu_mem_addr;
+    wire [17:0] w_ram_data = r_hex_write_en ? r_hex_data :
+                            r_rim_write_en ? r_rim_write_data : w_cpu_mem_data_out;
+    wire        w_ram_we   = r_hex_write_en | r_rim_write_en | w_cpu_mem_we;
 `else
     wire [11:0] w_ram_addr = w_loader_we ? w_loader_addr : w_cpu_mem_addr;
     wire [17:0] w_ram_data = w_loader_we ? w_loader_data : w_cpu_mem_data_out;
@@ -1075,6 +1075,44 @@ module top_pdp1_esp32
     // DIO instruction: Writes data to specified address
     // JMP instruction: Sets start address and ends loading
     // -------------------------------------------------------------------------
+
+    // HEX loader - simpler than RIM, direct addr+data
+    localparam [7:0] FILE_INDEX_HEX = 8'd2;
+
+    reg [2:0]  r_hex_byte_cnt;
+    reg [11:0] r_hex_addr;
+    reg [17:0] r_hex_data;
+    reg        r_hex_write_en;
+
+    always @(posedge clk_cpu or negedge rst_cpu_n) begin
+        if (!rst_cpu_n) begin
+            r_hex_byte_cnt <= 3'b0;
+            r_hex_addr     <= 12'b0;
+            r_hex_data     <= 18'b0;
+            r_hex_write_en <= 1'b0;
+        end else begin
+            r_hex_write_en <= 1'b0;
+
+            if (w_ioctl_download && w_ioctl_wr && w_ioctl_index == FILE_INDEX_HEX) begin
+                case (r_hex_byte_cnt)
+                    3'd0: r_hex_addr[11:8] <= w_ioctl_dout[3:0];
+                    3'd1: r_hex_addr[7:0]  <= w_ioctl_dout;
+                    3'd2: r_hex_data[17:16] <= w_ioctl_dout[1:0];
+                    3'd3: r_hex_data[15:8]  <= w_ioctl_dout;
+                    3'd4: begin
+                        r_hex_data[7:0]  <= w_ioctl_dout;
+                        r_hex_write_en   <= 1'b1;
+                    end
+                endcase
+                r_hex_byte_cnt <= (r_hex_byte_cnt == 3'd4) ? 3'd0 : r_hex_byte_cnt + 1'b1;
+            end
+
+            if (!w_ioctl_download) begin
+                r_hex_byte_cnt <= 3'b0;
+            end
+        end
+    end
+
 
     // RIM opcodes (octal)
     localparam [5:0] RIM_DIO_OPCODE = 6'o32;  // Deposit I/O

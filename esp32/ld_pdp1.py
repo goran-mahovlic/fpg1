@@ -102,7 +102,7 @@ OSD_CURSOR_COMBO = const(0x78)  # Cursor combo: UP+DOWN+LEFT+RIGHT
 
 # File type index for RIM files
 FILE_INDEX_RIM = const(1)
-
+FILE_INDEX_HEX = const(2)
 
 def init_spi():
     """Initialize SPI and CS pin with correct settings
@@ -235,6 +235,46 @@ class ld_pdp1:
             print("Done. Sent {} bytes.".format(total_sent))
 
         gc.collect()
+        return True
+
+    def load_hex(self, filename, start_addr=0o4, verbose=True):
+        """Load HEX file to PDP-1 RAM directly (no bootstrap needed)"""
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+
+        if verbose:
+            #print(f"[HEX] Loading {len(lines)} words from {filename}")
+            print("Loading {} ({} bytes)".format(filename, filesize))
+        self.cpu_halt()
+        time.sleep_ms(50)
+
+        self.file_index(FILE_INDEX_HEX)
+        self.file_tx_enable(True)
+
+        count = 0
+        for addr, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+            data = int(line, 16)
+            if data != 0:  # Skip zero entries for speed
+                # Send 5-byte packet: addr_hi, addr_lo, data_hi, data_mid, data_lo
+                packet = bytearray([
+                    (addr >> 8) & 0x0F,
+                    addr & 0xFF,
+                    (data >> 16) & 0x03,
+                    (data >> 8) & 0xFF,
+                    data & 0xFF
+                ])
+                self.file_tx_data(packet)
+                count += 1
+
+        self.file_tx_enable(False)
+
+        # Start CPU at specified address
+        time.sleep_ms(100)
+        self.cpu_run()
+
         return True
 
     def load_from_bytes(self, data, verbose=True):
@@ -977,7 +1017,7 @@ class OsdController:
                         new_entries.append([fname, 1, 0])  # directory
                     else:
                         # Filter: only show .rim, .bin, .bit files
-                        if fname.endswith('.rim') or fname.endswith('.bin') or fname.endswith('.bit'):
+                        if fname.endswith('.rim') or fname.endswith('.bin') or fname.endswith('.bit') or fname.endswith('.hex'):
                             new_entries.append([fname, 0, stat[6]])  # file
                 except:
                     pass
@@ -1121,7 +1161,7 @@ class OsdController:
                         new_entries.append([fname, 1, 0])  # directory
                     else:
                         # Filter: only show .rim, .bin, .bit files
-                        if fname.endswith('.rim') or fname.endswith('.bin') or fname.endswith('.bit'):
+                        if fname.endswith('.rim') or fname.endswith('.bin') or fname.endswith('.bit') or fname.endswith('.hex'):
                             new_entries.append([fname, 0, stat[6]])  # file
                 except Exception as e:
                     print("    stat error {}: {}".format(fname, e))
@@ -1585,6 +1625,109 @@ class OsdController:
                 print("[RIM] SUCCESS: {}".format(fullpath))
                 print("[RIM] ========================================")
 
+        elif fname.endswith('.hex'):                                 
+            # HEX file - load directly without RIM bootstrap            
+            # ADDED 2026-02-15: Direct HEX loading support!             
+            print("[HEX] ========================================")          
+            print("[HEX] Loading HEX file: {}".format(fname))
+            print("[HEX] Source: {}".format("SD card" if is_sd_file else "Flash"))
+            print("[HEX] ========================================")
+
+            self.enable[0] = 0
+            self.osd_visible = False
+
+            # Step 4: Read file into memory
+            print("[HEX] Step 4: Reading file...")
+            try:
+                with open(fullpath, "r") as f:
+                    hex_lines = f.readlines()
+                print("[HEX] File read OK: {} lines".format(len(hex_lines)))
+            except Exception as e:
+                print("[HEX ERROR] File read failed: {}".format(e))
+                if is_sd_file:
+                    try:
+                        os.umount("/sd")
+                    except:
+                        pass
+                    release_sd_pins()
+                self.spi, self.cs = init_spi()
+                self._osd_enable_hw(1)
+                self.enable[0] = 1
+                self.osd_visible = True
+                self.osd_write_line(15, "READ FAILED!")
+                return
+
+            gc.collect()
+
+            # Step 5-6: Unmount SD and release pins
+            if is_sd_file:
+                print("[HEX] Step 5: Unmounting SD...")
+                try:
+                    os.umount("/sd")
+                except:
+                    pass
+                print("[HEX] Step 6: Releasing SD pins...")
+                release_sd_pins()
+
+            # Step 7: Reinitialize SPI
+            print("[HEX] Step 7: Reinitializing SPI...")
+            self.spi, self.cs = init_spi()
+
+            # Disable OSD
+            self._osd_enable_hw(0)
+
+            # Step 8: Convert HEX to synthetic RIM
+            print("[HEX] Step 8: Converting to RIM...")
+            DIO_OPCODE = 26
+            JMP_OPCODE = 48
+            START_ADDR = 0o100
+
+            rim_data = bytearray()
+            addr = START_ADDR
+            word_count = 0
+
+            for line in hex_lines:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                try:
+                    data = int(line, 16) & 0x3FFFF
+                except ValueError:
+                    continue
+                rim_data.extend([
+                    0x80 | DIO_OPCODE,
+                    0x80 | ((addr >> 6) & 0x3F),
+                    0x80 | (addr & 0x3F),
+                    0x80 | ((data >> 12) & 0x3F),
+                    0x80 | ((data >> 6) & 0x3F),
+                    0x80 | (data & 0x3F)
+                ])
+                addr = (addr + 1) & 0xFFF
+                word_count += 1
+
+            # Add JMP
+            rim_data.extend([
+                0x80 | JMP_OPCODE,
+                0x80 | ((START_ADDR >> 6) & 0x3F),
+                0x80 | (START_ADDR & 0x3F),
+                0x80, 0x80, 0x80
+            ])
+
+            print("[HEX] {} words -> {} bytes".format(word_count, len(rim_data)))
+
+            loader = ld_pdp1(self.spi, self.cs)
+            result = loader.load_and_run_from_bytes(bytes(rim_data), verbose=True, use_watchdog=False)
+
+            gc.collect()
+
+            if not result:
+                self._osd_enable_hw(1)
+                self.enable[0] = 1
+                self.osd_visible = True
+                self.osd_write_line(15, "LOAD FAILED!")
+            else:
+                print("[HEX] SUCCESS: {} words loaded".format(word_count))
+
     def menu_up(self):
         """Move menu cursor up"""
         self.move_dir_cursor(-1)
@@ -1634,7 +1777,7 @@ def start_osd(mount_sd=True):
                 if stat[0] & 0o170000 == 0o040000:
                     direntries_cache.append([fname, 1, 0])  # directory
                 else:
-                    if fname.endswith('.rim') or fname.endswith('.bin') or fname.endswith('.bit'):
+                    if fname.endswith('.rim') or fname.endswith('.bin') or fname.endswith('.bit') or fname.endswith('.hex'):
                         direntries_cache.append([fname, 0, stat[6]])  # file
             except:
                 pass
