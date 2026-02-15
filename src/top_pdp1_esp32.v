@@ -520,7 +520,6 @@ module top_pdp1_esp32
 
     // Forward declaration of RIM start address register
     // Used by w_test_address for start button PC load
-    // Actual register logic is in RIM FSM section below
     reg [11:0] r_rim_start_addr;
 
     // CPU start pulse generation - triggered by:
@@ -583,14 +582,11 @@ module top_pdp1_esp32
 `else
     //wire [17:0] w_test_word    = 18'b0;
     wire [17:0] w_test_word = 18'b011_011_111_111_010_010;  // Binarno
-    // FIX 2026-02-14 by Emard: Use RIM start address when ESP32_OSD is active
-    // Previously hardcoded to octal 4 (PONG), now uses r_rim_start_addr from RIM loader
-    // so that cpu_run() (start button) jumps to correct address after RIM upload.
-    `ifdef ESP32_OSD
-    wire [17:0] w_test_address = {6'b0, r_rim_start_addr};  // RIM loader start address
-    `else
+`ifdef ESP32_OSD
+    wire [17:0] w_test_address = {6'b0, r_rim_start_addr};
+`else
     wire [17:0] w_test_address = 18'o4;     // Start address: octal 4 (Spacewar entry point)
-    `endif
+`endif
     //wire [17:0] w_test_address = 18'o100;   // snowflake
 `endif 
 
@@ -1037,8 +1033,8 @@ module top_pdp1_esp32
         .ioctl_wait     (w_ioctl_wait),
         // Debug outputs
         .debug_osd_enable   (w_debug_osd_enable),
-        .debug_osd_wr_en    (w_debug_osd_wr_en),
-        .debug_spi_rx_valid (w_debug_spi_rx_valid)
+        .debug_osd_wr_en    (w_debug_osd_wr_en)
+        //.debug_spi_rx_valid (w_debug_spi_rx_valid)
         // Fallback OSD enable via DIP switch SW[2]
         // When SW[2]=ON, OSD is always visible (for testing without SPI)
         //.ext_osd_enable     (sw[2])
@@ -1090,20 +1086,16 @@ module top_pdp1_esp32
     reg [11:0] r_rim_write_addr;    // DIO target address
     reg [17:0] r_rim_write_data;    // DIO data word
     reg        r_rim_write_en;      // Write strobe to RAM
-    // NOTE: r_rim_start_addr is forward-declared near line 524 for w_test_address use
+    // NOTE: r_rim_start_addr is forward declared earlier (before CPU start pulse)
     reg        r_rim_done;          // Loading complete flag
     reg        r_rim_char_avail;    // Character available for CPU tape interface
     reg [17:0] r_rim_tape_word;     // Word for CPU tape interface
+    reg        r_rim_jmp_seen;      // JMP instruction seen flag
 
     // Synchronize ioctl signals to clk_cpu domain (they come from clk_sys=clk_cpu, same domain)
     // Since clk_sys == clk_cpu in this design, no CDC needed for ioctl signals
 
-    // -------------------------------------------------------------------------
-    // Edge detection for download start - CRITICAL for byte counter reset!
-    // BUG FIX 2026-02-14 by Emard: If previous download was interrupted,
-    // r_rim_byte_cnt could have non-zero value, causing new download to be
-    // parsed with wrong offset. Must reset on download START, not just rst_n.
-    // -------------------------------------------------------------------------
+    // Edge detection for download start - reset byte counter
     reg r_ioctl_download_prev;
 
     always @(posedge clk_cpu or negedge rst_cpu_n) begin
@@ -1116,11 +1108,6 @@ module top_pdp1_esp32
     wire w_ioctl_download_start = w_ioctl_download & ~r_ioctl_download_prev;
 
     // RIM FSM
-    // FIX 2026-02-14 by Emard: Process ENTIRE file, use LAST JMP as entry point.
-    // RIM files often have multi-stage loaders with intermediate JMP instructions.
-    // Hardware must load ALL instructions, then use the final JMP address.
-    reg r_rim_jmp_seen;  // Track if any JMP was encountered
-
     always @(posedge clk_cpu or negedge rst_cpu_n) begin
         if (!rst_cpu_n) begin
             r_rim_buffer      <= 36'b0;
@@ -1132,26 +1119,22 @@ module top_pdp1_esp32
             r_rim_write_en    <= 1'b0;
             r_rim_start_addr  <= 12'o4;  // Default start address
             r_rim_done        <= 1'b0;
-            r_rim_jmp_seen    <= 1'b0;
             r_rim_char_avail  <= 1'b0;
             r_rim_tape_word   <= 18'b0;
+            r_rim_jmp_seen    <= 1'b0;
         end else begin
-            // Default: clear single-cycle strobes
-            r_rim_write_en   <= 1'b0;
-            r_rim_word_ready <= 1'b0;
-
-            // CRITICAL: Reset all state on download START
-            // BUG FIX 2026-02-14 by Emard: Without this reset, interrupted
-            // downloads leave stale counter values causing parsing errors.
+            // Reset state on download start
             if (w_ioctl_download_start) begin
                 r_rim_byte_cnt   <= 3'b0;
                 r_rim_buffer     <= 36'b0;
                 r_rim_active     <= 1'b0;
                 r_rim_jmp_seen   <= 1'b0;
-                r_rim_start_addr <= 12'o4;  // Reset to default
+                r_rim_start_addr <= 12'o4;
             end
+            // Default: clear single-cycle strobes
+            r_rim_write_en   <= 1'b0;
+            r_rim_word_ready <= 1'b0;
 
-            // Process bytes DURING download (don't stop on JMP!)
             if (w_ioctl_download && w_ioctl_wr) begin
                 // Only process bytes with bit 7 set (RIM marker)
                 if (w_ioctl_dout[7]) begin
@@ -1168,9 +1151,9 @@ module top_pdp1_esp32
                 end
             end
 
-            // Decode assembled instruction (requires all 6 bytes)
+            // Decode assembled instruction
             if (r_rim_word_ready) begin
-                // r_rim_buffer layout after 6 bytes shift:
+                // r_rim_buffer layout after shift:
                 //   [35:30] = opcode (first 6 bits received)
                 //   [29:18] = address (next 12 bits)
                 //   [17:0]  = data (last 18 bits)
@@ -1182,12 +1165,12 @@ module top_pdp1_esp32
                     r_rim_write_en   <= 1'b1;
                 end
 
-                // JMP: Remember address but DON'T stop processing!
-                // Multi-stage loaders have intermediate JMPs - we want the LAST one.
                 if (r_rim_buffer[35:30] == RIM_JMP_OPCODE) begin
+                    // JMP: Set start address but do NOT set r_rim_done here
+                    // Wait for download to end before triggering CPU start
                     r_rim_start_addr <= r_rim_buffer[29:18];
                     r_rim_jmp_seen   <= 1'b1;
-                    // NOTE: Do NOT set r_rim_done here - continue processing!
+                    // Do NOT set r_rim_done here!
                 end
 
                 // Also provide word to CPU tape interface (for compatibility)
@@ -1197,28 +1180,14 @@ module top_pdp1_esp32
                 r_rim_char_avail <= 1'b0;
             end
 
-            // Download END: Finalize loading
-            // Check for 3-byte JMP at end, or use last 6-byte JMP seen
-            if (r_ioctl_download_prev && !w_ioctl_download && r_rim_active) begin
-                // Download just ended (falling edge)
-                if (r_rim_byte_cnt == 3'd3) begin
-                    // Exactly 3 bytes pending - check for final JMP
-                    // Buffer layout: [17:12]=opcode, [11:0]=address
-                    if (r_rim_buffer[17:12] == RIM_JMP_OPCODE) begin
-                        r_rim_start_addr <= r_rim_buffer[11:0];
-                        r_rim_jmp_seen   <= 1'b1;
-                    end
-                end
-                // Mark loading complete (if we saw at least one JMP)
-                if (r_rim_jmp_seen || (r_rim_byte_cnt == 3'd3 && r_rim_buffer[17:12] == RIM_JMP_OPCODE)) begin
-                    r_rim_done     <= 1'b1;
-                    r_rim_active   <= 1'b0;
-                    r_rim_byte_cnt <= 3'b0;
-                end
+            // Download END: Set done when download finishes
+            if (r_ioctl_download_prev && !w_ioctl_download && r_rim_jmp_seen) begin
+                r_rim_done   <= 1'b1;
+                r_rim_active <= 1'b0;
             end
 
-            // Clear done flag after it's been processed
-            if (!w_ioctl_download && r_rim_done) begin
+            // Clear done flag after one cycle (it triggers w_rim_load_complete)
+            if (r_rim_done) begin
                 r_rim_done <= 1'b0;
             end
         end
@@ -1250,52 +1219,6 @@ module top_pdp1_esp32
 
     // Rising edge detection - this is assigned to the forward-declared wire
     assign w_rim_load_complete = r_rim_done & ~r_rim_done_prev;
-
-    // =========================================================================
-    // RIM DEBUG: Event counters and status for UART debug output
-    // =========================================================================
-    // These signals can be used by serial_debug module for RIM tracing.
-    // When ENABLE_UART_DEBUG is defined, serial_debug can output:
-    //   [RIM] START: Download started
-    //   [RIM] DIO A=xxxx D=xxxxxx: DIO instruction decoded
-    //   [RIM] JMP A=xxxx: JMP instruction decoded (load complete)
-    //   [CPU] RUN PC=xxxx: CPU started at new address
-    // =========================================================================
-    `ifdef ENABLE_UART_DEBUG
-        // RIM event debug signals (active for 1 cycle when event occurs)
-        wire w_rim_debug_start = w_ioctl_download_start;
-        wire w_rim_debug_dio   = r_rim_word_ready && (r_rim_buffer[35:30] == RIM_DIO_OPCODE);
-        wire w_rim_debug_jmp   = r_rim_word_ready && (r_rim_buffer[35:30] == RIM_JMP_OPCODE);
-        wire w_rim_debug_cpu_start = w_rim_load_complete;
-
-        // RIM data for debug output
-        wire [11:0] w_rim_debug_addr = r_rim_buffer[29:18];
-        wire [17:0] w_rim_debug_data = r_rim_buffer[17:0];
-        wire [11:0] w_rim_debug_start_addr = r_rim_start_addr;
-
-        // Event counter for tracking RIM progress (visible in UART frame dump)
-        reg [15:0] r_rim_dio_count;
-        reg [15:0] r_rim_byte_total;
-
-        always @(posedge clk_cpu or negedge rst_cpu_n) begin
-            if (!rst_cpu_n) begin
-                r_rim_dio_count  <= 16'b0;
-                r_rim_byte_total <= 16'b0;
-            end else begin
-                // Reset counters on new download
-                if (w_ioctl_download_start) begin
-                    r_rim_dio_count  <= 16'b0;
-                    r_rim_byte_total <= 16'b0;
-                end
-                // Count DIO instructions
-                if (w_rim_debug_dio)
-                    r_rim_dio_count <= r_rim_dio_count + 1'b1;
-                // Count bytes received
-                if (w_ioctl_download && w_ioctl_wr)
-                    r_rim_byte_total <= r_rim_byte_total + 1'b1;
-            end
-        end
-    `endif
 `endif
 
     // =========================================================================
