@@ -286,6 +286,10 @@ module esp32_osd #(
             file_wr     <= 1'b0;
             spi_tx_load <= 1'b0;
 
+            // ALWAYS keep tx_data updated with button state
+            // This allows pre-loading in SPI slave for faster response
+            spi_tx_data <= {1'b0, r_btn_latched[6:0]};
+
             if (spi_rx_valid) begin
                 case (cmd_state)
                     ST_IDLE: begin
