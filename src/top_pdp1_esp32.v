@@ -529,7 +529,7 @@ module top_pdp1_esp32
     always @(posedge clk_cpu) begin
         if (~rst_cpu_n) begin
             r_start_pulse_counter <= 8'd5;  // Initial auto-start
-        end else if (w_esp32_run_edge | w_rim_load_complete) begin
+        end else if (w_esp32_run_edge | w_rim_load_complete | w_esp32_reset_edge) begin
             r_start_pulse_counter <= 8'd5;  // Trigger start pulse
         end else if (r_start_pulse_counter > 0) begin
             r_start_pulse_counter <= r_start_pulse_counter - 1'b1;
@@ -1033,8 +1033,8 @@ module top_pdp1_esp32
         .ioctl_wait     (w_ioctl_wait),
         // Debug outputs
         .debug_osd_enable   (w_debug_osd_enable),
-        .debug_osd_wr_en    (w_debug_osd_wr_en)
-        //.debug_spi_rx_valid (w_debug_spi_rx_valid)
+        .debug_osd_wr_en    (w_debug_osd_wr_en),
+        .debug_spi_rx_valid (w_debug_spi_rx_valid)
         // Fallback OSD enable via DIP switch SW[2]
         // When SW[2]=ON, OSD is always visible (for testing without SPI)
         //.ext_osd_enable     (sw[2])
