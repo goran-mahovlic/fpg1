@@ -508,7 +508,7 @@ module top_pdp1_esp32
 
     // Edge detection for status control
     wire w_esp32_run_edge   = r_osd_status_sync[0] & ~r_osd_status_prev[0];  // Rising edge = start
-    wire w_esp32_halt       = r_osd_status_sync[1];                           // Level = halt
+    wire w_esp32_halt       = r_osd_status_sync[1] | w_ioctl_download;      // Level = halt
     wire w_esp32_reset_edge = r_osd_status_sync[2] & ~r_osd_status_prev[2];  // Rising edge = reset
 
     // NOTE: RIM load completion detection is handled later in the file
@@ -719,9 +719,11 @@ module top_pdp1_esp32
     // =========================================================================
     // PDP-1 CPU (clk_cpu domain)
     // =========================================================================
+    wire w_cpu_soft_reset = (~rst_cpu_n) | w_ioctl_download_start;
+
     pdp1_cpu u_cpu (
         .clk                    (clk_cpu),
-        .rst                    (~rst_cpu_n),       // CPU uses active-high reset
+        .rst                    (w_cpu_soft_reset),
 
         // Memory interface (clk_cpu domain)
         .MEM_ADDR               (w_cpu_mem_addr),
