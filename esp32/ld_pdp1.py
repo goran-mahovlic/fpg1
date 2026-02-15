@@ -630,7 +630,7 @@ def load(filename):
     # Step 4: Send data to FPGA with RETRY + WATCHDOG protection!
     # NOTE: If all retries fail, ESP32 will reset automatically!
     print("[RIM] Step 4: Starting FPGA transfer (with retry + watchdog)...")
-    result = ld.load_and_run_from_bytes(file_data, verbose=True, use_watchdog=True)
+    result = ld.load_and_run_from_bytes(file_data, verbose=True, use_watchdog=False)
     gc.collect()
     return result
 
@@ -1567,7 +1567,7 @@ class OsdController:
             # FIXED 2026-02-14 by Jelena: verbose=True for debug output
             print("[RIM] Step 8: Starting FPGA transfer (with retry + watchdog)...")
             loader = ld_pdp1(self.spi, self.cs)
-            result = loader.load_and_run_from_bytes(file_data, verbose=True, use_watchdog=True)
+            result = loader.load_and_run_from_bytes(file_data, verbose=True, use_watchdog=False)
 
             gc.collect()
 

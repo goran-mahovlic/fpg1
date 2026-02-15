@@ -1119,20 +1119,21 @@ module top_pdp1_esp32
             r_rim_write_addr  <= 12'b0;
             r_rim_write_data  <= 18'b0;
             r_rim_write_en    <= 1'b0;
-            r_rim_start_addr  <= 12'o4;  // Default start address
+            r_rim_start_addr  <= 12'o100;  // Snowflake default
             r_rim_done        <= 1'b0;
             r_rim_char_avail  <= 1'b0;
             r_rim_tape_word   <= 18'b0;
             r_rim_jmp_seen    <= 1'b0;
         end else begin
             // Reset state on download start
-            if (w_ioctl_download_start) begin
-                r_rim_byte_cnt   <= 3'b0;
-                r_rim_buffer     <= 36'b0;
-                r_rim_active     <= 1'b0;
-                r_rim_jmp_seen   <= 1'b0;
-                r_rim_start_addr <= 12'o4;
-            end
+        if (w_ioctl_download_start) begin
+            r_rim_byte_cnt   <= 3'b0;
+            r_rim_buffer     <= 36'b0;
+            r_rim_active     <= 1'b0;
+            r_rim_jmp_seen   <= 1'b0;
+            // NE RESETIRAJ start_addr - čekaj JMP iz RIM fajla!
+        end
+
             // Default: clear single-cycle strobes
             r_rim_write_en   <= 1'b0;
             r_rim_word_ready <= 1'b0;
