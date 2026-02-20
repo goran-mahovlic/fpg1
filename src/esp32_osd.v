@@ -151,12 +151,12 @@ module esp32_osd #(
     reg  [15:0] joystick_0_reg;
     reg  [15:0] joystick_1_reg;
 
-    // File transfer registers
-    reg         file_download;
-    reg   [7:0] file_index;
-    reg         file_wr;
-    reg  [24:0] file_addr;
-    reg   [7:0] file_data;
+    // File transfer registers (keep attribute prevents Yosys optimization)
+    (* keep *) reg         file_download;
+    (* keep *) reg   [7:0] file_index;
+    (* keep *) reg         file_wr;
+    (* keep *) reg  [24:0] file_addr;
+    (* keep *) reg   [7:0] file_data;
 
     // IRQ generation
     reg         irq_pending;

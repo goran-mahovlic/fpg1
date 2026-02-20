@@ -152,12 +152,26 @@ class ld_pdp1:
         self.ctrl(2)  # bit 1 = 0b010 = 2
 
     def cpu_run(self):
-        """Start CPU (status bit 0 rising edge)"""
-        self.ctrl(1)  # bit 0 = 0b001 = 1 (FIXED: was ctrl(0) which cleared all!)
+        """Start CPU (status bit 0 rising edge)
+
+        FIXED 2026-02-15 by Jelena: Must generate RISING EDGE on bit 0!
+        FPGA uses edge detection: w_esp32_run_edge = sync[0] & ~prev[0]
+        Previous code only set bit 0 to 1, but if it was already 1 from
+        a previous call, no edge would be detected.
+
+        New sequence:
+        1. ctrl(0) - Clear ALL bits (including RUN and HALT)
+        2. Delay for CDC propagation (2 clk_cpu cycles @ 51MHz = ~40ns, but
+           we add 10ms for safety due to SPI latency)
+        3. ctrl(1) - Set RUN bit - creates rising edge 0->1
+        """
+        self.ctrl(0)   # Clear all status bits first
+        time.sleep_ms(10)
+        self.ctrl(1)   # Set RUN bit - now guaranteed rising edge
 
     def cpu_reset(self):
-        """Reset CPU (status bit 2 rising edge)"""
-        self.ctrl(4)  # bit 2 = 0b100 = 4 (FIXED: was ctrl(1) which was RUN!)
+        """Reset CPU (status bit 2 rising edge) - keep halt active!"""
+        self.ctrl(6)  # bits 1+2 = 0b110 = 6 (halt + reset together)
 
     def file_tx_enable(self, en=True):
         """Enable/disable file transfer mode"""
@@ -237,45 +251,101 @@ class ld_pdp1:
         gc.collect()
         return True
 
-    def load_hex(self, filename, start_addr=0o4, verbose=True):
-        """Load HEX file to PDP-1 RAM directly (no bootstrap needed)"""
-        with open(filename, 'r') as f:
-            lines = f.readlines()
+    def load_hex(self, filename, start_addr=0o100, verbose=True):
+        """Load HEX file to PDP-1 by converting to RIM format
+
+        FIXED 2026-02-15 by Jelena: Complete rewrite!
+
+        Previous implementation used FILE_INDEX_HEX (2) which FPGA doesn't process.
+        New implementation converts HEX to synthetic RIM format and uses the
+        proven RIM loading path (FILE_INDEX_RIM = 1).
+
+        ROOT CAUSE of old failure:
+        1. FILE_INDEX_HEX (2) not implemented in FPGA - only RIM (1) works
+        2. Missing cpu_reset() before loading
+        3. Different packet format than what FPGA expects
+
+        Args:
+            filename: Path to HEX file (one 18-bit value per line in hex)
+            start_addr: Entry point address (default 0o100 = 64 for snowflake)
+            verbose: Print debug info
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Step 1: Read HEX file
+        try:
+            with open(filename, 'r') as f:
+                hex_lines = f.readlines()
+        except Exception as e:
+            print("[HEX ERROR] Cannot read file: {}".format(e))
+            return False
 
         if verbose:
-            #print(f"[HEX] Loading {len(lines)} words from {filename}")
-            print("Loading {} ({} bytes)".format(filename, filesize))
-        self.cpu_halt()
-        time.sleep_ms(50)
+            print("[HEX] Loading {} ({} lines)".format(filename, len(hex_lines)))
+            print("[HEX] Converting to RIM format...")
 
-        self.file_index(FILE_INDEX_HEX)
-        self.file_tx_enable(True)
+        # Step 2: Convert HEX to synthetic RIM format
+        # RIM format: 6 bytes per word
+        #   Byte 0: 0x80 | opcode (DIO=0o32=26 for data, JMP=0o60=48 for jump)
+        #   Byte 1: 0x80 | (addr >> 6)
+        #   Byte 2: 0x80 | (addr & 0x3F)
+        #   Byte 3: 0x80 | (data >> 12)
+        #   Byte 4: 0x80 | ((data >> 6) & 0x3F)
+        #   Byte 5: 0x80 | (data & 0x3F)
 
-        count = 0
-        for addr, line in enumerate(lines):
+        DIO_OPCODE = 26   # octal 32 - deposit into memory
+        JMP_OPCODE = 48   # octal 60 - jump to address
+
+        rim_data = bytearray()
+        addr = 0  # HEX file line N goes to address N
+        word_count = 0
+
+        for line in hex_lines:
             line = line.strip()
-            if not line:
+            if not line or line.startswith('#'):
+                addr += 1
                 continue
-            data = int(line, 16)
-            if data != 0:  # Skip zero entries for speed
-                # Send 5-byte packet: addr_hi, addr_lo, data_hi, data_mid, data_lo
-                packet = bytearray([
-                    (addr >> 8) & 0x0F,
-                    addr & 0xFF,
-                    (data >> 16) & 0x03,
-                    (data >> 8) & 0xFF,
-                    data & 0xFF
-                ])
-                self.file_tx_data(packet)
-                count += 1
+            try:
+                data = int(line, 16) & 0x3FFFF  # 18-bit mask
+            except ValueError:
+                addr += 1
+                continue
 
-        self.file_tx_enable(False)
+            # Skip zero values for efficiency (like original RIM files)
+            if data == 0:
+                addr += 1
+                continue
 
-        # Start CPU at specified address
-        time.sleep_ms(100)
-        self.cpu_run()
+            # Encode as RIM DIO instruction
+            rim_data.extend(bytes([
+                0x80 | DIO_OPCODE,
+                0x80 | ((addr >> 6) & 0x3F),
+                0x80 | (addr & 0x3F),
+                0x80 | ((data >> 12) & 0x3F),
+                0x80 | ((data >> 6) & 0x3F),
+                0x80 | (data & 0x3F)
+            ]))
+            addr += 1
+            word_count += 1
 
-        return True
+        # Add JMP to entry point
+        rim_data.extend(bytes([
+            0x80 | JMP_OPCODE,
+            0x80 | ((start_addr >> 6) & 0x3F),
+            0x80 | (start_addr & 0x3F),
+            0x80, 0x80, 0x80  # Data field (ignored for JMP)
+        ]))
+
+        if verbose:
+            print("[HEX] Converted {} words to {} bytes RIM".format(
+                word_count, len(rim_data)))
+            print("[HEX] Entry point: 0o{:o} ({} decimal)".format(
+                start_addr, start_addr))
+
+        # Step 3: Use proven RIM loading path
+        # This includes proper halt/reset/load/run sequence
+        return self.load_and_run_from_bytes(bytes(rim_data), verbose=verbose, use_watchdog=False)
 
     def load_from_bytes(self, data, verbose=True):
         """Load RIM paper tape data from bytes (already in memory)
@@ -316,6 +386,14 @@ class ld_pdp1:
             self.file_tx_enable(False)
             gc.collect()
             return False
+
+        # CRITICAL: Wait for FPGA to process last bytes before disabling transfer!
+        # FPGA RIM FSM needs to decode JMP instruction and set r_rim_jmp_seen
+        # before w_ioctl_download goes low, otherwise r_rim_done won't be set!
+        # 50ms should be plenty for 6 bytes @ 51 MHz (needs ~120 cycles)
+        if verbose:
+            print("[RIM] Step 2b: Waiting for FPGA to process last bytes...")
+        time.sleep_ms(50)
 
         # Disable file transfer
         self.file_tx_enable(False)
@@ -399,7 +477,7 @@ class ld_pdp1:
 
             try:
                 # Halt CPU before loading
-                print("[RIM] Halting CPU...")
+                print("[RIM] Halting CPU... ctrl(2) = 0b{:08b}".format(2))
                 self.cpu_halt()
                 time.sleep_ms(50)
 
@@ -408,7 +486,7 @@ class ld_pdp1:
                     wdt.feed()
 
                 # Reset CPU
-                print("[RIM] Resetting CPU...")
+                print("[RIM] Resetting CPU... ctrl(4) = 0b{:08b}".format(4))
                 self.cpu_reset()
                 time.sleep_ms(50)
 
@@ -428,7 +506,9 @@ class ld_pdp1:
                     time.sleep_ms(100)  # Wait for FPGA to process
 
                     # Start CPU
-                    print("[RIM] Starting CPU...")
+                    print("[RIM] Starting CPU... ctrl(0) then ctrl(1)")
+                    print("[RIM]   ctrl(0) = 0b{:08b} (clear all)".format(0))
+                    print("[RIM]   ctrl(1) = 0b{:08b} (set RUN)".format(1))
                     self.cpu_run()
                     gc.collect()
 
@@ -1677,13 +1757,20 @@ class OsdController:
             self._osd_enable_hw(0)
 
             # Step 8: Convert HEX to synthetic RIM
+            # HEX files are direct memory images: line N = address N (0-indexed)
+            # Data starts at address 0, but ENTRY POINT (JMP target) varies by program.
+            # Snowflake entry point: 0o100 (64 decimal) - verified from snowflake.rim
             print("[HEX] Step 8: Converting to RIM...")
-            DIO_OPCODE = 26
-            JMP_OPCODE = 48
-            START_ADDR = 0o100
+            DIO_OPCODE = 26   # octal 32
+            JMP_OPCODE = 48   # octal 60
+
+            # HEX file is a full memory dump starting at address 0
+            # Entry point for snowflake is 0o100 (verified from original RIM file)
+            DATA_START_ADDR = 0       # HEX line N goes to address N
+            ENTRY_POINT = 0o100       # Snowflake entry point (64 decimal)
 
             rim_data = bytearray()
-            addr = START_ADDR
+            addr = DATA_START_ADDR
             word_count = 0
 
             for line in hex_lines:
@@ -1694,26 +1781,42 @@ class OsdController:
                     data = int(line, 16) & 0x3FFFF
                 except ValueError:
                     continue
-                rim_data.extend([
+                # SKIP ZERO VALUES - original RIM only sends non-zero words!
+                # This reduces 24KB -> ~2.5KB (matches original snowflake.rim)
+                if data == 0:
+                    addr = (addr + 1) & 0xFFF
+                    continue
+                rim_data.extend(bytes([
                     0x80 | DIO_OPCODE,
                     0x80 | ((addr >> 6) & 0x3F),
                     0x80 | (addr & 0x3F),
                     0x80 | ((data >> 12) & 0x3F),
                     0x80 | ((data >> 6) & 0x3F),
                     0x80 | (data & 0x3F)
-                ])
+                ]))
                 addr = (addr + 1) & 0xFFF
                 word_count += 1
 
-            # Add JMP
-            rim_data.extend([
+            # Add JMP to entry point (0o100 = 64 decimal for snowflake)
+            rim_data.extend(bytes([
                 0x80 | JMP_OPCODE,
-                0x80 | ((START_ADDR >> 6) & 0x3F),
-                0x80 | (START_ADDR & 0x3F),
+                0x80 | ((ENTRY_POINT >> 6) & 0x3F),
+                0x80 | (ENTRY_POINT & 0x3F),
                 0x80, 0x80, 0x80
-            ])
+            ]))
 
             print("[HEX] {} words -> {} bytes".format(word_count, len(rim_data)))
+            print("[HEX] Data loaded to addresses 0-{} (0o0-0o{:o})".format(
+                word_count - 1, word_count - 1))
+
+            # DEBUG: Show first and last few bytes of synthetic RIM
+            print("[HEX] First 12 bytes (first 2 words):")
+            for i in range(min(12, len(rim_data))):
+                print("  [{:3d}] 0x{:02X} = 0b{:08b}".format(i, rim_data[i], rim_data[i]))
+            print("[HEX] Last 6 bytes (JMP instruction):")
+            for i in range(max(0, len(rim_data)-6), len(rim_data)):
+                print("  [{:3d}] 0x{:02X} = 0b{:08b}".format(i, rim_data[i], rim_data[i]))
+            print("[HEX] JMP to entry point: 0o{:o} = {} decimal".format(ENTRY_POINT, ENTRY_POINT))
 
             loader = ld_pdp1(self.spi, self.cs)
             result = loader.load_and_run_from_bytes(bytes(rim_data), verbose=True, use_watchdog=False)

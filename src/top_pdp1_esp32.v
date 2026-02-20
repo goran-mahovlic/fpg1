@@ -719,7 +719,11 @@ module top_pdp1_esp32
     // =========================================================================
     // PDP-1 CPU (clk_cpu domain)
     // =========================================================================
-    wire w_cpu_soft_reset = (~rst_cpu_n) | w_ioctl_download_start;
+    // CPU soft reset triggered by:
+    // 1. Global reset (~rst_cpu_n)
+    // 2. Download start (w_ioctl_download_start)
+    // 3. ESP32 reset command (w_esp32_reset_edge) - needed to load start_address from JMP!
+    wire w_cpu_soft_reset = (~rst_cpu_n) | w_ioctl_download_start | w_esp32_reset_edge;
 
     pdp1_cpu u_cpu (
         .clk                    (clk_cpu),
@@ -1118,25 +1122,26 @@ module top_pdp1_esp32
     localparam [5:0] RIM_DIO_OPCODE = 6'o32;  // Deposit I/O
     localparam [5:0] RIM_JMP_OPCODE = 6'o60;  // Jump
 
-    // RIM state registers
-    reg [35:0] r_rim_buffer;        // 6 bytes = 36 bits assembled
-    reg [2:0]  r_rim_byte_cnt;      // 0-5 counter
-    reg        r_rim_word_ready;    // Word assembled flag
-    reg        r_rim_active;        // RIM mode active
-    reg [11:0] r_rim_write_addr;    // DIO target address
-    reg [17:0] r_rim_write_data;    // DIO data word
-    reg        r_rim_write_en;      // Write strobe to RAM
+    // RIM state registers (keep + syn_preserve to prevent Yosys optimization)
+    (* keep, syn_preserve = 1 *) reg [35:0] r_rim_buffer;        // 6 bytes = 36 bits assembled
+    (* keep, syn_preserve = 1 *) reg [2:0]  r_rim_byte_cnt;      // 0-5 counter
+    (* keep, syn_preserve = 1 *) reg        r_rim_word_ready;    // Word assembled flag
+    (* keep, syn_preserve = 1 *) reg        r_rim_active;        // RIM mode active
+    (* keep, syn_preserve = 1 *) reg [11:0] r_rim_write_addr;    // DIO target address
+    (* keep, syn_preserve = 1 *) reg [17:0] r_rim_write_data;    // DIO data word
+    (* keep, syn_preserve = 1 *) reg        r_rim_write_en;      // Write strobe to RAM
     // NOTE: r_rim_start_addr is forward declared earlier (before CPU start pulse)
-    reg        r_rim_done;          // Loading complete flag
-    reg        r_rim_char_avail;    // Character available for CPU tape interface
-    reg [17:0] r_rim_tape_word;     // Word for CPU tape interface
-    reg        r_rim_jmp_seen;      // JMP instruction seen flag
+    (* keep, syn_preserve = 1 *) reg        r_rim_done;          // Loading complete flag
+    (* keep, syn_preserve = 1 *) reg        r_rim_char_avail;    // Character available for CPU tape interface
+    (* keep, syn_preserve = 1 *) reg [17:0] r_rim_tape_word;     // Word for CPU tape interface
+    (* keep, syn_preserve = 1 *) reg        r_rim_jmp_seen;      // JMP instruction seen flag
 
     // Synchronize ioctl signals to clk_cpu domain (they come from clk_sys=clk_cpu, same domain)
     // Since clk_sys == clk_cpu in this design, no CDC needed for ioctl signals
 
     // Edge detection for download start - reset byte counter
-    reg r_ioctl_download_prev;
+    // NOTE: Keep attribute prevents Yosys from optimizing away this critical signal
+    (* keep, syn_preserve = 1 *) reg r_ioctl_download_prev;
 
     always @(posedge clk_cpu or negedge rst_cpu_n) begin
         if (!rst_cpu_n)
@@ -1249,17 +1254,11 @@ module top_pdp1_esp32
     // to trigger CPU restart with the new start address (r_rim_start_addr).
     // w_rim_load_complete is a wire declared earlier (forward declaration).
     // -------------------------------------------------------------------------
-    reg r_rim_done_prev;
-
-    always @(posedge clk_cpu or negedge rst_cpu_n) begin
-        if (!rst_cpu_n)
-            r_rim_done_prev <= 1'b0;
-        else
-            r_rim_done_prev <= r_rim_done;
-    end
-
-    // Rising edge detection - this is assigned to the forward-declared wire
-    assign w_rim_load_complete = r_rim_done & ~r_rim_done_prev;
+    // Direct completion trigger: Generate pulse on download falling edge when JMP was seen
+    // NOTE: We bypass r_rim_done which Yosys may optimize to constant 0.
+    // This directly detects: download was active (prev=1), now inactive (current=0), JMP seen
+    // -------------------------------------------------------------------------
+    assign w_rim_load_complete = r_ioctl_download_prev & ~w_ioctl_download & r_rim_jmp_seen;
 `endif
 
     // =========================================================================
