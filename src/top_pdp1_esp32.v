@@ -174,14 +174,14 @@ module top_pdp1_esp32
     wire clk_cpu;       // 51 MHz CPU base clock (same as pixel)
     wire w_pll_locked;  // PLL lock indicator (active-high)
 
-    assign clk_cpu = clk_pixel;
+    //assign clk_cpu = clk_pixel;
 
     clk_25_shift_pixel_cpu u_pll
     (
         .clki   (clk_25mhz),
         .clko   (clk_shift),
         .clks1  (clk_pixel),
-        //.clks2  (clk_cpu),
+        .clks2  (clk_cpu),
         .locked (w_pll_locked)
     );
 

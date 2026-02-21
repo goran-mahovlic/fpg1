@@ -29,12 +29,38 @@
 `define   v_visible_offset       11'd40        /* v_front + v_sync + v_back = 3 + 6 + 31 = 40 */
 `define   v_visible_offset_end   11'd808       /* v_visible_offset + v_visible = 40 + 768 = 808 */
 
+  /* 1024 x 768 @ 60 Hz VESA standard                                            */
+  /* Pixel clock: 65 MHz, Frame rate: 65M / (1344*806) = 60.00 Hz                */
+  /*                                                                              */
+  /* Timing calculation for 1024x768@60Hz:                                       */
+  /* H total = 1024 + 24 (front) + 136 (sync) + 160 (back) = 1344                */
+  /* V total = 768 + 3 (front) + 6 (sync) + 29 (back) = 806                      */
+  /* Frame rate = 65,000,000 / (1344 * 806) = 60.00 Hz                           */
+
+  //`define   h_front_porch          11'd14
+  //`define   h_back_porch           11'd16
+
+ // `define   h_sync_pulse           11'd14
+
+ // `define   v_sync_pulse           11'd4
+ // `define   v_front_porch          11'd4
+ // `define   v_back_porch           11'd4
+
+ // `define   h_line_timing          11'd1068     /* 1024 + 24 + 136 + 160 = 1344 */
+ // `define   v_line_timing          11'd780      /* 768 + 3 + 6 + 29 = 806 */
+
+ // `define   h_visible_offset       11'd30      /* h_front + h_sync + h_back = 24 + 136 + 160 = 320 */
+ // `define   h_center_offset        11'd0        /* No centering - uses full 1024x1024 PDP-1 display */
+ // `define   h_visible_offset_end   11'd1054     /* h_visible_offset + 1024 = 320 + 1024 = 1344 */
+
+ // `define   v_visible_offset       11'd30       /* v_front + v_sync + v_back = 3 + 6 + 29 = 38 */
+ // `define   v_visible_offset_end   11'd776      /* v_visible_offset + v_visible = 38 + 768 = 806 */
+
 /* CRT vertical offset - maps PDP-1 Y coordinate to VGA scanline */
 /* PDP-1 has 1024x1024 coordinate system, VGA displays 768 lines */
 /* Offset 128: Centers sun (at buffer_Y=511) to VGA Y=383 (screen center) */
 /* Window check uses w_pdp1_y = w_current_y + offset to select visible region */
 `define   v_crt_offset           10'd128       /* Center the sun */
-
 
 /* Joystick, defined in core configuration string as 
    "J,Left,Right,Thrust,Fire,HyperSpace;", therefore:
